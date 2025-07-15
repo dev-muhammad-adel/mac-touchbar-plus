@@ -14,7 +14,7 @@ use nix::{
 };
 use serde::Deserialize;
 
-const USER_CFG_PATH: &'static str = "/etc/tiny-dfr/config.toml";
+const USER_CFG_PATH: &'static str = "/etc/tiny-dfr/config.json";
 
 pub struct Config {
     pub media_layer_default: bool,
@@ -32,6 +32,22 @@ pub struct Config {
 pub struct Theme {
     pub media_icon_theme: String,
     pub app_icon_theme: String
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct AppLayerSplitSection {
+    width: f32,
+    items: Vec<ButtonConfig>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct AppLayerSplitedLayout {
+    #[serde(rename = "AppLayerKeys1Media")]
+    app_layer_keys1_media: AppLayerSplitSection,
+    #[serde(rename = "AppLayerKeys1Modules")]
+    app_layer_keys1_modules: AppLayerSplitSection,
 }
 
 #[derive(Deserialize)]
@@ -54,7 +70,8 @@ struct ConfigProxy {
     media_layer_keys: Option<Vec<ButtonConfig>>,
     app_layer_keys1: Option<Vec<ButtonConfig>>,
     app_layer_keys2: Option<Vec<ButtonConfig>>,
-    app_layer_keys3: Option<Vec<ButtonConfig>>
+    app_layer_keys3: Option<Vec<ButtonConfig>>,
+    app_layer_splited_layout: Option<AppLayerSplitedLayout>,
 }
 
 #[derive(Deserialize)]
@@ -68,7 +85,8 @@ pub struct ButtonConfig {
     pub background: Option<bool>,
     pub format: Option<String>,
     pub locale: Option<String>,
-    pub action: Key
+    pub action: Key,
+    pub fraction: Option<f32>, // Optional per-button width fraction
 }
 
 fn load_font(name: &str) -> FontFace {
@@ -87,9 +105,9 @@ fn load_font(name: &str) -> FontFace {
 }
 
 fn load_theme() -> Theme {
-    let mut base = toml::from_str::<ConfigProxy>(&read_to_string("/usr/share/tiny-dfr/config.toml").unwrap()).unwrap();
-    let user = read_to_string("/etc/tiny-dfr/config.toml").map_err::<Error, _>(|e| e.into())
-        .and_then(|r| Ok(toml::from_str::<ConfigProxy>(&r)?));
+    let mut base = serde_json::from_str::<ConfigProxy>(&read_to_string("/usr/share/tiny-dfr/config.json").unwrap()).unwrap();
+    let user = read_to_string("/etc/tiny-dfr/config.json").map_err::<Error, _>(|e| e.into())
+        .and_then(|r| Ok(serde_json::from_str::<ConfigProxy>(&r)?));
     if let Ok(user) = user {
         base.media_icon_theme = user.media_icon_theme.or(base.media_icon_theme);
         base.app_icon_theme = user.app_icon_theme.or(base.app_icon_theme);
@@ -101,9 +119,9 @@ fn load_theme() -> Theme {
 }
 
 fn load_config(width: u16) -> (Config, Vec<FunctionLayer>) {
-    let mut base = toml::from_str::<ConfigProxy>(&read_to_string("/usr/share/tiny-dfr/config.toml").unwrap()).unwrap();
+    let mut base = serde_json::from_str::<ConfigProxy>(&read_to_string("/usr/share/tiny-dfr/config.json").unwrap()).unwrap();
     let user = read_to_string(USER_CFG_PATH).map_err::<Error, _>(|e| e.into())
-        .and_then(|r| Ok(toml::from_str::<ConfigProxy>(&r)?));
+        .and_then(|r| Ok(serde_json::from_str::<ConfigProxy>(&r)?));
     if let Ok(user) = user {
         base.media_layer_default = user.media_layer_default.or(base.media_layer_default);
         base.special_extended_mode = user.special_extended_mode.or(base.special_extended_mode);
@@ -121,10 +139,22 @@ fn load_config(width: u16) -> (Config, Vec<FunctionLayer>) {
         base.app_layer_keys2 = user.app_layer_keys2.or(base.app_layer_keys2);
         base.app_layer_keys3 = user.app_layer_keys3.or(base.app_layer_keys3);
         base.active_brightness = user.active_brightness.or(base.active_brightness);
+        base.app_layer_splited_layout = user.app_layer_splited_layout.or(base.app_layer_splited_layout);
     };
     let media_layer = FunctionLayer::with_config(base.media_layer_keys.unwrap());
     let fkey_layer = FunctionLayer::with_config(base.primary_layer_keys.unwrap());
-    let app_layer1 = FunctionLayer::with_config(base.app_layer_keys1.unwrap());
+    // --- App Layer 1: support split layout ---
+    let app_layer1 = if let Some(split) = base.app_layer_splited_layout {
+        FunctionLayer::with_split(
+            split.app_layer_keys1_modules.items,
+            split.app_layer_keys1_modules.width,
+            split.app_layer_keys1_media.items,
+            split.app_layer_keys1_media.width,
+        )
+    } else {
+        FunctionLayer::with_config(base.app_layer_keys1.unwrap())
+    };
+    // ---
     let app_layer2 = FunctionLayer::with_config(base.app_layer_keys2.unwrap());
     let app_layer3 = FunctionLayer::with_config(base.app_layer_keys3.unwrap());
     let mut layers = if base.media_layer_default.unwrap() {

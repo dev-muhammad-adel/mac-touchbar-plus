@@ -66,7 +66,8 @@ struct Button {
     changed: bool,
     active: bool,
     action: Key,
-    background: bool
+    background: bool,
+    fraction: Option<f32>,
 }
 
 fn load_image(icon_name: &str, mode: Option<String>, path: &str) -> Result<ButtonImage> {
@@ -193,7 +194,9 @@ impl Button {
                     panic!("Invalid config, a button must have either Text, Icon or be Blank")
                 }
             }
-            Button::new_icon(&icon, cfg.action, cfg.mode, &path, background)
+            let mut btn = Button::new_icon(&icon, cfg.action, cfg.mode, &path, background);
+            btn.fraction = cfg.fraction;
+            btn
         } else if let Some(mode) = cfg.mode {
             if let Some(bg) = cfg.background {
                 background = bg;
@@ -201,7 +204,9 @@ impl Button {
                 background = false;
             }
             if mode.to_lowercase() == "blank" {
-                Button::new_blank(cfg.action, background)
+                let mut btn = Button::new_blank(cfg.action, background);
+                btn.fraction = cfg.fraction;
+                btn
             } else if mode.to_lowercase() == "time" {
                 let format = match cfg.format {
                     Some(f) => f,
@@ -211,7 +216,9 @@ impl Button {
                     Some(l) => l,
                     None => "POSIX".to_string()
                 };
-                Button::new_time(cfg.action, format, locale, background)
+                let mut btn = Button::new_time(cfg.action, format, locale, background);
+                btn.fraction = cfg.fraction;
+                btn
             } else {
                 panic!("Invalid config, a button must have either Text, Icon or be Blank")
             }
@@ -225,7 +232,8 @@ impl Button {
             active: false,
             changed: false,
             image: ButtonImage::Text(text),
-            background
+            background,
+            fraction: None,
         }
     }
     fn new_icon(icon_name: &str, action: Key, mode: Option<String>, path: &str, background: bool) -> Button {
@@ -237,7 +245,8 @@ impl Button {
             action, image,
             active: false,
             changed: false,
-            background
+            background,
+            fraction: None,
         }
     }
     fn new_time(action: Key, format: String, locale: String, background: bool) -> Button {
@@ -246,7 +255,8 @@ impl Button {
             active: false,
             changed: false,
             image: ButtonImage::Time(format, locale),
-            background
+            background,
+            fraction: None,
         }
     }
     fn new_blank(action: Key, background: bool) -> Button {
@@ -255,7 +265,8 @@ impl Button {
             active: false,
             changed: false,
             image: ButtonImage::Blank,
-            background
+            background,
+            fraction: None,
         }
     }
     fn render(&self, c: &Context, height: i32, button_left_edge: f64, button_width: u64, y_shift: f64) {
@@ -331,7 +342,15 @@ impl Button {
 
 #[derive(Default)]
 pub struct FunctionLayer {
-    buttons: Vec<Button>
+    buttons: Vec<Button>,
+    split: Option<SplitLayout>,
+}
+
+pub struct SplitLayout {
+    pub modules: Vec<Button>,
+    pub modules_width: f32,
+    pub media: Vec<Button>,
+    pub media_width: f32,
 }
 
 impl FunctionLayer {
@@ -340,131 +359,448 @@ impl FunctionLayer {
             panic!("Invalid configuration, layer has 0 buttons");
         }
         FunctionLayer {
-            buttons: cfg.into_iter().map(Button::with_config).collect()
+            buttons: cfg.into_iter().map(Button::with_config).collect(),
+            split: None,
+        }
+    }
+    fn with_split(modules: Vec<ButtonConfig>, modules_width: f32, media: Vec<ButtonConfig>, media_width: f32) -> FunctionLayer {
+        FunctionLayer {
+            buttons: vec![],
+            split: Some(SplitLayout {
+                modules: modules.into_iter().map(Button::with_config).collect(),
+                modules_width,
+                media: media.into_iter().map(Button::with_config).collect(),
+                media_width,
+            }),
         }
     }
     fn draw(&mut self, config: &Config, width: i32, height: i32, surface: &Surface, pixel_shift: (f64, f64), complete_redraw: bool) -> Vec<ClipRect> {
-        let c = Context::new(&surface).unwrap();
-        let mut modified_regions = if complete_redraw {
-            vec![ClipRect::new(0, 0, height as u16, width as u16)]
-        } else {
-            Vec::new()
-        };
-        c.translate(height as f64, 0.0);
-        c.rotate((90.0f64).to_radians());
-        let pixel_shift_width = if config.enable_pixel_shift { PIXEL_SHIFT_WIDTH_PX } else { 0 };
-        let button_width = ((width - pixel_shift_width as i32) - (BUTTON_SPACING_PX * (self.buttons.len() - 1) as i32)) as f64 / self.buttons.len() as f64;
-        let radius = 8.0f64;
-        let bot = (height as f64) * 0.15;
-        let top = (height as f64) * 0.85;
-        let (pixel_shift_x, pixel_shift_y) = pixel_shift;
-
-        if complete_redraw {
-            c.set_source_rgb(0.0, 0.0, 0.0);
-            c.paint().unwrap();
-        }
-        if config.font_renderer.to_lowercase() == "cairo" {
-            c.select_font_face(&config.font_style_cairo, if config.italic_cairo {FontSlant::Italic} else {FontSlant::Normal}, if config.bold_cairo {FontWeight::Bold} else {FontWeight::Normal});
-        } else if config.font_renderer.to_lowercase() == "freetype" {
-            c.set_font_face(&config.font_face);
-        } else { panic!("Invalid font renderer chosen. Choose between \"Cairo\" and \"FreeType\""); }
-        c.set_font_size(32.0);
-        for (i, button) in self.buttons.iter_mut().enumerate() {
-            if !button.changed && !complete_redraw {
-                continue;
-            };
-
-            let left_edge = (i as f64 * (button_width + BUTTON_SPACING_PX as f64)).floor() + pixel_shift_x + (pixel_shift_width / 2) as f64;
-            let color = if button.active {
-                BUTTON_COLOR_ACTIVE
-            } else if config.show_button_outlines {
-                BUTTON_COLOR_INACTIVE
-            } else {
-                0.0
-            };
-            if !complete_redraw {
-                c.set_source_rgb(0.0, 0.0, 0.0);
-                if button.action == Key::Time {
-                    c.rectangle(left_edge, bot - radius, button_width * 3.0, top - bot + radius * 2.0);
+        match &mut self.split {
+            Some(split) => {
+                let c = Context::new(&surface).unwrap();
+                let mut modified_regions = if complete_redraw {
+                    vec![ClipRect::new(0, 0, height as u16, width as u16)]
                 } else {
-                    c.rectangle(left_edge, bot - radius, button_width, top - bot + radius * 2.0);
+                    Vec::new()
+                };
+                c.translate(height as f64, 0.0);
+                c.rotate((90.0f64).to_radians());
+                let pixel_shift_width = if config.enable_pixel_shift { PIXEL_SHIFT_WIDTH_PX } else { 0 };
+                let group_spacing = BUTTON_SPACING_PX as f64; // space between groups
+                let total_width = (width - pixel_shift_width as i32) as f32;
+                let usable_width = total_width as f64 - group_spacing;
+                let modules_width = (split.modules_width as f64 * usable_width).round();
+                let media_width = (split.media_width as f64 * usable_width).round();
+                let modules_count = split.modules.len();
+                let media_count = split.media.len();
+                let modules_spacing = if modules_count > 1 { BUTTON_SPACING_PX as f64 * (modules_count as f64 - 1.0) } else { 0.0 };
+                let media_spacing = if media_count > 1 { BUTTON_SPACING_PX as f64 * (media_count as f64 - 1.0) } else { 0.0 };
+                let modules_button_width = (modules_width - modules_spacing) / modules_count as f64;
+                let media_button_width = (media_width - media_spacing) / media_count as f64;
+                let radius = 8.0f64;
+                let bot = (height as f64) * 0.15;
+                let top = (height as f64) * 0.85;
+                let (pixel_shift_x, pixel_shift_y) = pixel_shift;
+                if complete_redraw {
+                    c.set_source_rgb(0.0, 0.0, 0.0);
+                    c.paint().unwrap();
                 }
-                c.fill().unwrap();
+                if config.font_renderer.to_lowercase() == "cairo" {
+                    c.select_font_face(&config.font_style_cairo, if config.italic_cairo {FontSlant::Italic} else {FontSlant::Normal}, if config.bold_cairo {FontWeight::Bold} else {FontWeight::Normal});
+                } else if config.font_renderer.to_lowercase() == "freetype" {
+                    c.set_font_face(&config.font_face);
+                } else { panic!("Invalid font renderer chosen. Choose between \"Cairo\" and \"FreeType\""); }
+                c.set_font_size(32.0);
+                // Draw modules section
+                match split.modules.as_mut_slice() {
+                    modules => {
+                        let modules_count = modules.len();
+                        let mut left_edge = pixel_shift_x + (pixel_shift_width / 2) as f64;
+                        for (i, button) in modules.iter_mut().enumerate() {
+                            if button.changed || complete_redraw {
+                                // DEBUG: Print draw info for modules
+                                println!("DRAW MODULES: idx={}, left_edge={}, width={}", i, left_edge, modules_button_width);
+                                let color = if button.active {
+                                    BUTTON_COLOR_ACTIVE
+                                } else if config.show_button_outlines {
+                                    BUTTON_COLOR_INACTIVE
+                                } else {
+                                    0.0
+                                };
+                                if !complete_redraw {
+                                    c.set_source_rgb(0.0, 0.0, 0.0);
+                                    c.rectangle(left_edge, bot - radius, modules_button_width, top - bot + radius * 2.0);
+                                    c.fill().unwrap();
+                                }
+                                if (button.action != Key::Unknown && button.action != Key::Time && button.action != Key::Macro1 && button.action != Key::Macro2 && button.action != Key::Macro3 && button.action != Key::Macro4) && (button.background || button.active) {
+                                    c.set_source_rgb(color, color, color);
+                                    c.new_sub_path();
+                                    let left = left_edge + radius;
+                                    let right = (left_edge + modules_button_width.ceil()) - radius;
+                                    c.arc(right, bot, radius, (-90.0f64).to_radians(), (0.0f64).to_radians());
+                                    c.arc(right, top, radius, (0.0f64).to_radians(), (90.0f64).to_radians());
+                                    c.arc(left, top, radius, (90.0f64).to_radians(), (180.0f64).to_radians());
+                                    c.arc(left, bot, radius, (180.0f64).to_radians(), (270.0f64).to_radians());
+                                    c.close_path();
+                                    c.fill().unwrap();
+                                }
+                                c.set_source_rgb(1.0, 1.0, 1.0);
+                                button.render(&c, height, left_edge, modules_button_width.ceil() as u64, pixel_shift_y);
+                                button.changed = false;
+                                if !complete_redraw {
+                                    modified_regions.push(ClipRect::new(
+                                        height as u16 - top as u16 - radius as u16,
+                                        left_edge as u16,
+                                        height as u16 - bot as u16 + radius as u16,
+                                        left_edge as u16 + modules_button_width as u16
+                                    ));
+                                }
+                            }
+                            // Always update left_edge
+                            left_edge += modules_button_width;
+                            if i != modules_count - 1 {
+                                left_edge += BUTTON_SPACING_PX as f64;
+                            }
+                        }
+                        left_edge += group_spacing; // only one group spacing between modules and media
+                        // Draw media section
+                        let media_spacing_px = 2.0f64; // 2px spacing for AppLayerKeys1Media
+                        let media_count = {
+                            match split.media.as_mut_slice() {
+                                media => media.len(),
+                            }
+                        };
+                        match split.media.as_mut_slice() {
+                            media => {
+                                let total_spacing = if media_count > 1 { media_spacing_px * (media_count as f64 - 1.0) } else { 0.0 };
+                                let button_area = media_width - total_spacing;
+                                // Weight-based layout
+                                let weights: Vec<f32> = media.iter().map(|b| b.fraction.unwrap_or(1.0)).collect();
+                                let total_weight: f32 = weights.iter().sum();
+                                let mut media_button_widths: Vec<f64> = weights.iter().map(|w| button_area * (*w as f64 / total_weight as f64)).collect();
+                                // Last button absorbs rounding error
+                                let sum_widths: f64 = media_button_widths.iter().sum();
+                                if let Some(last) = media_button_widths.last_mut() {
+                                    *last += button_area - sum_widths;
+                                }
+                                for (i, button) in media.iter_mut().enumerate() {
+                                    if button.changed || complete_redraw {
+                                        // DEBUG: Print draw info for media
+                                        println!("DRAW MEDIA: idx={}, left_edge={}, width={}", i, left_edge, media_button_widths[i]);
+                                        let color = if button.active {
+                                            BUTTON_COLOR_ACTIVE
+                                        } else if config.show_button_outlines {
+                                            BUTTON_COLOR_INACTIVE
+                                        } else {
+                                            0.0
+                                        };
+                                        // Ensure macro buttons always have background
+                                        if matches!(button.action, Key::Macro1 | Key::Macro2 | Key::Macro3 | Key::Macro4) {
+                                            button.background = true;
+                                        }
+                                        let this_button_width = media_button_widths[i];
+                                        let is_first = i == 0;
+                                        let is_last = i == media_count - 1;
+                                        let x = left_edge;
+                                        let y = bot - radius;
+                                        let w = this_button_width;
+                                        let h = top - bot + radius * 2.0;
+                                        let r = radius.min(h / 2.0);
+                                        if (button.action != Key::Unknown) && (button.background || button.active) {
+                                            c.set_source_rgb(color, color, color);
+                                            if media_count == 1 {
+                                                // زر واحد فقط: كل الزوايا دائرية
+                                                c.new_sub_path();
+                                                c.arc(x + w - r, y + r, r, (270.0f64).to_radians(), (360.0f64).to_radians());
+                                                c.arc(x + w - r, y + h - r, r, (0.0f64).to_radians(), (90.0f64).to_radians());
+                                                c.arc(x + r, y + h - r, r, (90.0f64).to_radians(), (180.0f64).to_radians());
+                                                c.arc(x + r, y + r, r, (180.0f64).to_radians(), (270.0f64).to_radians());
+                                                c.close_path();
+                                                c.fill().unwrap();
+                                            } else {
+                                                if is_first && is_last {
+                                                    // Single button in group: all corners rounded
+                                                    c.new_sub_path();
+                                                    c.arc(x + w - r, y + r, r, (270.0f64).to_radians(), (360.0f64).to_radians());
+                                                    c.arc(x + w - r, y + h - r, r, (0.0f64).to_radians(), (90.0f64).to_radians());
+                                                    c.arc(x + r, y + h - r, r, (90.0f64).to_radians(), (180.0f64).to_radians());
+                                                    c.arc(x + r, y + r, r, (180.0f64).to_radians(), (270.0f64).to_radians());
+                                                    c.close_path();
+                                                    c.fill().unwrap();
+                                                } else if is_first {
+                                                    // First button: left corners rounded
+                                                    c.new_sub_path();
+                                                    c.move_to(x + r, y);
+                                                    c.line_to(x + w, y);
+                                                    c.line_to(x + w, y + h);
+                                                    c.line_to(x + r, y + h);
+                                                    c.arc(x + r, y + h - r, r, (90.0f64).to_radians(), (180.0f64).to_radians());
+                                                    c.line_to(x, y + r);
+                                                    c.arc(x + r, y + r, r, (180.0f64).to_radians(), (270.0f64).to_radians());
+                                                    c.close_path();
+                                                    c.fill().unwrap();
+                                                } else if is_last {
+                                                    // Last button: right corners rounded
+                                                    c.new_sub_path();
+                                                    c.move_to(x, y);
+                                                    c.line_to(x + w - r, y);
+                                                    c.arc(x + w - r, y + r, r, (270.0f64).to_radians(), (360.0f64).to_radians());
+                                                    c.line_to(x + w, y + h - r);
+                                                    c.arc(x + w - r, y + h - r, r, (0.0f64).to_radians(), (90.0f64).to_radians());
+                                                    c.line_to(x, y + h);
+                                                    c.close_path();
+                                                    c.fill().unwrap();
+                                                } else {
+                                                    // Middle buttons: no rounded corners
+                                                    c.rectangle(x, y, w, h);
+                                                    c.fill().unwrap();
+                                                }
+                                            }
+                                        }
+                                        // For macro buttons, always draw background with proper rounded corners
+                                        if matches!(button.action, Key::Macro1 | Key::Macro2 | Key::Macro3 | Key::Macro4) && (button.background || button.active) {
+                                            c.set_source_rgb(color, color, color);
+                                            if is_first {
+                                                // First macro button: left corners rounded
+                                                c.new_sub_path();
+                                                c.move_to(x + r, y);
+                                                c.line_to(x + w, y);
+                                                c.line_to(x + w, y + h);
+                                                c.line_to(x + r, y + h);
+                                                c.arc(x + r, y + h - r, r, (90.0f64).to_radians(), (180.0f64).to_radians());
+                                                c.line_to(x, y + r);
+                                                c.arc(x + r, y + r, r, (180.0f64).to_radians(), (270.0f64).to_radians());
+                                                c.close_path();
+                                                c.fill().unwrap();
+                                            } else if is_last {
+                                                // Last macro button: right corners rounded
+                                                c.new_sub_path();
+                                                c.move_to(x, y);
+                                                c.line_to(x + w - r, y);
+                                                c.arc(x + w - r, y + r, r, (270.0f64).to_radians(), (360.0f64).to_radians());
+                                                c.line_to(x + w, y + h - r);
+                                                c.arc(x + w - r, y + h - r, r, (0.0f64).to_radians(), (90.0f64).to_radians());
+                                                c.line_to(x, y + h);
+                                                c.close_path();
+                                                c.fill().unwrap();
+                                            } else {
+                                                // Middle macro buttons: no rounded corners
+                                                c.rectangle(x, y, w, h);
+                                                c.fill().unwrap();
+                                            }
+                                        }
+                                        c.set_source_rgb(1.0, 1.0, 1.0);
+                                        button.render(&c, height, left_edge, this_button_width.ceil() as u64, pixel_shift_y);
+                                        button.changed = false;
+                                        if !complete_redraw {
+                                            modified_regions.push(ClipRect::new(
+                                                height as u16 - top as u16 - radius as u16,
+                                                left_edge as u16,
+                                                height as u16 - bot as u16 + radius as u16,
+                                                left_edge as u16 + this_button_width as u16
+                                            ));
+                                        }
+                                    }
+                                    // Always update left_edge
+                                    left_edge += media_button_widths[i];
+                                    if i != media_count - 1 {
+                                        left_edge += media_spacing_px;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                return modified_regions;
             }
-            if (button.action != Key::Unknown &&
-               button.action != Key::Time &&
-               button.action != Key::Macro1 &&
-               button.action != Key::Macro2 &&
-               button.action != Key::Macro3 &&
-               button.action != Key::Macro4) &&
-               ((button.background) ||
-                button.active) {
-            c.set_source_rgb(color, color, color);
-            // draw box with rounded corners
-            c.new_sub_path();
-            let left = left_edge + radius;
-            let right = (left_edge + button_width.ceil()) - radius;
-            c.arc(
-                right,
-                bot,
-                radius,
-                (-90.0f64).to_radians(),
-                (0.0f64).to_radians(),
-            );
-            c.arc(
-                right,
-                top,
-                radius,
-                (0.0f64).to_radians(),
-                (90.0f64).to_radians(),
-            );
-            c.arc(
-                left,
-                top,
-                radius,
-                (90.0f64).to_radians(),
-                (180.0f64).to_radians(),
-            );
-            c.arc(
-                left,
-                bot,
-                radius,
-                (180.0f64).to_radians(),
-                (270.0f64).to_radians(),
-            );
-            c.close_path();
-
-            c.fill().unwrap();
-            }
-            c.set_source_rgb(1.0, 1.0, 1.0);
-            if button.action == Key::Time {
-                button.render(&c, height, left_edge, button_width.ceil() as u64 * 3, pixel_shift_y);
-            } else {
-                button.render(&c, height, left_edge, button_width.ceil() as u64, pixel_shift_y);
-            }
-
-            button.changed = false;
-
-            if !complete_redraw {
-                if button.action == Key::Time {
-                    modified_regions.push(ClipRect::new(
-                        height as u16 - top as u16 - radius as u16,
-                        left_edge as u16,
-                        height as u16 - bot as u16 + radius as u16,
-                        left_edge as u16 + button_width as u16 * 3
-                    ));
+            None => {
+                let c = Context::new(&surface).unwrap();
+                let mut modified_regions = if complete_redraw {
+                    vec![ClipRect::new(0, 0, height as u16, width as u16)]
                 } else {
-                    modified_regions.push(ClipRect::new(
-                        height as u16 - top as u16 - radius as u16,
-                        left_edge as u16,
-                        height as u16 - bot as u16 + radius as u16,
-                        left_edge as u16 + button_width as u16
-                    ));
+                    Vec::new()
+                };
+                c.translate(height as f64, 0.0);
+                c.rotate((90.0f64).to_radians());
+                let pixel_shift_width = if config.enable_pixel_shift { PIXEL_SHIFT_WIDTH_PX } else { 0 };
+                let button_width = ((width - pixel_shift_width as i32) - (BUTTON_SPACING_PX * (self.buttons.len() - 1) as i32)) as f64 / self.buttons.len() as f64;
+                let radius = 8.0f64;
+                let bot = (height as f64) * 0.15;
+                let top = (height as f64) * 0.85;
+                let (pixel_shift_x, pixel_shift_y) = pixel_shift;
+                if complete_redraw {
+                    c.set_source_rgb(0.0, 0.0, 0.0);
+                    c.paint().unwrap();
                 }
+                if config.font_renderer.to_lowercase() == "cairo" {
+                    c.select_font_face(&config.font_style_cairo, if config.italic_cairo {FontSlant::Italic} else {FontSlant::Normal}, if config.bold_cairo {FontWeight::Bold} else {FontWeight::Normal});
+                } else if config.font_renderer.to_lowercase() == "freetype" {
+                    c.set_font_face(&config.font_face);
+                } else { panic!("Invalid font renderer chosen. Choose between \"Cairo\" and \"FreeType\""); }
+                c.set_font_size(32.0);
+                for (i, button) in self.buttons.iter_mut().enumerate() {
+                    if !button.changed && !complete_redraw {
+                        continue;
+                    };
+                    let left_edge = (i as f64 * (button_width + BUTTON_SPACING_PX as f64)).floor() + pixel_shift_x + (pixel_shift_width / 2) as f64;
+                    let color = if button.active {
+                        BUTTON_COLOR_ACTIVE
+                    } else if config.show_button_outlines {
+                        BUTTON_COLOR_INACTIVE
+                    } else {
+                        0.0
+                    };
+                    if !complete_redraw {
+                        c.set_source_rgb(0.0, 0.0, 0.0);
+                        if button.action == Key::Time {
+                            c.rectangle(left_edge, bot - radius, button_width * 3.0, top - bot + radius * 2.0);
+                        } else {
+                            c.rectangle(left_edge, bot - radius, button_width, top - bot + radius * 2.0);
+                        }
+                        c.fill().unwrap();
+                    }
+                    if (button.action != Key::Unknown &&
+                       button.action != Key::Time &&
+                       button.action != Key::Macro1 &&
+                       button.action != Key::Macro2 &&
+                       button.action != Key::Macro3 &&
+                       button.action != Key::Macro4) &&
+                       ((button.background) ||
+                        button.active) {
+                    c.set_source_rgb(color, color, color);
+                    // draw box with rounded corners
+                    c.new_sub_path();
+                    let left = left_edge + radius;
+                    let right = (left_edge + button_width.ceil()) - radius;
+                    c.arc(
+                        right,
+                        bot,
+                        radius,
+                        (-90.0f64).to_radians(),
+                        (0.0f64).to_radians(),
+                    );
+                    c.arc(
+                        right,
+                        top,
+                        radius,
+                        (0.0f64).to_radians(),
+                        (90.0f64).to_radians(),
+                    );
+                    c.arc(
+                        left,
+                        top,
+                        radius,
+                        (90.0f64).to_radians(),
+                        (180.0f64).to_radians(),
+                    );
+                    c.arc(
+                        left,
+                        bot,
+                        radius,
+                        (180.0f64).to_radians(),
+                        (270.0f64).to_radians(),
+                    );
+                    c.close_path();
+
+                    c.fill().unwrap();
+                    }
+                    c.set_source_rgb(1.0, 1.0, 1.0);
+                    if button.action == Key::Time {
+                        button.render(&c, height, left_edge, button_width.ceil() as u64 * 3, pixel_shift_y);
+                    } else {
+                        button.render(&c, height, left_edge, button_width.ceil() as u64, pixel_shift_y);
+                    }
+
+                    button.changed = false;
+
+                    if !complete_redraw {
+                        if button.action == Key::Time {
+                            modified_regions.push(ClipRect::new(
+                                height as u16 - top as u16 - radius as u16,
+                                left_edge as u16,
+                                height as u16 - bot as u16 + radius as u16,
+                                left_edge as u16 + button_width as u16 * 3
+                            ));
+                        } else {
+                            modified_regions.push(ClipRect::new(
+                                height as u16 - top as u16 - radius as u16,
+                                left_edge as u16,
+                                height as u16 - bot as u16 + radius as u16,
+                                left_edge as u16 + button_width as u16
+                            ));
+                        }
+                    }
+                }
+                modified_regions
             }
         }
-
-        modified_regions
+    }
+    /// Returns (group, index) where group is "modules" or "media" or "flat", and index is the button index in that group
+    pub fn hit_test(&self, x: f64, width: i32) -> Option<(&'static str, usize)> {
+        match &self.split {
+            Some(split) => {
+                let group_spacing = BUTTON_SPACING_PX as f64; // space between groups
+                let total_width = (width - group_spacing as i32) as f64;
+                let modules_width = (split.modules_width as f64 * total_width).round();
+                let media_width = (split.media_width as f64 * total_width).round();
+                let modules_count = split.modules.len();
+                let media_count = split.media.len();
+                let modules_spacing = if modules_count > 1 { BUTTON_SPACING_PX as f64 * (modules_count as f64 - 1.0) } else { 0.0 };
+                let modules_button_width = (modules_width - modules_spacing) / modules_count as f64;
+                let mut left_edge = 0.0;
+                // Check modules
+                for (i, _) in split.modules.iter().enumerate() {
+                    let right_edge = left_edge + modules_button_width;
+                    // DEBUG: Print hit_test info for modules
+                    println!("HITTEST MODULES: idx={}, left_edge={}, right_edge={}", i, left_edge, right_edge);
+                    if x >= left_edge && x < right_edge {
+                        return Some(("modules", i));
+                    }
+                    left_edge = right_edge + BUTTON_SPACING_PX as f64;
+                }
+                // Add extra spacing between groups
+                left_edge += group_spacing;
+                // Check media (with fraction/weight logic and 2px spacing)
+                let media_spacing_px = 2.0f64;
+                let total_spacing = if media_count > 1 { media_spacing_px * (media_count as f64 - 1.0) } else { 0.0 };
+                let button_area = media_width - total_spacing;
+                let weights: Vec<f32> = split.media.iter().map(|b| b.fraction.unwrap_or(1.0)).collect();
+                let total_weight: f32 = weights.iter().sum();
+                let mut media_button_widths: Vec<f64> = weights.iter().map(|w| button_area * (*w as f64 / total_weight as f64)).collect();
+                // Last button absorbs rounding error
+                let sum_widths: f64 = media_button_widths.iter().sum();
+                if let Some(last) = media_button_widths.last_mut() {
+                    *last += button_area - sum_widths;
+                }
+                for (i, _) in split.media.iter().enumerate() {
+                    let right_edge = left_edge + media_button_widths[i];
+                    // DEBUG: Print hit_test info for media
+                    println!("HITTEST MEDIA: idx={}, left_edge={}, right_edge={}", i, left_edge, right_edge);
+                    if x >= left_edge && x < right_edge {
+                        return Some(("media", i));
+                    }
+                    left_edge = right_edge;
+                    if i != media_count - 1 {
+                        left_edge += media_spacing_px;
+                    }
+                }
+                None
+            }
+            None => {
+                let count = self.buttons.len();
+                let spacing = if count > 1 { BUTTON_SPACING_PX as f64 * (count as f64 - 1.0) } else { 0.0 };
+                let button_width = (width as f64 - spacing) / count as f64;
+                let mut left_edge = 0.0;
+                for (i, _) in self.buttons.iter().enumerate() {
+                    let right_edge = left_edge + button_width;
+                    if x >= left_edge && x < right_edge {
+                        return Some(("flat", i));
+                    }
+                    left_edge = right_edge + BUTTON_SPACING_PX as f64;
+                }
+                None
+            }
+        }
     }
 }
 
@@ -621,7 +957,12 @@ fn real_main(drm: &mut DrmBackend) {
     	    }
     	}
 
-        if needs_complete_redraw || layers[active_layer].buttons.iter().any(|b| b.changed) {
+        let any_changed = if let Some(split) = &layers[active_layer].split {
+            split.modules.iter().any(|b| b.changed) || split.media.iter().any(|b| b.changed)
+        } else {
+            layers[active_layer].buttons.iter().any(|b| b.changed)
+        };
+        if needs_complete_redraw || any_changed {
             let shift = if cfg.enable_pixel_shift {
                 pixel_shift.get()
             } else {
@@ -678,41 +1019,121 @@ fn real_main(drm: &mut DrmBackend) {
                         TouchEvent::Down(dn) => {
                             let x = dn.x_transformed(width as u32);
                             let y = dn.y_transformed(height as u32);
-                            let btn = (x / (width as f64 / layers[active_layer].buttons.len() as f64)) as u32;
-                            if button_hit(layers[active_layer].buttons.len() as u32, btn, width, height, x, y) {
-                                let button = &mut layers[active_layer].buttons[btn as usize];
-                                if button.action == Key::Unknown || button.action == Key::Time {
-                                    continue;
+                            if let Some((group, idx)) = layers[active_layer].hit_test(x, width as i32) {
+                                println!("Touch hit: group={}, idx={}", group, idx);
+                                match group {
+                                    "modules" => {
+                                        if let Some(split) = &mut layers[active_layer].split {
+                                            let button = &mut split.modules[idx];
+                                            println!("Setting active for group=modules, idx={}, action={:?}", idx, button.action);
+                                            if button.action == Key::Unknown || button.action == Key::Time {
+                                                continue;
+                                            }
+                                            touches.insert(dn.seat_slot(), (active_layer, group, idx));
+                                            button.set_active(&mut uinput, true);
+                                        }
+                                    }
+                                    "media" => {
+                                        if let Some(split) = &mut layers[active_layer].split {
+                                            let button = &mut split.media[idx];
+                                            println!("Setting active for group=media, idx={}, action={:?}", idx, button.action);
+                                            if button.action == Key::Unknown || button.action == Key::Time {
+                                                continue;
+                                            }
+                                            touches.insert(dn.seat_slot(), (active_layer, group, idx));
+                                            button.set_active(&mut uinput, true);
+                                        }
+                                    }
+                                    "flat" => {
+                                        let button = &mut layers[active_layer].buttons[idx];
+                                        println!("Setting active for group=flat, idx={}, action={:?}", idx, button.action);
+                                        if button.action == Key::Unknown || button.action == Key::Time {
+                                            continue;
+                                        }
+                                        touches.insert(dn.seat_slot(), (active_layer, group, idx));
+                                        button.set_active(&mut uinput, true);
+                                    }
+                                    _ => {}
                                 }
-                                touches.insert(dn.seat_slot(), (active_layer, btn));
-                                layers[active_layer].buttons[btn as usize].set_active(&mut uinput, true);
                             }
                         },
                         TouchEvent::Motion(mtn) => {
                             if !touches.contains_key(&mtn.seat_slot()) {
                                 continue;
                             }
-
                             let x = mtn.x_transformed(width as u32);
                             let y = mtn.y_transformed(height as u32);
-                            let (layer, btn) = *touches.get(&mtn.seat_slot()).unwrap();
-                            let hit = button_hit(layers[layer].buttons.len() as u32, btn, width, height, x, y);
-                            let button = &mut layers[layer].buttons[btn as usize];
-                            if button.action == Key::Unknown || button.action == Key::Time {
-                                continue;
+                            let (layer, group, idx) = touches.get(&mtn.seat_slot()).unwrap();
+                            println!("Motion: group={}, idx={}", group, idx);
+                            match *group {
+                                "modules" => {
+                                    if let Some(split) = &mut layers[*layer].split {
+                                        let button = &mut split.modules[*idx];
+                                        println!("Motion set active for group=modules, idx={}, action={:?}", idx, button.action);
+                                        if button.action == Key::Unknown || button.action == Key::Time {
+                                            continue;
+                                        }
+                                        button.set_active(&mut uinput, true);
+                                    }
+                                }
+                                "media" => {
+                                    if let Some(split) = &mut layers[*layer].split {
+                                        let button = &mut split.media[*idx];
+                                        println!("Motion set active for group=media, idx={}, action={:?}", idx, button.action);
+                                        if button.action == Key::Unknown || button.action == Key::Time {
+                                            continue;
+                                        }
+                                        button.set_active(&mut uinput, true);
+                                    }
+                                }
+                                "flat" => {
+                                    let button = &mut layers[*layer].buttons[*idx];
+                                    println!("Motion set active for group=flat, idx={}, action={:?}", idx, button.action);
+                                    if button.action == Key::Unknown || button.action == Key::Time {
+                                        continue;
+                                    }
+                                    button.set_active(&mut uinput, true);
+                                }
+                                _ => {}
                             }
-                            button.set_active(&mut uinput, hit);
                         },
                         TouchEvent::Up(up) => {
                             if !touches.contains_key(&up.seat_slot()) {
                                 continue;
                             }
-                            let (layer, btn) = *touches.get(&up.seat_slot()).unwrap();
-                            let button = &mut layers[layer].buttons[btn as usize];
-                            if button.action == Key::Unknown || button.action == Key::Time {
-                                continue;
+                            let (layer, group, idx) = touches.get(&up.seat_slot()).unwrap();
+                            println!("Up: group={}, idx={}", group, idx);
+                            match *group {
+                                "modules" => {
+                                    if let Some(split) = &mut layers[*layer].split {
+                                        let button = &mut split.modules[*idx];
+                                        println!("Up set inactive for group=modules, idx={}, action={:?}", idx, button.action);
+                                        if button.action == Key::Unknown || button.action == Key::Time {
+                                            continue;
+                                        }
+                                        button.set_active(&mut uinput, false);
+                                    }
+                                }
+                                "media" => {
+                                    if let Some(split) = &mut layers[*layer].split {
+                                        let button = &mut split.media[*idx];
+                                        println!("Up set inactive for group=media, idx={}, action={:?}", idx, button.action);
+                                        if button.action == Key::Unknown || button.action == Key::Time {
+                                            continue;
+                                        }
+                                        button.set_active(&mut uinput, false);
+                                    }
+                                }
+                                "flat" => {
+                                    let button = &mut layers[*layer].buttons[*idx];
+                                    println!("Up set inactive for group=flat, idx={}, action={:?}", idx, button.action);
+                                    if button.action == Key::Unknown || button.action == Key::Time {
+                                        continue;
+                                    }
+                                    button.set_active(&mut uinput, false);
+                                }
+                                _ => {}
                             }
-                            button.set_active(&mut uinput, false);
                         }
                         _ => {}
                     }

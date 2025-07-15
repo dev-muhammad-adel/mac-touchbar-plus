@@ -20,8 +20,8 @@ input-linux = { version = "0.6", features = ["serde"] }
 input-linux-sys = "0.8"
 nix = { version = "0.27", features = ["event", "signal", "inotify"] }
 privdrop = "0.5.3"
-serde = { version = "1", features = ["derive"] }
-toml = "0.8"
+serde = "1.0"
+serde_json = "1.0"
 rand = "0.8"
 freetype-rs = "0.32"
 icon-loader = "0.4"

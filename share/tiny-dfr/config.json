@@ -1,0 +1,230 @@
+{
+  "MediaLayerDefault": true,
+  "SpecialExtendedMode": true,
+  "ShowButtonOutlines": true,
+  "EnablePixelShift": false,
+  "FontRenderer": "freetype",
+  "FontStyle": "sans-serif",
+  "Bold": true,
+  "Italic": false,
+  "FontTemplate": ":bold",
+  "MediaIconTheme": "tiny-dfr-icons",
+  "AppIconTheme": "hicolor",
+  "AdaptiveBrightness": true,
+  "ActiveBrightness": 128,
+  "PrimaryLayerKeys": [
+    { "Text": "F1", "Action": "F1" },
+    { "Text": "F2", "Action": "F2" },
+    { "Text": "F3", "Action": "F3" },
+    { "Text": "F4", "Action": "F4" },
+    { "Text": "F5", "Action": "F5" },
+    { "Text": "F6", "Action": "F6" },
+    { "Text": "F7", "Action": "F7" },
+    { "Text": "F8", "Action": "F8" },
+    { "Text": "F9", "Action": "F9" },
+    { "Text": "F10", "Action": "F10" },
+    { "Text": "F11", "Action": "F11" },
+    { "Text": "F12", "Action": "F12" }
+  ],
+  "MediaLayerKeys": [
+    {
+      "Icon": "display-brightness-low-symbolic",
+      "Action": "BrightnessDown",
+      "Mode": "Media"
+    },
+    {
+      "Icon": "display-brightness-high-symbolic",
+      "Action": "BrightnessUp",
+      "Mode": "Media"
+    },
+    {
+      "Icon": "microphone-disabled-symbolic",
+      "Action": "MicMute",
+      "Mode": "Media"
+    },
+    { "Icon": "system-search-symbolic", "Action": "Search", "Mode": "Media" },
+    {
+      "Icon": "keyboard-brightness-low-symbolic",
+      "Action": "IllumDown",
+      "Mode": "Media"
+    },
+    {
+      "Icon": "keyboard-brightness-high-symbolic",
+      "Action": "IllumUp",
+      "Mode": "Media"
+    },
+    {
+      "Icon": "media-seek-backward-symbolic",
+      "Action": "PreviousSong",
+      "Mode": "Media"
+    },
+    {
+      "Icon": "media-playback-start-symbolic",
+      "Action": "PlayPause",
+      "Mode": "Media"
+    },
+    {
+      "Icon": "media-seek-forward-symbolic",
+      "Action": "NextSong",
+      "Mode": "Media"
+    },
+    {
+      "Icon": "audio-volume-muted-symbolic",
+      "Action": "Mute",
+      "Mode": "Media"
+    },
+    {
+      "Icon": "audio-volume-low-symbolic",
+      "Action": "VolumeDown",
+      "Mode": "Media"
+    },
+    {
+      "Icon": "audio-volume-high-symbolic",
+      "Action": "VolumeUp",
+      "Mode": "Media"
+    }
+  ],
+  "AppLayerSplitedLayout": {
+    "AppLayerKeys1Media": {
+      "Width": 0.3,
+      "Items": [
+        {
+          "Icon": "go-previous-symbolic",
+          "Action": "Macro3",
+          "Mode": "Media",
+          "Fraction": 0.3
+        },
+        {
+          "Icon": "audio-volume-low-symbolic",
+          "Action": "VolumeDown",
+          "Mode": "Media"
+        },
+        {
+          "Icon": "audio-volume-high-symbolic",
+          "Action": "VolumeUp",
+          "Mode": "Media"
+        },
+        {
+          "Icon": "media-playback-start-symbolic",
+          "Action": "PlayPause",
+          "Mode": "Media"
+        },
+        {
+          "Icon": "system-search-symbolic",
+          "Action": "Search",
+          "Mode": "Media"
+        }
+      ]
+    },
+    "AppLayerKeys1Modules": {
+      "Width": 0.7,
+      "Items": [{ "Icon": "app1", "Action": "Prog1", "Mode": "App" }]
+    }
+  },
+
+  "AppLayerKeys2": [
+    { "Icon": "go-previous-symbolic", "Action": "Macro1", "Mode": "Media" },
+    {
+      "Icon": "web-browser-symbolic",
+      "Action": "WWW",
+      "Mode": "Media",
+      "Background": false
+    },
+    {
+      "Icon": "accessories-calculator-symbolic",
+      "Action": "Calc",
+      "Mode": "Media",
+      "Background": false
+    },
+    {
+      "Icon": "system-file-manager-symbolic",
+      "Action": "File",
+      "Mode": "Media",
+      "Background": false
+    },
+    {
+      "Icon": "view-app-grid-symbolic",
+      "Action": "AllApplications",
+      "Mode": "Media",
+      "Background": false
+    },
+    { "Action": "Time", "Mode": "Time", "Format": "24hr", "Locale": "en_US" },
+    { "Action": "Unknown", "Mode": "Blank" },
+    { "Action": "Unknown", "Mode": "Blank" },
+    {
+      "Icon": "audio-volume-low-symbolic",
+      "Action": "VolumeDown",
+      "Mode": "Media"
+    },
+    {
+      "Icon": "audio-volume-high-symbolic",
+      "Action": "VolumeUp",
+      "Mode": "Media"
+    },
+    {
+      "Icon": "media-playback-start-symbolic",
+      "Action": "PlayPause",
+      "Mode": "Media"
+    },
+    { "Icon": "system-search-symbolic", "Action": "Search", "Mode": "Media" },
+    { "Icon": "go-next-symbolic", "Action": "Macro3", "Mode": "Media" }
+  ],
+  "AppLayerKeys3": [
+    { "Icon": "go-previous-symbolic", "Action": "Macro1", "Mode": "Media" },
+    {
+      "Icon": "display-brightness-low-symbolic",
+      "Action": "BrightnessDown",
+      "Mode": "Media"
+    },
+    {
+      "Icon": "display-brightness-high-symbolic",
+      "Action": "BrightnessUp",
+      "Mode": "Media"
+    },
+    {
+      "Icon": "microphone-disabled-symbolic",
+      "Action": "MicMute",
+      "Mode": "Media"
+    },
+    {
+      "Icon": "keyboard-brightness-low-symbolic",
+      "Action": "IllumDown",
+      "Mode": "Media"
+    },
+    {
+      "Icon": "keyboard-brightness-high-symbolic",
+      "Action": "IllumUp",
+      "Mode": "Media"
+    },
+    {
+      "Icon": "media-seek-backward-symbolic",
+      "Action": "PreviousSong",
+      "Mode": "Media"
+    },
+    {
+      "Icon": "media-playback-start-symbolic",
+      "Action": "PlayPause",
+      "Mode": "Media"
+    },
+    {
+      "Icon": "media-seek-forward-symbolic",
+      "Action": "NextSong",
+      "Mode": "Media"
+    },
+    {
+      "Icon": "audio-volume-muted-symbolic",
+      "Action": "Mute",
+      "Mode": "Media"
+    },
+    {
+      "Icon": "audio-volume-low-symbolic",
+      "Action": "VolumeDown",
+      "Mode": "Media"
+    },
+    {
+      "Icon": "audio-volume-high-symbolic",
+      "Action": "VolumeUp",
+      "Mode": "Media"
+    }
+  ]
+}
