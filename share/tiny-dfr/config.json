@@ -170,7 +170,12 @@
     { "Icon": "go-next-symbolic", "Action": "Macro3", "Mode": "Media" }
   ],
   "AppLayerKeys3": [
-    { "Icon": "go-previous-symbolic", "Action": "Macro1", "Mode": "Media" },
+    {
+      "Icon": "close-symbolic",
+      "Action": "Macro1",
+      "Mode": "Media",
+      "Fraction": 0.3
+    },
     {
       "Icon": "display-brightness-low-symbolic",
       "Action": "BrightnessDown",

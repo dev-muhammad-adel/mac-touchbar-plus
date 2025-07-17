@@ -19,14 +19,20 @@ libc = "0.2"
 input-linux = { version = "0.6", features = ["serde"] }
 input-linux-sys = "0.8"
 nix = { version = "0.27", features = ["event", "signal", "inotify"] }
-privdrop = "0.5.3"
-serde = "1.0"
-serde_json = "1.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 rand = "0.8"
 freetype-rs = "0.32"
 icon-loader = "0.4"
-chrono = { version = "0.4", features = ["unstable-locales"] }
+chrono = { version = "0.4", features = ["unstable-locales", "serde"] }
 pure-rust-locales = "0.8"
+zbus = "3"
+zvariant = "4.2.0"
+zbus_macros = "4.4.0"
+tokio = { version = "1", features = ["full"] }
+futures-lite = "1"
+futures = "0.3"
+async-stream = "0.3"
 
 [build-dependencies]
 pkg-config = "0.3"

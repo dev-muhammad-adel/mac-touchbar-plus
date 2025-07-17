@@ -9,6 +9,7 @@ use std::{
     cmp::min,
     panic::{self, AssertUnwindSafe}
 };
+use std::sync::Arc;
 use cairo::{ImageSurface, Format, Context, Surface, Rectangle, FontSlant, FontWeight, Antialias};
 use rsvg::{Loader, CairoRenderer, SvgHandle};
 use drm::control::ClipRect;
@@ -29,17 +30,20 @@ use nix::{
         signal::{Signal, SigSet},
         epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags}
     }, 
-    errno::Errno
+    errno::Errno,
+    sys::eventfd::{eventfd, EfdFlags}
 };
-use privdrop::PrivDrop;
 use icon_loader::{IconFileType, IconLoader};
 use chrono::{Local, Locale, Timelike};
+use crate::services::sessionmanager::{SessionState, monitor_sessions};
+use tokio::sync::{watch, mpsc};
 
 mod backlight;
 mod display;
 mod pixel_shift;
 mod fonts;
 mod config;
+mod services;
 
 use backlight::BacklightManager;
 use display::DrmBackend;
@@ -374,7 +378,7 @@ impl FunctionLayer {
             }),
         }
     }
-    fn draw(&mut self, config: &Config, width: i32, height: i32, surface: &Surface, pixel_shift: (f64, f64), complete_redraw: bool) -> Vec<ClipRect> {
+    fn draw(&mut self, config: &Config, width: i32, height: i32, surface: &Surface, pixel_shift: (f64, f64), complete_redraw: bool, modules_only_redraw: bool, session_state: Option<&SessionState>) -> Vec<ClipRect> {
         match &mut self.split {
             Some(split) => {
                 let c = Context::new(&surface).unwrap();
@@ -404,6 +408,11 @@ impl FunctionLayer {
                 if complete_redraw {
                     c.set_source_rgb(0.0, 0.0, 0.0);
                     c.paint().unwrap();
+                } else if modules_only_redraw {
+                    // Only clear the modules area for modules-only redraw
+                    c.set_source_rgb(0.0, 0.0, 0.0);
+                    c.rectangle(pixel_shift_x + (pixel_shift_width / 2) as f64, bot - radius, modules_width, top - bot + radius * 2.0);
+                    c.fill().unwrap();
                 }
                 if config.font_renderer.to_lowercase() == "cairo" {
                     c.select_font_face(&config.font_style_cairo, if config.italic_cairo {FontSlant::Italic} else {FontSlant::Normal}, if config.bold_cairo {FontWeight::Bold} else {FontWeight::Normal});
@@ -411,60 +420,179 @@ impl FunctionLayer {
                     c.set_font_face(&config.font_face);
                 } else { panic!("Invalid font renderer chosen. Choose between \"Cairo\" and \"FreeType\""); }
                 c.set_font_size(32.0);
-                // Draw modules section
-                match split.modules.as_mut_slice() {
-                    modules => {
-                        let modules_count = modules.len();
-                        let mut left_edge = pixel_shift_x + (pixel_shift_width / 2) as f64;
-                        for (i, button) in modules.iter_mut().enumerate() {
-                            if button.changed || complete_redraw {
-                                // DEBUG: Print draw info for modules
-                                println!("DRAW MODULES: idx={}, left_edge={}, width={}", i, left_edge, modules_button_width);
-                                let color = if button.active {
-                                    BUTTON_COLOR_ACTIVE
-                                } else if config.show_button_outlines {
-                                    BUTTON_COLOR_INACTIVE
-                                } else {
-                                    0.0
-                                };
-                                if !complete_redraw {
-                                    c.set_source_rgb(0.0, 0.0, 0.0);
-                                    c.rectangle(left_edge, bot - radius, modules_button_width, top - bot + radius * 2.0);
-                                    c.fill().unwrap();
+                
+                // Use new session state
+                match session_state {
+                    Some(state) if state.session_type == "desktop-logged-graphical" => {
+                    // User is logged in - show normal modules
+                    match split.modules.as_mut_slice() {
+                        modules => {
+                            let modules_count = modules.len();
+                            let mut left_edge = pixel_shift_x + (pixel_shift_width / 2) as f64;
+                            for (i, button) in modules.iter_mut().enumerate() {
+                                if button.changed || complete_redraw {
+                                    // DEBUG: Print draw info for modules
+                                    println!("DRAW MODULES: idx={}, left_edge={}, width={}", i, left_edge, modules_button_width);
+                                    let color = if button.active {
+                                        BUTTON_COLOR_ACTIVE
+                                    } else if config.show_button_outlines {
+                                        BUTTON_COLOR_INACTIVE
+                                    } else {
+                                        0.0
+                                    };
+                                    if !complete_redraw {
+                                        c.set_source_rgb(0.0, 0.0, 0.0);
+                                        c.rectangle(left_edge, bot - radius, modules_button_width, top - bot + radius * 2.0);
+                                        c.fill().unwrap();
+                                    }
+                                    if (button.action != Key::Unknown && button.action != Key::Time && button.action != Key::Macro1 && button.action != Key::Macro2 && button.action != Key::Macro3 && button.action != Key::Macro4) && (button.background || button.active) {
+                                        c.set_source_rgb(color, color, color);
+                                        c.new_sub_path();
+                                        let left = left_edge + radius;
+                                        let right = (left_edge + modules_button_width.ceil()) - radius;
+                                        c.arc(right, bot, radius, (-90.0f64).to_radians(), (0.0f64).to_radians());
+                                        c.arc(right, top, radius, (0.0f64).to_radians(), (90.0f64).to_radians());
+                                        c.arc(left, top, radius, (90.0f64).to_radians(), (180.0f64).to_radians());
+                                        c.arc(left, bot, radius, (180.0f64).to_radians(), (270.0f64).to_radians());
+                                        c.close_path();
+                                        c.fill().unwrap();
+                                    }
+                                    c.set_source_rgb(1.0, 1.0, 1.0);
+                                    button.render(&c, height, left_edge, modules_button_width.ceil() as u64, pixel_shift_y);
+                                    
+                                        // Show current user info and status on first module if available
+                                    if i == 0 {
+                                            if let Some(status) = &session_state {
+                                                let user = &status.user;
+                                                if !user.is_empty() {
+                                            c.set_source_rgb(0.8, 0.8, 0.8);
+                                            c.set_font_size(12.0);
+                                                    let user_text = format!("User: {}", user);
+                                                    let status_text = format!("Status: {}", status.session_type);
+                                                    c.move_to(left_edge + 5.0, bot + 20.0);
+                                            c.show_text(&user_text).unwrap();
+                                                    c.move_to(left_edge + 5.0, bot + 40.0);
+                                                    c.show_text(&status_text).unwrap();
+                                                }
+                                        }
+                                    }
+                                    
+                                    button.changed = false;
+                                    if !complete_redraw {
+                                        modified_regions.push(ClipRect::new(
+                                            height as u16 - top as u16 - radius as u16,
+                                            left_edge as u16,
+                                            height as u16 - bot as u16 + radius as u16,
+                                            left_edge as u16 + modules_button_width as u16
+                                        ));
+                                    }
                                 }
-                                if (button.action != Key::Unknown && button.action != Key::Time && button.action != Key::Macro1 && button.action != Key::Macro2 && button.action != Key::Macro3 && button.action != Key::Macro4) && (button.background || button.active) {
-                                    c.set_source_rgb(color, color, color);
-                                    c.new_sub_path();
-                                    let left = left_edge + radius;
-                                    let right = (left_edge + modules_button_width.ceil()) - radius;
-                                    c.arc(right, bot, radius, (-90.0f64).to_radians(), (0.0f64).to_radians());
-                                    c.arc(right, top, radius, (0.0f64).to_radians(), (90.0f64).to_radians());
-                                    c.arc(left, top, radius, (90.0f64).to_radians(), (180.0f64).to_radians());
-                                    c.arc(left, bot, radius, (180.0f64).to_radians(), (270.0f64).to_radians());
-                                    c.close_path();
-                                    c.fill().unwrap();
+                                // Always update left_edge
+                                left_edge += modules_button_width;
+                                if i != modules_count - 1 {
+                                    left_edge += BUTTON_SPACING_PX as f64;
                                 }
-                                c.set_source_rgb(1.0, 1.0, 1.0);
-                                button.render(&c, height, left_edge, modules_button_width.ceil() as u64, pixel_shift_y);
-                                button.changed = false;
-                                if !complete_redraw {
-                                    modified_regions.push(ClipRect::new(
-                                        height as u16 - top as u16 - radius as u16,
-                                        left_edge as u16,
-                                        height as u16 - bot as u16 + radius as u16,
-                                        left_edge as u16 + modules_button_width as u16
-                                    ));
-                                }
-                            }
-                            // Always update left_edge
-                            left_edge += modules_button_width;
-                            if i != modules_count - 1 {
-                                left_edge += BUTTON_SPACING_PX as f64;
                             }
                         }
-                        left_edge += group_spacing; // only one group spacing between modules and media
-                        // Draw media section
-                        let media_spacing_px = 2.0f64; // 2px spacing for AppLayerKeys1Media
+                    }
+                    }
+                    Some(state) if state.session_type == "login-screen" => {
+                    // No user logged in - show login screen
+                    let login_area_width = modules_width;
+                    let login_area_height = top - bot;
+                    let login_x = pixel_shift_x + (pixel_shift_width / 2) as f64;
+                    let login_y = bot;
+                    
+                    // Draw login background
+                    if complete_redraw {
+                        c.set_source_rgb(0.1, 0.1, 0.1); // Dark background
+                        c.rectangle(login_x, login_y, login_area_width, login_area_height);
+                        c.fill().unwrap();
+                    }
+                    
+                    // Draw login border
+                    c.set_source_rgb(0.3, 0.3, 0.3);
+                    c.set_line_width(2.0);
+                    c.rectangle(login_x + 2.0, login_y + 2.0, login_area_width - 4.0, login_area_height - 4.0);
+                    c.stroke().unwrap();
+                    
+                    // Draw login text
+                    c.set_source_rgb(1.0, 1.0, 1.0);
+                    c.set_font_size(24.0);
+                    
+                    let welcome_text = "Welcome";
+                    let login_text = "Please log in to continue";
+                    let instruction_text = "Use your system login";
+                    
+                    let welcome_extents = c.text_extents(welcome_text).unwrap();
+                    let login_extents = c.text_extents(login_text).unwrap();
+                    let instruction_extents = c.text_extents(instruction_text).unwrap();
+                    
+                    // Center the text
+                    let center_x = login_x + login_area_width / 2.0;
+                    let center_y = login_y + login_area_height / 2.0;
+                    
+                    // Draw welcome text
+                    c.move_to(
+                        center_x - welcome_extents.width() / 2.0,
+                        center_y - 30.0
+                    );
+                    c.show_text(welcome_text).unwrap();
+                    
+                    // Draw login instruction
+                    c.set_font_size(18.0);
+                    c.move_to(
+                        center_x - login_extents.width() / 2.0,
+                        center_y + 10.0
+                    );
+                    c.show_text(login_text).unwrap();
+                    
+                    // Draw instruction text
+                    c.set_font_size(14.0);
+                    c.set_source_rgb(0.7, 0.7, 0.7);
+                    c.move_to(
+                        center_x - instruction_extents.width() / 2.0,
+                        center_y + 40.0
+                    );
+                    c.show_text(instruction_text).unwrap();
+                        
+                        // Draw user and status at the bottom of the login area
+                        if let Some(status) = &session_state {
+                            let user = &status.user;
+                            if !user.is_empty() {
+                                c.set_source_rgb(0.8, 0.8, 0.8);
+                                c.set_font_size(12.0);
+                                let user_text = format!("User: {}", user);
+                                let status_text = format!("Status: {}", status.session_type);
+                                c.move_to(login_x + 10.0, login_y + login_area_height - 30.0);
+                                c.show_text(&user_text).unwrap();
+                                c.move_to(login_x + 10.0, login_y + login_area_height - 10.0);
+                                c.show_text(&status_text).unwrap();
+                            }
+                        }
+                    
+                    // Add modified region for login screen
+                    if !complete_redraw {
+                        modified_regions.push(ClipRect::new(
+                            height as u16 - top as u16 - radius as u16,
+                            login_x as u16,
+                            height as u16 - bot as u16 + radius as u16,
+                            login_x as u16 + login_area_width as u16
+                        ));
+                        }
+                    }
+                    _ => {
+                        // Handle None or unknown status if needed
+                    }
+                }
+                
+                // Add spacing between modules and media sections
+                let mut left_edge = pixel_shift_x + (pixel_shift_width / 2) as f64 + modules_width + group_spacing;
+                
+                // Skip media section if this is a modules-only redraw
+                if !modules_only_redraw {
+                    // Draw media section
+                    let media_spacing_px = 2.0f64; // 2px spacing for AppLayerKeys1Media
                         let media_count = {
                             match split.media.as_mut_slice() {
                                 media => media.len(),
@@ -608,11 +736,12 @@ impl FunctionLayer {
                                     }
                                 }
                             }
-                        }
-                    }
+                        } // Close the if !modules_only_redraw block
                 }
-                return modified_regions;
+                
+                modified_regions
             }
+        
             None => {
                 let c = Context::new(&surface).unwrap();
                 let mut modified_regions = if complete_redraw {
@@ -733,8 +862,11 @@ impl FunctionLayer {
                 }
                 modified_regions
             }
+
+
         }
-    }
+        }
+    
     /// Returns (group, index) where group is "modules" or "media" or "flat", and index is the button index in that group
     pub fn hit_test(&self, x: f64, width: i32) -> Option<(&'static str, usize)> {
         match &self.split {
@@ -854,7 +986,11 @@ fn main() {
     let mut drm = DrmBackend::open_card().unwrap();
     let (height, width) = drm.mode().size();
     let _ = panic::catch_unwind(AssertUnwindSafe(|| {
-        real_main(&mut drm)
+        // Create a Tokio runtime for async operations
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let _ = real_main(&mut drm).await;
+        });
     }));
     let crash_bitmap = include_bytes!("crash_bitmap.raw");
     let mut map = drm.map().unwrap();
@@ -878,7 +1014,7 @@ fn main() {
     sigset.wait().unwrap();
 }
 
-fn real_main(drm: &mut DrmBackend) {
+async fn real_main(drm: &mut DrmBackend) -> Result<()> {
     let (height, width) = drm.mode().size();
     let (db_width, db_height) = drm.fb_info().unwrap().size();
     let mut uinput = UInputHandle::new(OpenOptions::new().write(true).open("/dev/uinput").unwrap());
@@ -888,14 +1024,7 @@ fn real_main(drm: &mut DrmBackend) {
     let (mut cfg, mut layers) = cfg_mgr.load_config(width);
     let mut pixel_shift = PixelShiftManager::new();
 
-    // drop privileges to input and video group
-    let groups = ["input", "video"];
-
-    PrivDrop::default()
-        .user("nobody")
-        .group_list(&groups)
-        .apply()
-        .unwrap_or_else(|e| { panic!("Failed to drop privileges: {}", e) });
+    // Privilege dropping removed - run with appropriate permissions
 
     let mut surface = ImageSurface::create(Format::ARgb32, db_width as i32, db_height as i32).unwrap();
     let mut active_layer = 0;
@@ -909,6 +1038,10 @@ fn real_main(drm: &mut DrmBackend) {
     epoll.add(input_main.as_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 0)).unwrap();
     epoll.add(input_tb.as_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 1)).unwrap();
     epoll.add(cfg_mgr.fd(), EpollEvent::new(EpollFlags::EPOLLIN, 2)).unwrap();
+    // --- eventfd integration ---
+    let event_fd = Arc::new(eventfd(0, EfdFlags::EFD_NONBLOCK).unwrap());
+    epoll.add(&*event_fd, EpollEvent::new(EpollFlags::EPOLLIN, 3)).unwrap();
+    // --- end eventfd integration ---
     uinput.set_evbit(EventKind::Key).unwrap();
     for layer in &layers {
         for button in &layer.buttons {
@@ -934,12 +1067,38 @@ fn real_main(drm: &mut DrmBackend) {
 
     let mut digitizer: Option<InputDevice> = None;
     let mut touches = HashMap::new();
+
+    // Initialize session monitor
+    let (session_tx, session_rx) = watch::channel(SessionState {
+        session_type: "none".to_string(),
+        is_logged_in: false,
+        user: "".to_string(),
+    });
+    tokio::spawn(monitor_sessions(session_tx));
+
+    // Create mpsc channel for event-driven session updates
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let mut session_rx_clone = session_rx.clone();
+    let event_tx_clone = event_tx.clone();
+    // --- eventfd integration for tokio task ---
+    let event_fd_clone = Arc::clone(&event_fd);
+    tokio::spawn(async move {
+        while session_rx_clone.changed().await.is_ok() {
+            let new_state = session_rx_clone.borrow().clone();
+            let _ = event_tx_clone.send(new_state);
+            // Write to eventfd to wake up main loop
+            let val: u64 = 1;
+            let _ = nix::unistd::write(event_fd_clone.as_raw_fd(), &val.to_ne_bytes());
+        }
+    });
+    // --- end eventfd integration ---
+    let mut current_session: Option<SessionState> = None;
+    // --- main event loop ---
     loop {
         if cfg_mgr.update_config(&mut cfg, &mut layers, width) {
             active_layer = 0;
             needs_complete_redraw = true;
         }
-
         let mut next_timeout_ms = TIMEOUT_MS;
         if cfg.enable_pixel_shift {
             let (pixel_shift_needs_redraw, pixel_shift_next_timeout_ms) = pixel_shift.update();
@@ -948,7 +1107,6 @@ fn real_main(drm: &mut DrmBackend) {
             }
             next_timeout_ms = min(next_timeout_ms, pixel_shift_next_timeout_ms);
         }
-
         let current_minute = Local::now().minute();
 	for button in &mut layers[active_layer].buttons {
     	    if (button.action == Key::Time) && (current_minute != last_redraw_minute) {
@@ -962,23 +1120,46 @@ fn real_main(drm: &mut DrmBackend) {
         } else {
             layers[active_layer].buttons.iter().any(|b| b.changed)
         };
+        
+        // Handle different types of redraws
         if needs_complete_redraw || any_changed {
             let shift = if cfg.enable_pixel_shift {
                 pixel_shift.get()
             } else {
                 (0.0, 0.0)
             };
-            let clips = layers[active_layer].draw(&cfg, width as i32, height as i32, &surface, shift, needs_complete_redraw);
+            let clips = layers[active_layer].draw(&cfg, width as i32, height as i32, &surface, shift, needs_complete_redraw, false, current_session.as_ref());
             let data = surface.data().unwrap();
             drm.map().unwrap().as_mut()[..data.len()].copy_from_slice(&data);
             drm.dirty(&clips).unwrap();
             needs_complete_redraw = false;
         }
-
-        match epoll.wait(&mut [EpollEvent::new(EpollFlags::EPOLLIN, 0)], next_timeout_ms as isize) {
-            Err(Errno::EINTR) | Ok(_) => { 0 },
-            e => e.unwrap(),
-        };
+        
+        // --- epoll wait and event handling ---
+        let mut events = [EpollEvent::empty(); 4];
+        let n = epoll.wait(&mut events, next_timeout_ms as isize).unwrap();
+        for i in 0..n {
+            let event = events[i];
+            match event.data() {
+                0 => {  },
+                1 => {  },
+                2 => { /* handle cfg_mgr.fd() if needed */ },
+                3 => {
+                    // eventfd triggered: read and process session event
+                    let mut buf = [0u8; 8];
+                    let _ = nix::unistd::read(event_fd.as_raw_fd(), &mut buf);
+                    // Now process event_rx as before
+                    if let Ok(new_state) = event_rx.try_recv() {
+                        println!("[main] Session state changed: {:?}", new_state);
+                        current_session = Some(new_state);
+                        needs_complete_redraw = true;
+                        println!("[main] Set needs_complete_redraw = true");
+                    }
+                }
+                _ => {}
+            }
+        }
+        // // After epoll, always process all pending input events:
         input_tb.dispatch().unwrap();
         input_main.dispatch().unwrap();
         for event in &mut input_tb.clone().chain(input_main.clone()) {
@@ -1017,9 +1198,9 @@ fn real_main(drm: &mut DrmBackend) {
                     }
                     match te {
                         TouchEvent::Down(dn) => {
-                            let x = dn.x_transformed(width as u32);
-                            let y = dn.y_transformed(height as u32);
-                            if let Some((group, idx)) = layers[active_layer].hit_test(x, width as i32) {
+                            let _x = dn.x_transformed(width as u32);
+                            let _y = dn.y_transformed(height as u32);
+                            if let Some((group, idx)) = layers[active_layer].hit_test(_x, width as i32) {
                                 println!("Touch hit: group={}, idx={}", group, idx);
                                 match group {
                                     "modules" => {
@@ -1061,8 +1242,8 @@ fn real_main(drm: &mut DrmBackend) {
                             if !touches.contains_key(&mtn.seat_slot()) {
                                 continue;
                             }
-                            let x = mtn.x_transformed(width as u32);
-                            let y = mtn.y_transformed(height as u32);
+                            let _x = mtn.x_transformed(width as u32);
+                            let _y = mtn.y_transformed(height as u32);
                             let (layer, group, idx) = touches.get(&mtn.seat_slot()).unwrap();
                             println!("Motion: group={}, idx={}", group, idx);
                             match *group {
@@ -1141,6 +1322,15 @@ fn real_main(drm: &mut DrmBackend) {
                 _ => {}
             }
         }
+        
         backlight.update_backlight(&cfg);
+        
+        // Process session events (event-driven)
+        if let Ok(new_state) = event_rx.try_recv() {
+            println!("[main] Session state changed: {:?}", new_state);
+            current_session = Some(new_state);
+            needs_complete_redraw = true;
+            println!("[main] Set needs_complete_redraw = true");
+        }
     }
 }
