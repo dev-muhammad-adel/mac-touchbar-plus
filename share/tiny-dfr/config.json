@@ -74,7 +74,7 @@
       "Mode": "Media"
     },
     {
-      "Icon": "audio-volume-low-symbolic",
+      "Icon": "audio-volume-down-symbolic",
       "Action": "VolumeDown",
       "Mode": "Media"
     },
@@ -95,7 +95,7 @@
           "Fraction": 0.3
         },
         {
-          "Icon": "audio-volume-low-symbolic",
+          "Icon": "audio-volume-down-symbolic",
           "Action": "VolumeDown",
           "Mode": "Media"
         },
@@ -174,8 +174,10 @@
       "Icon": "close-symbolic",
       "Action": "Macro1",
       "Mode": "Media",
-      "Fraction": 0.3
+      "Fraction": 0.5
     },
+    { "Action": "Unknown", "Mode": "Blank", "Fraction": 0.15 },
+
     {
       "Icon": "display-brightness-low-symbolic",
       "Action": "BrightnessDown",
@@ -186,11 +188,18 @@
       "Action": "BrightnessUp",
       "Mode": "Media"
     },
+    { "Action": "Unknown", "Mode": "Blank", "Fraction": 0.15 },
+
     {
       "Icon": "microphone-disabled-symbolic",
       "Action": "MicMute",
       "Mode": "Media"
     },
+    { "Action": "Unknown", "Mode": "Blank", "Fraction": 0.15 },
+    { "Icon": "system-search-symbolic", "Action": "Search", "Mode": "Media" },
+
+    { "Action": "Unknown", "Mode": "Blank", "Fraction": 0.15 },
+
     {
       "Icon": "keyboard-brightness-low-symbolic",
       "Action": "IllumDown",
@@ -201,6 +210,7 @@
       "Action": "IllumUp",
       "Mode": "Media"
     },
+    { "Action": "Unknown", "Mode": "Blank", "Fraction": 0.15 },
     {
       "Icon": "media-seek-backward-symbolic",
       "Action": "PreviousSong",
@@ -216,19 +226,27 @@
       "Action": "NextSong",
       "Mode": "Media"
     },
+    { "Action": "Unknown", "Mode": "Blank", "Fraction": 0.15 },
+
     {
       "Icon": "audio-volume-muted-symbolic",
       "Action": "Mute",
       "Mode": "Media"
     },
     {
-      "Icon": "audio-volume-low-symbolic",
+      "Icon": "audio-volume-down-symbolic",
       "Action": "VolumeDown",
       "Mode": "Media"
     },
     {
       "Icon": "audio-volume-high-symbolic",
       "Action": "VolumeUp",
+      "Mode": "Media"
+    },
+    { "Action": "Unknown", "Mode": "Blank", "Fraction": 0.15 },
+    {
+      "Icon": "view-app-grid-symbolic",
+      "Action": "AllApplications",
       "Mode": "Media"
     }
   ]

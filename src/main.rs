@@ -52,8 +52,9 @@ use config::{ButtonConfig, Config};
 use crate::config::ConfigManager;
 
 const BUTTON_SPACING_PX: i32 = 16;
-const BUTTON_COLOR_INACTIVE: f64 = 0.200;
-const BUTTON_COLOR_ACTIVE: f64 = 0.400;
+const APP_LAYER_KEYS3_GAP_PX: f64 = 4.0; // Custom gap for AppLayerKeys3
+const BUTTON_COLOR_INACTIVE: f64 = 0.350;
+const BUTTON_COLOR_ACTIVE: f64 = 0.600;
 const ICON_SIZE: i32 = 48;
 const TIMEOUT_MS: i32 = 10 * 1000;
 
@@ -378,7 +379,7 @@ impl FunctionLayer {
             }),
         }
     }
-    fn draw(&mut self, config: &Config, width: i32, height: i32, surface: &Surface, pixel_shift: (f64, f64), complete_redraw: bool, modules_only_redraw: bool, session_state: Option<&SessionState>) -> Vec<ClipRect> {
+    fn draw(&mut self, config: &Config, width: i32, height: i32, surface: &Surface, pixel_shift: (f64, f64), complete_redraw: bool, modules_only_redraw: bool, session_state: Option<&SessionState>, layer_index: Option<usize>) -> Vec<ClipRect> {
         match &mut self.split {
             Some(split) => {
                 let c = Context::new(&surface).unwrap();
@@ -399,8 +400,30 @@ impl FunctionLayer {
                 let media_count = split.media.len();
                 let modules_spacing = if modules_count > 1 { BUTTON_SPACING_PX as f64 * (modules_count as f64 - 1.0) } else { 0.0 };
                 let media_spacing = if media_count > 1 { BUTTON_SPACING_PX as f64 * (media_count as f64 - 1.0) } else { 0.0 };
-                let modules_button_width = (modules_width - modules_spacing) / modules_count as f64;
-                let media_button_width = (media_width - media_spacing) / media_count as f64;
+                // --- MODULES BUTTON WIDTHS WITH FRACTION ---
+                let weights: Vec<f32> = split.modules.iter().map(|b| b.fraction.unwrap_or(1.0)).collect();
+                let total_weight: f32 = weights.iter().sum();
+                let mut modules_button_widths: Vec<f64> = weights.iter().map(|w| (modules_width - modules_spacing) * (*w as f64 / total_weight as f64)).collect();
+                // Last button absorbs rounding error
+                let sum_widths: f64 = modules_button_widths.iter().sum();
+                if let Some(last) = modules_button_widths.last_mut() {
+                    *last += (modules_width - modules_spacing) - sum_widths;
+                }
+                // --- MEDIA BUTTON WIDTHS WITH FRACTION ---
+                let media_spacing_px = 2.0f64; // 2px spacing for AppLayerKeys1Media
+                let media_count = {
+                    match split.media.as_mut_slice() {
+                        media => media.len(),
+                    }
+                };
+                let weights: Vec<f32> = split.media.iter().map(|b| b.fraction.unwrap_or(1.0)).collect();
+                let total_weight: f32 = weights.iter().sum();
+                let mut media_button_widths: Vec<f64> = weights.iter().map(|w| (media_width - media_spacing) * (*w as f64 / total_weight as f64)).collect();
+                // Last button absorbs rounding error
+                let sum_widths: f64 = media_button_widths.iter().sum();
+                if let Some(last) = media_button_widths.last_mut() {
+                    *last += (media_width - media_spacing) - sum_widths;
+                }
                 let radius = 8.0f64;
                 let bot = (height as f64) * 0.15;
                 let top = (height as f64) * 0.85;
@@ -430,9 +453,10 @@ impl FunctionLayer {
                             let modules_count = modules.len();
                             let mut left_edge = pixel_shift_x + (pixel_shift_width / 2) as f64;
                             for (i, button) in modules.iter_mut().enumerate() {
+                                let this_button_width = modules_button_widths[i];
                                 if button.changed || complete_redraw {
                                     // DEBUG: Print draw info for modules
-                                    println!("DRAW MODULES: idx={}, left_edge={}, width={}", i, left_edge, modules_button_width);
+                                    println!("DRAW MODULES: idx={}, left_edge={}, width={}", i, left_edge, this_button_width);
                                     let color = if button.active {
                                         BUTTON_COLOR_ACTIVE
                                     } else if config.show_button_outlines {
@@ -442,14 +466,14 @@ impl FunctionLayer {
                                     };
                                     if !complete_redraw {
                                         c.set_source_rgb(0.0, 0.0, 0.0);
-                                        c.rectangle(left_edge, bot - radius, modules_button_width, top - bot + radius * 2.0);
+                                        c.rectangle(left_edge, bot - radius, this_button_width, top - bot + radius * 2.0);
                                         c.fill().unwrap();
                                     }
                                     if (button.action != Key::Unknown && button.action != Key::Time && button.action != Key::Macro1 && button.action != Key::Macro2 && button.action != Key::Macro3 && button.action != Key::Macro4) && (button.background || button.active) {
                                         c.set_source_rgb(color, color, color);
                                         c.new_sub_path();
                                         let left = left_edge + radius;
-                                        let right = (left_edge + modules_button_width.ceil()) - radius;
+                                        let right = (left_edge + this_button_width.ceil()) - radius;
                                         c.arc(right, bot, radius, (-90.0f64).to_radians(), (0.0f64).to_radians());
                                         c.arc(right, top, radius, (0.0f64).to_radians(), (90.0f64).to_radians());
                                         c.arc(left, top, radius, (90.0f64).to_radians(), (180.0f64).to_radians());
@@ -458,7 +482,7 @@ impl FunctionLayer {
                                         c.fill().unwrap();
                                     }
                                     c.set_source_rgb(1.0, 1.0, 1.0);
-                                    button.render(&c, height, left_edge, modules_button_width.ceil() as u64, pixel_shift_y);
+                                    button.render(&c, height, left_edge, this_button_width.ceil() as u64, pixel_shift_y);
                                     
                                         // Show current user info and status on first module if available
                                     if i == 0 {
@@ -483,12 +507,12 @@ impl FunctionLayer {
                                             height as u16 - top as u16 - radius as u16,
                                             left_edge as u16,
                                             height as u16 - bot as u16 + radius as u16,
-                                            left_edge as u16 + modules_button_width as u16
+                                            left_edge as u16 + this_button_width as u16
                                         ));
                                     }
                                 }
                                 // Always update left_edge
-                                left_edge += modules_button_width;
+                                left_edge += this_button_width;
                                 if i != modules_count - 1 {
                                     left_edge += BUTTON_SPACING_PX as f64;
                                 }
@@ -752,7 +776,20 @@ impl FunctionLayer {
                 c.translate(height as f64, 0.0);
                 c.rotate((90.0f64).to_radians());
                 let pixel_shift_width = if config.enable_pixel_shift { PIXEL_SHIFT_WIDTH_PX } else { 0 };
-                let button_width = ((width - pixel_shift_width as i32) - (BUTTON_SPACING_PX * (self.buttons.len() - 1) as i32)) as f64 / self.buttons.len() as f64;
+                // Use custom gap for AppLayerKeys3 (layer index 3), else default
+                let gap = if let Some(3) = layer_index { APP_LAYER_KEYS3_GAP_PX } else { BUTTON_SPACING_PX as f64 };
+                // --- FLAT BUTTON WIDTHS WITH FRACTION ---
+                let count = self.buttons.len();
+                let spacing = if count > 1 { gap * (count as f64 - 1.0) } else { 0.0 };
+                let button_area = (width as f64 - pixel_shift_width as f64) - spacing;
+                let weights: Vec<f32> = self.buttons.iter().map(|b| b.fraction.unwrap_or(1.0)).collect();
+                let total_weight: f32 = weights.iter().sum();
+                let mut button_widths: Vec<f64> = weights.iter().map(|w| button_area * (*w as f64 / total_weight as f64)).collect();
+                // Last button absorbs rounding error
+                let sum_widths: f64 = button_widths.iter().sum();
+                if let Some(last) = button_widths.last_mut() {
+                    *last += button_area - sum_widths;
+                }
                 let radius = 8.0f64;
                 let bot = (height as f64) * 0.15;
                 let top = (height as f64) * 0.85;
@@ -767,11 +804,16 @@ impl FunctionLayer {
                     c.set_font_face(&config.font_face);
                 } else { panic!("Invalid font renderer chosen. Choose between \"Cairo\" and \"FreeType\""); }
                 c.set_font_size(32.0);
+                let mut left_edge = pixel_shift_x + (pixel_shift_width / 2) as f64;
                 for (i, button) in self.buttons.iter_mut().enumerate() {
+                    let this_button_width = button_widths[i];
                     if !button.changed && !complete_redraw {
+                        left_edge += this_button_width;
+                        if i != count - 1 {
+                            left_edge += gap;
+                        }
                         continue;
                     };
-                    let left_edge = (i as f64 * (button_width + BUTTON_SPACING_PX as f64)).floor() + pixel_shift_x + (pixel_shift_width / 2) as f64;
                     let color = if button.active {
                         BUTTON_COLOR_ACTIVE
                     } else if config.show_button_outlines {
@@ -782,9 +824,9 @@ impl FunctionLayer {
                     if !complete_redraw {
                         c.set_source_rgb(0.0, 0.0, 0.0);
                         if button.action == Key::Time {
-                            c.rectangle(left_edge, bot - radius, button_width * 3.0, top - bot + radius * 2.0);
+                            c.rectangle(left_edge, bot - radius, this_button_width * 3.0, top - bot + radius * 2.0);
                         } else {
-                            c.rectangle(left_edge, bot - radius, button_width, top - bot + radius * 2.0);
+                            c.rectangle(left_edge, bot - radius, this_button_width, top - bot + radius * 2.0);
                         }
                         c.fill().unwrap();
                     }
@@ -800,7 +842,7 @@ impl FunctionLayer {
                     // draw box with rounded corners
                     c.new_sub_path();
                     let left = left_edge + radius;
-                    let right = (left_edge + button_width.ceil()) - radius;
+                    let right = (left_edge + this_button_width.ceil()) - radius;
                     c.arc(
                         right,
                         bot,
@@ -835,9 +877,9 @@ impl FunctionLayer {
                     }
                     c.set_source_rgb(1.0, 1.0, 1.0);
                     if button.action == Key::Time {
-                        button.render(&c, height, left_edge, button_width.ceil() as u64 * 3, pixel_shift_y);
+                        button.render(&c, height, left_edge, this_button_width.ceil() as u64 * 3, pixel_shift_y);
                     } else {
-                        button.render(&c, height, left_edge, button_width.ceil() as u64, pixel_shift_y);
+                        button.render(&c, height, left_edge, this_button_width.ceil() as u64, pixel_shift_y);
                     }
 
                     button.changed = false;
@@ -848,16 +890,20 @@ impl FunctionLayer {
                                 height as u16 - top as u16 - radius as u16,
                                 left_edge as u16,
                                 height as u16 - bot as u16 + radius as u16,
-                                left_edge as u16 + button_width as u16 * 3
+                                left_edge as u16 + this_button_width as u16 * 3
                             ));
                         } else {
                             modified_regions.push(ClipRect::new(
                                 height as u16 - top as u16 - radius as u16,
                                 left_edge as u16,
                                 height as u16 - bot as u16 + radius as u16,
-                                left_edge as u16 + button_width as u16
+                                left_edge as u16 + this_button_width as u16
                             ));
                         }
+                    }
+                    left_edge += this_button_width;
+                    if i != count - 1 {
+                        left_edge += gap;
                     }
                 }
                 modified_regions
@@ -878,12 +924,18 @@ impl FunctionLayer {
                 let modules_count = split.modules.len();
                 let media_count = split.media.len();
                 let modules_spacing = if modules_count > 1 { BUTTON_SPACING_PX as f64 * (modules_count as f64 - 1.0) } else { 0.0 };
-                let modules_button_width = (modules_width - modules_spacing) / modules_count as f64;
+                // --- MODULES BUTTON WIDTHS WITH FRACTION (for hit test) ---
+                let weights: Vec<f32> = split.modules.iter().map(|b| b.fraction.unwrap_or(1.0)).collect();
+                let total_weight: f32 = weights.iter().sum();
+                let mut modules_button_widths: Vec<f64> = weights.iter().map(|w| (modules_width - modules_spacing) * (*w as f64 / total_weight as f64)).collect();
+                let sum_widths: f64 = modules_button_widths.iter().sum();
+                if let Some(last) = modules_button_widths.last_mut() {
+                    *last += (modules_width - modules_spacing) - sum_widths;
+                }
                 let mut left_edge = 0.0;
                 // Check modules
                 for (i, _) in split.modules.iter().enumerate() {
-                    let right_edge = left_edge + modules_button_width;
-                    // DEBUG: Print hit_test info for modules
+                    let right_edge = left_edge + modules_button_widths[i];
                     println!("HITTEST MODULES: idx={}, left_edge={}, right_edge={}", i, left_edge, right_edge);
                     if x >= left_edge && x < right_edge {
                         return Some(("modules", i));
@@ -892,21 +944,19 @@ impl FunctionLayer {
                 }
                 // Add extra spacing between groups
                 left_edge += group_spacing;
-                // Check media (with fraction/weight logic and 2px spacing)
+                // --- MEDIA BUTTON WIDTHS WITH FRACTION (already present) ---
                 let media_spacing_px = 2.0f64;
                 let total_spacing = if media_count > 1 { media_spacing_px * (media_count as f64 - 1.0) } else { 0.0 };
                 let button_area = media_width - total_spacing;
                 let weights: Vec<f32> = split.media.iter().map(|b| b.fraction.unwrap_or(1.0)).collect();
                 let total_weight: f32 = weights.iter().sum();
                 let mut media_button_widths: Vec<f64> = weights.iter().map(|w| button_area * (*w as f64 / total_weight as f64)).collect();
-                // Last button absorbs rounding error
                 let sum_widths: f64 = media_button_widths.iter().sum();
                 if let Some(last) = media_button_widths.last_mut() {
                     *last += button_area - sum_widths;
                 }
                 for (i, _) in split.media.iter().enumerate() {
                     let right_edge = left_edge + media_button_widths[i];
-                    // DEBUG: Print hit_test info for media
                     println!("HITTEST MEDIA: idx={}, left_edge={}, right_edge={}", i, left_edge, right_edge);
                     if x >= left_edge && x < right_edge {
                         return Some(("media", i));
@@ -920,15 +970,27 @@ impl FunctionLayer {
             }
             None => {
                 let count = self.buttons.len();
-                let spacing = if count > 1 { BUTTON_SPACING_PX as f64 * (count as f64 - 1.0) } else { 0.0 };
-                let button_width = (width as f64 - spacing) / count as f64;
+                // Use per-button fractions for hit test, matching drawing logic
+                let gap = BUTTON_SPACING_PX as f64; // If you want to support custom gap for AppLayerKeys3, pass it in as needed
+                let spacing = if count > 1 { gap * (count as f64 - 1.0) } else { 0.0 };
+                let button_area = (width as f64) - spacing;
+                let weights: Vec<f32> = self.buttons.iter().map(|b| b.fraction.unwrap_or(1.0)).collect();
+                let total_weight: f32 = weights.iter().sum();
+                let mut button_widths: Vec<f64> = weights.iter().map(|w| button_area * (*w as f64 / total_weight as f64)).collect();
+                let sum_widths: f64 = button_widths.iter().sum();
+                if let Some(last) = button_widths.last_mut() {
+                    *last += button_area - sum_widths;
+                }
                 let mut left_edge = 0.0;
                 for (i, _) in self.buttons.iter().enumerate() {
-                    let right_edge = left_edge + button_width;
+                    let right_edge = left_edge + button_widths[i];
                     if x >= left_edge && x < right_edge {
                         return Some(("flat", i));
                     }
-                    left_edge = right_edge + BUTTON_SPACING_PX as f64;
+                    left_edge = right_edge;
+                    if i != count - 1 {
+                        left_edge += gap;
+                    }
                 }
                 None
             }
@@ -1128,7 +1190,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
             } else {
                 (0.0, 0.0)
             };
-            let clips = layers[active_layer].draw(&cfg, width as i32, height as i32, &surface, shift, needs_complete_redraw, false, current_session.as_ref());
+            let clips = layers[active_layer].draw(&cfg, width as i32, height as i32, &surface, shift, needs_complete_redraw, false, current_session.as_ref(), Some(active_layer));
             let data = surface.data().unwrap();
             drm.map().unwrap().as_mut()[..data.len()].copy_from_slice(&data);
             drm.dirty(&clips).unwrap();
