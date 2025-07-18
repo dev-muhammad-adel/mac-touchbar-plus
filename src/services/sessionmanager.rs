@@ -17,7 +17,6 @@ pub struct SessionState {
 async fn check_session_state(connection: &Connection, tx: &watch::Sender<SessionState>) -> zbus::Result<()> {
     println!("[session_monitor] check_session_state: Starting session state check...");
     
-    // Use basic zbus approach to get sessions
     let manager_proxy: zbus::Proxy<'_> = zbus::ProxyBuilder::new_bare(connection)
         .destination("org.freedesktop.login1")?
         .path("/org/freedesktop/login1")?
@@ -30,11 +29,10 @@ async fn check_session_state(connection: &Connection, tx: &watch::Sender<Session
         .await?;
     let sessions: Vec<(String, u32, String, String, OwnedObjectPath)> = reply.body()?;
 
-    println!("[session_monitor] check_session_state: Found {} sessions", sessions.len());
+    let mut found_graphical_user: Option<SessionState> = None;
+    let mut found_greeter: bool = false;
 
     for (session_id, uid, username, seat, path) in &sessions {
-        println!("[session_monitor] check_session_state: Checking session uid: {}, user: {}, seat: {}, session_id: {}", uid, username, seat, session_id);
-        
         let session_proxy: zbus::Proxy<'_> = zbus::ProxyBuilder::new_bare(connection)
             .destination("org.freedesktop.login1")?
             .path(path.as_str())?
@@ -42,43 +40,53 @@ async fn check_session_state(connection: &Connection, tx: &watch::Sender<Session
             .build()
             .await?;
 
-        let class: String = session_proxy.get_property("Class").await?;
-        let state: String = session_proxy.get_property("State").await?;
-        
-        let _session_type: String = session_proxy.get_property("Type").await
-            .unwrap_or_else(|_| "unknown".into());
-        let user: String = session_proxy.get_property("User").await
-            .unwrap_or_else(|_| username.clone());
-        
-        if class == "user" && state == "active" {
-            let new_state = SessionState {
-                session_type: format!("desktop-logged-graphical"),
+        let class: String = session_proxy.get_property("Class").await.unwrap_or_else(|_| "unknown".into());
+        let state: String = session_proxy.get_property("State").await.unwrap_or_else(|_| "unknown".into());
+        let session_type: String = session_proxy.get_property("Type").await.unwrap_or_else(|_| "unknown".into());
+        let user: String = session_proxy.get_property("User").await.unwrap_or_else(|_| username.clone());
+
+        // Only consider sessions with a seat
+        if seat.is_empty() {
+            continue;
+        }
+
+        // Check for graphical user session
+        if class == "user" && (state == "active" || state == "online") && (session_type == "x11" || session_type == "wayland") {
+            found_graphical_user = Some(SessionState {
+                session_type: "desktop-logged".into(),
                 is_logged_in: true,
                 user,
-            };
-            
-            println!("[session_monitor] check_session_state: Found active user session, sending state: {:?}", new_state);
-            let result = tx.send(new_state);
-            match &result {
-                Ok(_) => println!("[session_monitor] check_session_state: Successfully sent session state"),
-                Err(e) => println!("[session_monitor] check_session_state: Failed to send session state: {:?}", e),
-            }
-            return result.map_err(|_| zbus::Error::Failure("Send failed".into()));
+            });
+            break;
+        }
+
+        // Check for greeter (login screen)
+        if class == "greeter" && (session_type == "x11" || session_type == "wayland") {
+            found_greeter = true;
         }
     }
 
-    // Default to login screen if no active user session found
-    let login_state = SessionState {
-        session_type: "login-screen".into(),
-        is_logged_in: false,
-        user: "".into(),
+    let new_state = if let Some(user_session) = found_graphical_user {
+        user_session
+    } else if found_greeter {
+        SessionState {
+            session_type: "login-screen".into(),
+            is_logged_in: false,
+            user: "".into(),
+        }
+    } else {
+        SessionState {
+            session_type: "unknown".into(),
+            is_logged_in: false,
+            user: "".into(),
+        }
     };
-    
-    println!("[session_monitor] check_session_state: No active user session found, sending login screen state: {:?}", login_state);
-    let result = tx.send(login_state);
+
+    println!("[session_monitor] check_session_state: Sending state: {:?}", new_state);
+    let result = tx.send(new_state);
     match &result {
-        Ok(_) => println!("[session_monitor] check_session_state: Successfully sent login screen state"),
-        Err(e) => println!("[session_monitor] check_session_state: Failed to send login screen state: {:?}", e),
+        Ok(_) => println!("[session_monitor] check_session_state: Successfully sent session state"),
+        Err(e) => println!("[session_monitor] check_session_state: Failed to send session state: {:?}", e),
     }
     result.map_err(|_| zbus::Error::Failure("Send failed".into()))
 }
@@ -184,6 +192,7 @@ pub async fn monitor_sessions(tx: watch::Sender<SessionState>) -> zbus::Result<(
         
         if let Some(member) = header.member()? {
             let member_str = member.as_str();
+            println!("[session_monitor]############################### start ############################################################################################################");
             println!("[session_monitor] Processing signal: {}", member_str);
             
             if member_str == "SessionNew" {

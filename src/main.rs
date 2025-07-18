@@ -446,7 +446,7 @@ impl FunctionLayer {
                 
                 // Use new session state
                 match session_state {
-                    Some(state) if state.session_type == "desktop-logged-graphical" => {
+                    Some(state) if state.session_type == "desktop-logged" => {
                     // User is logged in - show normal modules
                     match split.modules.as_mut_slice() {
                         modules => {
@@ -1216,6 +1216,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                         current_session = Some(new_state);
                         needs_complete_redraw = true;
                         println!("[main] Set needs_complete_redraw = true");
+                        println!("[session_monitor]#################### end  #######################     #################################################################################################################################");
                     }
                 }
                 _ => {}
