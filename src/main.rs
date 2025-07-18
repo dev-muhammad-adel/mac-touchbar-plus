@@ -696,87 +696,108 @@ impl FunctionLayer {
         }
         }
     
+    // Helper for modules hit test
+    fn hit_test_modules(&self, x: f64, width: i32) -> Option<usize> {
+        if let Some(split) = &self.split {
+            let group_spacing = BUTTON_SPACING_PX as f64;
+            let total_width = (width - group_spacing as i32) as f64;
+            let modules_width = (split.modules_width as f64 * total_width).round();
+            let modules_count = split.modules.len();
+            let modules_spacing = if modules_count > 1 { BUTTON_SPACING_PX as f64 * (modules_count as f64 - 1.0) } else { 0.0 };
+            let weights: Vec<f32> = split.modules.iter().map(|b| b.fraction.unwrap_or(1.0)).collect();
+            let total_weight: f32 = weights.iter().sum();
+            let mut modules_button_widths: Vec<f64> = weights.iter().map(|w| (modules_width - modules_spacing) * (*w as f64 / total_weight as f64)).collect();
+            let sum_widths: f64 = modules_button_widths.iter().sum();
+            if let Some(last) = modules_button_widths.last_mut() {
+                *last += (modules_width - modules_spacing) - sum_widths;
+            }
+            let mut left_edge = 0.0;
+            for (i, _) in split.modules.iter().enumerate() {
+                let right_edge = left_edge + modules_button_widths[i];
+                if x >= left_edge && x < right_edge {
+                    return Some(i);
+                }
+                left_edge = right_edge + BUTTON_SPACING_PX as f64;
+            }
+        }
+        None
+    }
+    // Helper for media hit test
+    fn hit_test_media(&self, x: f64, width: i32) -> Option<usize> {
+        if let Some(split) = &self.split {
+            let group_spacing = BUTTON_SPACING_PX as f64;
+            let total_width = (width - group_spacing as i32) as f64;
+            let modules_width = (split.modules_width as f64 * total_width).round();
+            let media_width = (split.media_width as f64 * total_width).round();
+            let media_count = split.media.len();
+            let media_spacing_px = 2.0f64;
+            let total_spacing = if media_count > 1 { media_spacing_px * (media_count as f64 - 1.0) } else { 0.0 };
+            let button_area = media_width - total_spacing;
+            let weights: Vec<f32> = split.media.iter().map(|b| b.fraction.unwrap_or(1.0)).collect();
+            let total_weight: f32 = weights.iter().sum();
+            let mut media_button_widths: Vec<f64> = weights.iter().map(|w| button_area * (*w as f64 / total_weight as f64)).collect();
+            let sum_widths: f64 = media_button_widths.iter().sum();
+            if let Some(last) = media_button_widths.last_mut() {
+                *last += button_area - sum_widths;
+            }
+            // SIMPLIFIED: media section starts after modules_width + group_spacing
+            let mut left_edge = modules_width + group_spacing;
+            for (i, _) in split.media.iter().enumerate() {
+                let right_edge = left_edge + media_button_widths[i];
+                if x >= left_edge && x < right_edge {
+                    return Some(i);
+                }
+                left_edge = right_edge;
+                if i != media_count - 1 {
+                    left_edge += media_spacing_px;
+                }
+            }
+        }
+        None
+    }
+    // Helper for flat hit test
+    fn hit_test_flat(&self, x: f64, width: i32) -> Option<usize> {
+        if self.split.is_none() {
+            let count = self.buttons.len();
+            let gap = BUTTON_SPACING_PX as f64;
+            let spacing = if count > 1 { gap * (count as f64 - 1.0) } else { 0.0 };
+            let button_area = (width as f64) - spacing;
+            let weights: Vec<f32> = self.buttons.iter().map(|b| b.fraction.unwrap_or(1.0)).collect();
+            let total_weight: f32 = weights.iter().sum();
+            let mut button_widths: Vec<f64> = weights.iter().map(|w| button_area * (*w as f64 / total_weight as f64)).collect();
+            let sum_widths: f64 = button_widths.iter().sum();
+            if let Some(last) = button_widths.last_mut() {
+                *last += button_area - sum_widths;
+            }
+            let mut left_edge = 0.0;
+            for (i, _) in self.buttons.iter().enumerate() {
+                let right_edge = left_edge + button_widths[i];
+                if x >= left_edge && x < right_edge {
+                    return Some(i);
+                }
+                left_edge = right_edge;
+                if i != count - 1 {
+                    left_edge += gap;
+                }
+            }
+        }
+        None
+    }
     /// Returns (group, index) where group is "modules" or "media" or "flat", and index is the button index in that group
     pub fn hit_test(&self, x: f64, width: i32) -> Option<(&'static str, usize)> {
-        match &self.split {
-            Some(split) => {
-                let group_spacing = BUTTON_SPACING_PX as f64; // space between groups
-                let total_width = (width - group_spacing as i32) as f64;
-                let modules_width = (split.modules_width as f64 * total_width).round();
-                let media_width = (split.media_width as f64 * total_width).round();
-                let modules_count = split.modules.len();
-                let media_count = split.media.len();
-                let modules_spacing = if modules_count > 1 { BUTTON_SPACING_PX as f64 * (modules_count as f64 - 1.0) } else { 0.0 };
-                // --- MODULES BUTTON WIDTHS WITH FRACTION (for hit test) ---
-                let weights: Vec<f32> = split.modules.iter().map(|b| b.fraction.unwrap_or(1.0)).collect();
-                let total_weight: f32 = weights.iter().sum();
-                let mut modules_button_widths: Vec<f64> = weights.iter().map(|w| (modules_width - modules_spacing) * (*w as f64 / total_weight as f64)).collect();
-                let sum_widths: f64 = modules_button_widths.iter().sum();
-                if let Some(last) = modules_button_widths.last_mut() {
-                    *last += (modules_width - modules_spacing) - sum_widths;
-                }
-                let mut left_edge = 0.0;
-                // Check modules
-                for (i, _) in split.modules.iter().enumerate() {
-                    let right_edge = left_edge + modules_button_widths[i];
-                    println!("HITTEST MODULES: idx={}, left_edge={}, right_edge={}", i, left_edge, right_edge);
-                    if x >= left_edge && x < right_edge {
-                        return Some(("modules", i));
-                    }
-                    left_edge = right_edge + BUTTON_SPACING_PX as f64;
-                }
-                // Add extra spacing between groups
-                left_edge += group_spacing;
-                // --- MEDIA BUTTON WIDTHS WITH FRACTION (already present) ---
-                let media_spacing_px = 2.0f64;
-                let total_spacing = if media_count > 1 { media_spacing_px * (media_count as f64 - 1.0) } else { 0.0 };
-                let button_area = media_width - total_spacing;
-                let weights: Vec<f32> = split.media.iter().map(|b| b.fraction.unwrap_or(1.0)).collect();
-                let total_weight: f32 = weights.iter().sum();
-                let mut media_button_widths: Vec<f64> = weights.iter().map(|w| button_area * (*w as f64 / total_weight as f64)).collect();
-                let sum_widths: f64 = media_button_widths.iter().sum();
-                if let Some(last) = media_button_widths.last_mut() {
-                    *last += button_area - sum_widths;
-                }
-                for (i, _) in split.media.iter().enumerate() {
-                    let right_edge = left_edge + media_button_widths[i];
-                    // println!("HITTEST MEDIA: idx={}, left_edge={}, right_edge={}", i, left_edge, right_edge);
-                    if let Some(idx) = media_hit_test(x, left_edge, &media_button_widths, media_count) {
-                        return Some(("media", idx));
-                    }
-                    left_edge = right_edge;
-                    if i != media_count - 1 {
-                        left_edge += media_spacing_px;
-                    }
-                }
-                None
+        if self.split.is_some() {
+            if let Some(idx) = self.hit_test_modules(x, width) {
+                return Some(("modules", idx));
             }
-            None => {
-                let count = self.buttons.len();
-                // Use per-button fractions for hit test, matching drawing logic
-                let gap = BUTTON_SPACING_PX as f64; // If you want to support custom gap for AppLayerKeys3, pass it in as needed
-                let spacing = if count > 1 { gap * (count as f64 - 1.0) } else { 0.0 };
-                let button_area = (width as f64) - spacing;
-                let weights: Vec<f32> = self.buttons.iter().map(|b| b.fraction.unwrap_or(1.0)).collect();
-                let total_weight: f32 = weights.iter().sum();
-                let mut button_widths: Vec<f64> = weights.iter().map(|w| button_area * (*w as f64 / total_weight as f64)).collect();
-                let sum_widths: f64 = button_widths.iter().sum();
-                if let Some(last) = button_widths.last_mut() {
-                    *last += button_area - sum_widths;
-                }
-                let mut left_edge = 0.0;
-                for (i, _) in self.buttons.iter().enumerate() {
-                    let right_edge = left_edge + button_widths[i];
-                    if x >= left_edge && x < right_edge {
-                        return Some(("flat", i));
-                    }
-                    left_edge = right_edge;
-                    if i != count - 1 {
-                        left_edge += gap;
-                    }
-                }
-                None
+            if let Some(idx) = self.hit_test_media(x, width) {
+                return Some(("media", idx));
             }
+            None
+        } else {
+            if let Some(idx) = self.hit_test_flat(x, width) {
+                return Some(("flat", idx));
+            }
+            None
         }
     }
 }
