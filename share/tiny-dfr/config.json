@@ -118,7 +118,7 @@
     },
     "AppLayerKeys1Modules": {
       "Width": 0.7,
-      "Items": [{ "Icon": "app1", "Action": "Prog1", "Mode": "App" }]
+      "Items": [{ "Action": "Unknown", "Mode": "Blank" }]
     }
   },
 

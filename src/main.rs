@@ -37,6 +37,9 @@ use icon_loader::{IconFileType, IconLoader};
 use chrono::{Local, Locale, Timelike};
 use crate::services::sessionmanager::{SessionState, monitor_sessions};
 use tokio::sync::{watch, mpsc};
+use view::login_screen::draw_login_screen;
+use view::module_screen::draw_module_section;
+use view::media_screen::{draw_media_section, media_hit_test};
 
 mod backlight;
 mod display;
@@ -44,6 +47,7 @@ mod pixel_shift;
 mod fonts;
 mod config;
 mod services;
+mod view;
 
 use backlight::BacklightManager;
 use display::DrmBackend;
@@ -452,158 +456,47 @@ impl FunctionLayer {
                         modules => {
                             let modules_count = modules.len();
                             let mut left_edge = pixel_shift_x + (pixel_shift_width / 2) as f64;
-                            for (i, button) in modules.iter_mut().enumerate() {
-                                let this_button_width = modules_button_widths[i];
-                                if button.changed || complete_redraw {
-                                    // DEBUG: Print draw info for modules
-                                    println!("DRAW MODULES: idx={}, left_edge={}, width={}", i, left_edge, this_button_width);
-                                    let color = if button.active {
-                                        BUTTON_COLOR_ACTIVE
-                                    } else if config.show_button_outlines {
-                                        BUTTON_COLOR_INACTIVE
-                                    } else {
-                                        0.0
-                                    };
-                                    if !complete_redraw {
-                                        c.set_source_rgb(0.0, 0.0, 0.0);
-                                        c.rectangle(left_edge, bot - radius, this_button_width, top - bot + radius * 2.0);
-                                        c.fill().unwrap();
-                                    }
-                                    if (button.action != Key::Unknown && button.action != Key::Time && button.action != Key::Macro1 && button.action != Key::Macro2 && button.action != Key::Macro3 && button.action != Key::Macro4) && (button.background || button.active) {
-                                        c.set_source_rgb(color, color, color);
-                                        c.new_sub_path();
-                                        let left = left_edge + radius;
-                                        let right = (left_edge + this_button_width.ceil()) - radius;
-                                        c.arc(right, bot, radius, (-90.0f64).to_radians(), (0.0f64).to_radians());
-                                        c.arc(right, top, radius, (0.0f64).to_radians(), (90.0f64).to_radians());
-                                        c.arc(left, top, radius, (90.0f64).to_radians(), (180.0f64).to_radians());
-                                        c.arc(left, bot, radius, (180.0f64).to_radians(), (270.0f64).to_radians());
-                                        c.close_path();
-                                        c.fill().unwrap();
-                                    }
-                                    c.set_source_rgb(1.0, 1.0, 1.0);
-                                    button.render(&c, height, left_edge, this_button_width.ceil() as u64, pixel_shift_y);
-                                    
-                                        // Show current user info and status on first module if available
-                                    if i == 0 {
-                                            if let Some(status) = &session_state {
-                                                let user = &status.user;
-                                                if !user.is_empty() {
-                                            c.set_source_rgb(0.8, 0.8, 0.8);
-                                            c.set_font_size(12.0);
-                                                    let user_text = format!("User: {}", user);
-                                                    let status_text = format!("Status: {}", status.session_type);
-                                                    c.move_to(left_edge + 5.0, bot + 20.0);
-                                            c.show_text(&user_text).unwrap();
-                                                    c.move_to(left_edge + 5.0, bot + 40.0);
-                                                    c.show_text(&status_text).unwrap();
-                                                }
-                                        }
-                                    }
-                                    
-                                    button.changed = false;
-                                    if !complete_redraw {
-                                        modified_regions.push(ClipRect::new(
-                                            height as u16 - top as u16 - radius as u16,
-                                            left_edge as u16,
-                                            height as u16 - bot as u16 + radius as u16,
-                                            left_edge as u16 + this_button_width as u16
-                                        ));
-                                    }
-                                }
-                                // Always update left_edge
-                                left_edge += this_button_width;
-                                if i != modules_count - 1 {
-                                    left_edge += BUTTON_SPACING_PX as f64;
-                                }
-                            }
+                            draw_module_section(
+                                &c,
+                                modules,
+                                &modules_button_widths,
+                                modules_width,
+                                modules_count,
+                                left_edge,
+                                bot,
+                                top,
+                                radius,
+                                height,
+                                config,
+                                complete_redraw,
+                                &mut modified_regions,
+                                session_state,
+                            );
                         }
                     }
                     }
+                    // Reverse the login screen condition for testing
                     Some(state) if state.session_type == "login-screen" => {
                     // No user logged in - show login screen
                     let login_area_width = modules_width;
                     let login_area_height = top - bot;
                     let login_x = pixel_shift_x + (pixel_shift_width / 2) as f64;
                     let login_y = bot;
-                    
-                    // Draw login background
-                    if complete_redraw {
-                        c.set_source_rgb(0.1, 0.1, 0.1); // Dark background
-                        c.rectangle(login_x, login_y, login_area_width, login_area_height);
-                        c.fill().unwrap();
-                    }
-                    
-                    // Draw login border
-                    c.set_source_rgb(0.3, 0.3, 0.3);
-                    c.set_line_width(2.0);
-                    c.rectangle(login_x + 2.0, login_y + 2.0, login_area_width - 4.0, login_area_height - 4.0);
-                    c.stroke().unwrap();
-                    
-                    // Draw login text
-                    c.set_source_rgb(1.0, 1.0, 1.0);
-                    c.set_font_size(24.0);
-                    
-                    let welcome_text = "Welcome";
-                    let login_text = "Please log in to continue";
-                    let instruction_text = "Use your system login";
-                    
-                    let welcome_extents = c.text_extents(welcome_text).unwrap();
-                    let login_extents = c.text_extents(login_text).unwrap();
-                    let instruction_extents = c.text_extents(instruction_text).unwrap();
-                    
-                    // Center the text
-                    let center_x = login_x + login_area_width / 2.0;
-                    let center_y = login_y + login_area_height / 2.0;
-                    
-                    // Draw welcome text
-                    c.move_to(
-                        center_x - welcome_extents.width() / 2.0,
-                        center_y - 30.0
+                    // Draw login screen using the separated function
+                    draw_login_screen(
+                        &c,
+                        login_x,
+                        login_y,
+                        login_area_width,
+                        login_area_height,
+                        top,
+                        bot,
+                        radius,
+                        height,
+                        complete_redraw,
+                        &mut modified_regions,
+                        session_state,
                     );
-                    c.show_text(welcome_text).unwrap();
-                    
-                    // Draw login instruction
-                    c.set_font_size(18.0);
-                    c.move_to(
-                        center_x - login_extents.width() / 2.0,
-                        center_y + 10.0
-                    );
-                    c.show_text(login_text).unwrap();
-                    
-                    // Draw instruction text
-                    c.set_font_size(14.0);
-                    c.set_source_rgb(0.7, 0.7, 0.7);
-                    c.move_to(
-                        center_x - instruction_extents.width() / 2.0,
-                        center_y + 40.0
-                    );
-                    c.show_text(instruction_text).unwrap();
-                        
-                        // Draw user and status at the bottom of the login area
-                        if let Some(status) = &session_state {
-                            let user = &status.user;
-                            if !user.is_empty() {
-                                c.set_source_rgb(0.8, 0.8, 0.8);
-                                c.set_font_size(12.0);
-                                let user_text = format!("User: {}", user);
-                                let status_text = format!("Status: {}", status.session_type);
-                                c.move_to(login_x + 10.0, login_y + login_area_height - 30.0);
-                                c.show_text(&user_text).unwrap();
-                                c.move_to(login_x + 10.0, login_y + login_area_height - 10.0);
-                                c.show_text(&status_text).unwrap();
-                            }
-                        }
-                    
-                    // Add modified region for login screen
-                    if !complete_redraw {
-                        modified_regions.push(ClipRect::new(
-                            height as u16 - top as u16 - radius as u16,
-                            login_x as u16,
-                            height as u16 - bot as u16 + radius as u16,
-                            login_x as u16 + login_area_width as u16
-                        ));
-                        }
                     }
                     _ => {
                         // Handle None or unknown status if needed
@@ -624,141 +517,31 @@ impl FunctionLayer {
                         };
                         match split.media.as_mut_slice() {
                             media => {
-                                let total_spacing = if media_count > 1 { media_spacing_px * (media_count as f64 - 1.0) } else { 0.0 };
-                                let button_area = media_width - total_spacing;
                                 // Weight-based layout
                                 let weights: Vec<f32> = media.iter().map(|b| b.fraction.unwrap_or(1.0)).collect();
                                 let total_weight: f32 = weights.iter().sum();
-                                let mut media_button_widths: Vec<f64> = weights.iter().map(|w| button_area * (*w as f64 / total_weight as f64)).collect();
+                                let mut media_button_widths: Vec<f64> = weights.iter().map(|w| (media_width - media_spacing) * (*w as f64 / total_weight as f64)).collect();
                                 // Last button absorbs rounding error
                                 let sum_widths: f64 = media_button_widths.iter().sum();
                                 if let Some(last) = media_button_widths.last_mut() {
-                                    *last += button_area - sum_widths;
+                                    *last += (media_width - media_spacing) - sum_widths;
                                 }
-                                for (i, button) in media.iter_mut().enumerate() {
-                                    if button.changed || complete_redraw {
-                                        // DEBUG: Print draw info for media
-                                        println!("DRAW MEDIA: idx={}, left_edge={}, width={}", i, left_edge, media_button_widths[i]);
-                                        let color = if button.active {
-                                            BUTTON_COLOR_ACTIVE
-                                        } else if config.show_button_outlines {
-                                            BUTTON_COLOR_INACTIVE
-                                        } else {
-                                            0.0
-                                        };
-                                        // Ensure macro buttons always have background
-                                        if matches!(button.action, Key::Macro1 | Key::Macro2 | Key::Macro3 | Key::Macro4) {
-                                            button.background = true;
-                                        }
-                                        let this_button_width = media_button_widths[i];
-                                        let is_first = i == 0;
-                                        let is_last = i == media_count - 1;
-                                        let x = left_edge;
-                                        let y = bot - radius;
-                                        let w = this_button_width;
-                                        let h = top - bot + radius * 2.0;
-                                        let r = radius.min(h / 2.0);
-                                        if (button.action != Key::Unknown) && (button.background || button.active) {
-                                            c.set_source_rgb(color, color, color);
-                                            if media_count == 1 {
-                                                // زر واحد فقط: كل الزوايا دائرية
-                                                c.new_sub_path();
-                                                c.arc(x + w - r, y + r, r, (270.0f64).to_radians(), (360.0f64).to_radians());
-                                                c.arc(x + w - r, y + h - r, r, (0.0f64).to_radians(), (90.0f64).to_radians());
-                                                c.arc(x + r, y + h - r, r, (90.0f64).to_radians(), (180.0f64).to_radians());
-                                                c.arc(x + r, y + r, r, (180.0f64).to_radians(), (270.0f64).to_radians());
-                                                c.close_path();
-                                                c.fill().unwrap();
-                                            } else {
-                                                if is_first && is_last {
-                                                    // Single button in group: all corners rounded
-                                                    c.new_sub_path();
-                                                    c.arc(x + w - r, y + r, r, (270.0f64).to_radians(), (360.0f64).to_radians());
-                                                    c.arc(x + w - r, y + h - r, r, (0.0f64).to_radians(), (90.0f64).to_radians());
-                                                    c.arc(x + r, y + h - r, r, (90.0f64).to_radians(), (180.0f64).to_radians());
-                                                    c.arc(x + r, y + r, r, (180.0f64).to_radians(), (270.0f64).to_radians());
-                                                    c.close_path();
-                                                    c.fill().unwrap();
-                                                } else if is_first {
-                                                    // First button: left corners rounded
-                                                    c.new_sub_path();
-                                                    c.move_to(x + r, y);
-                                                    c.line_to(x + w, y);
-                                                    c.line_to(x + w, y + h);
-                                                    c.line_to(x + r, y + h);
-                                                    c.arc(x + r, y + h - r, r, (90.0f64).to_radians(), (180.0f64).to_radians());
-                                                    c.line_to(x, y + r);
-                                                    c.arc(x + r, y + r, r, (180.0f64).to_radians(), (270.0f64).to_radians());
-                                                    c.close_path();
-                                                    c.fill().unwrap();
-                                                } else if is_last {
-                                                    // Last button: right corners rounded
-                                                    c.new_sub_path();
-                                                    c.move_to(x, y);
-                                                    c.line_to(x + w - r, y);
-                                                    c.arc(x + w - r, y + r, r, (270.0f64).to_radians(), (360.0f64).to_radians());
-                                                    c.line_to(x + w, y + h - r);
-                                                    c.arc(x + w - r, y + h - r, r, (0.0f64).to_radians(), (90.0f64).to_radians());
-                                                    c.line_to(x, y + h);
-                                                    c.close_path();
-                                                    c.fill().unwrap();
-                                                } else {
-                                                    // Middle buttons: no rounded corners
-                                                    c.rectangle(x, y, w, h);
-                                                    c.fill().unwrap();
-                                                }
-                                            }
-                                        }
-                                        // For macro buttons, always draw background with proper rounded corners
-                                        if matches!(button.action, Key::Macro1 | Key::Macro2 | Key::Macro3 | Key::Macro4) && (button.background || button.active) {
-                                            c.set_source_rgb(color, color, color);
-                                            if is_first {
-                                                // First macro button: left corners rounded
-                                                c.new_sub_path();
-                                                c.move_to(x + r, y);
-                                                c.line_to(x + w, y);
-                                                c.line_to(x + w, y + h);
-                                                c.line_to(x + r, y + h);
-                                                c.arc(x + r, y + h - r, r, (90.0f64).to_radians(), (180.0f64).to_radians());
-                                                c.line_to(x, y + r);
-                                                c.arc(x + r, y + r, r, (180.0f64).to_radians(), (270.0f64).to_radians());
-                                                c.close_path();
-                                                c.fill().unwrap();
-                                            } else if is_last {
-                                                // Last macro button: right corners rounded
-                                                c.new_sub_path();
-                                                c.move_to(x, y);
-                                                c.line_to(x + w - r, y);
-                                                c.arc(x + w - r, y + r, r, (270.0f64).to_radians(), (360.0f64).to_radians());
-                                                c.line_to(x + w, y + h - r);
-                                                c.arc(x + w - r, y + h - r, r, (0.0f64).to_radians(), (90.0f64).to_radians());
-                                                c.line_to(x, y + h);
-                                                c.close_path();
-                                                c.fill().unwrap();
-                                            } else {
-                                                // Middle macro buttons: no rounded corners
-                                                c.rectangle(x, y, w, h);
-                                                c.fill().unwrap();
-                                            }
-                                        }
-                                        c.set_source_rgb(1.0, 1.0, 1.0);
-                                        button.render(&c, height, left_edge, this_button_width.ceil() as u64, pixel_shift_y);
-                                        button.changed = false;
-                                        if !complete_redraw {
-                                            modified_regions.push(ClipRect::new(
-                                                height as u16 - top as u16 - radius as u16,
-                                                left_edge as u16,
-                                                height as u16 - bot as u16 + radius as u16,
-                                                left_edge as u16 + this_button_width as u16
-                                            ));
-                                        }
-                                    }
-                                    // Always update left_edge
-                                    left_edge += media_button_widths[i];
-                                    if i != media_count - 1 {
-                                        left_edge += media_spacing_px;
-                                    }
-                                }
+                                draw_media_section(
+                                    &c,
+                                    media,
+                                    &media_button_widths,
+                                    media_width,
+                                    media_count,
+                                    left_edge,
+                                    bot,
+                                    top,
+                                    radius,
+                                    height,
+                                    config,
+                                    complete_redraw,
+                                    &mut modified_regions,
+                                    session_state,
+                                );
                             }
                         } // Close the if !modules_only_redraw block
                 }
@@ -957,9 +740,9 @@ impl FunctionLayer {
                 }
                 for (i, _) in split.media.iter().enumerate() {
                     let right_edge = left_edge + media_button_widths[i];
-                    println!("HITTEST MEDIA: idx={}, left_edge={}, right_edge={}", i, left_edge, right_edge);
-                    if x >= left_edge && x < right_edge {
-                        return Some(("media", i));
+                    // println!("HITTEST MEDIA: idx={}, left_edge={}, right_edge={}", i, left_edge, right_edge);
+                    if let Some(idx) = media_hit_test(x, left_edge, &media_button_widths, media_count) {
+                        return Some(("media", idx));
                     }
                     left_edge = right_edge;
                     if i != media_count - 1 {
