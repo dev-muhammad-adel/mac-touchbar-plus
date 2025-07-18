@@ -27,7 +27,7 @@ pub fn draw_login_screen(
     let text_size = (pill_h * 0.38).min(20.0).max(13.0); // 13–20px
     let user_text = session_state
         .and_then(|s| if !s.user.is_empty() { Some(format!("Welcome, {}", s.user)) } else { None })
-        .unwrap_or_else(|| "Welcome!".to_string());
+        .unwrap_or_else(|| "Please Enter User Password!".to_string());
     c.set_font_size(text_size);
     c.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
     let ext = c.text_extents(&user_text).unwrap();

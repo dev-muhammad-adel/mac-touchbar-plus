@@ -395,11 +395,10 @@ impl FunctionLayer {
                 c.translate(height as f64, 0.0);
                 c.rotate((90.0f64).to_radians());
                 let pixel_shift_width = if config.enable_pixel_shift { PIXEL_SHIFT_WIDTH_PX } else { 0 };
+                let total_width = (width - pixel_shift_width as i32) as f64;
                 let group_spacing = BUTTON_SPACING_PX as f64; // space between groups
-                let total_width = (width - pixel_shift_width as i32) as f32;
-                let usable_width = total_width as f64 - group_spacing;
-                let modules_width = (split.modules_width as f64 * usable_width).round();
-                let media_width = (split.media_width as f64 * usable_width).round();
+                let modules_width = (split.modules_width as f64 * total_width).round();
+                let media_width = total_width - modules_width - group_spacing;
                 let modules_count = split.modules.len();
                 let media_count = split.media.len();
                 let modules_spacing = if modules_count > 1 { BUTTON_SPACING_PX as f64 * (modules_count as f64 - 1.0) } else { 0.0 };
@@ -415,18 +414,15 @@ impl FunctionLayer {
                 }
                 // --- MEDIA BUTTON WIDTHS WITH FRACTION ---
                 let media_spacing_px = 2.0f64; // 2px spacing for AppLayerKeys1Media
-                let media_count = {
-                    match split.media.as_mut_slice() {
-                        media => media.len(),
-                    }
-                };
+                let total_spacing = if media_count > 1 { media_spacing_px * (media_count as f64 - 1.0) } else { 0.0 };
+                let button_area = media_width - total_spacing;
                 let weights: Vec<f32> = split.media.iter().map(|b| b.fraction.unwrap_or(1.0)).collect();
                 let total_weight: f32 = weights.iter().sum();
-                let mut media_button_widths: Vec<f64> = weights.iter().map(|w| (media_width - media_spacing) * (*w as f64 / total_weight as f64)).collect();
+                let mut media_button_widths: Vec<f64> = weights.iter().map(|w| button_area * (*w as f64 / total_weight as f64)).collect();
                 // Last button absorbs rounding error
                 let sum_widths: f64 = media_button_widths.iter().sum();
                 if let Some(last) = media_button_widths.last_mut() {
-                    *last += (media_width - media_spacing) - sum_widths;
+                    *last += button_area - sum_widths;
                 }
                 let radius = 8.0f64;
                 let bot = (height as f64) * 0.15;
@@ -505,45 +501,37 @@ impl FunctionLayer {
                 
                 // Add spacing between modules and media sections
                 let mut left_edge = pixel_shift_x + (pixel_shift_width / 2) as f64 + modules_width + group_spacing;
-                
+                println!("modules_width: {}", modules_width);
+                println!("left_edge: {}", left_edge);
                 // Skip media section if this is a modules-only redraw
                 if !modules_only_redraw {
                     // Draw media section
                     let media_spacing_px = 2.0f64; // 2px spacing for AppLayerKeys1Media
-                        let media_count = {
-                            match split.media.as_mut_slice() {
-                                media => media.len(),
-                            }
-                        };
-                        match split.media.as_mut_slice() {
-                            media => {
-                                // Weight-based layout
-                                let weights: Vec<f32> = media.iter().map(|b| b.fraction.unwrap_or(1.0)).collect();
-                                let total_weight: f32 = weights.iter().sum();
-                                let mut media_button_widths: Vec<f64> = weights.iter().map(|w| (media_width - media_spacing) * (*w as f64 / total_weight as f64)).collect();
-                                // Last button absorbs rounding error
-                                let sum_widths: f64 = media_button_widths.iter().sum();
-                                if let Some(last) = media_button_widths.last_mut() {
-                                    *last += (media_width - media_spacing) - sum_widths;
-                                }
-                                draw_media_section(
-                                    &c,
-                                    media,
-                                    &media_button_widths,
-                                    media_width,
-                                    media_count,
-                                    left_edge,
-                                    bot,
-                                    top,
-                                    radius,
-                                    height,
-                                    config,
-                                    complete_redraw,
-                                    &mut modified_regions,
-                                    session_state,
-                                );
-                            }
-                        } // Close the if !modules_only_redraw block
+                    let total_spacing = if media_count > 1 { media_spacing_px * (media_count as f64 - 1.0) } else { 0.0 };
+                    let button_area = media_width - total_spacing;
+                    let weights: Vec<f32> = split.media.iter().map(|b| b.fraction.unwrap_or(1.0)).collect();
+                    let total_weight: f32 = weights.iter().sum();
+                    let mut media_button_widths: Vec<f64> = weights.iter().map(|w| button_area * (*w as f64 / total_weight as f64)).collect();
+                    let sum_widths: f64 = media_button_widths.iter().sum();
+                    if let Some(last) = media_button_widths.last_mut() {
+                        *last += button_area - sum_widths;
+                    }
+                    draw_media_section(
+                        &c,
+                        &mut split.media,
+                        &media_button_widths,
+                        media_width,
+                        media_count,
+                        left_edge,
+                        bot,
+                        top,
+                        radius,
+                        height,
+                        config,
+                        complete_redraw,
+                        &mut modified_regions,
+                        session_state,
+                    );
                 }
                 
                 modified_regions
@@ -728,7 +716,7 @@ impl FunctionLayer {
             let group_spacing = BUTTON_SPACING_PX as f64;
             let total_width = (width - group_spacing as i32) as f64;
             let modules_width = (split.modules_width as f64 * total_width).round();
-            let media_width = (split.media_width as f64 * total_width).round();
+            let media_width = total_width - modules_width - group_spacing;
             let media_count = split.media.len();
             let media_spacing_px = 2.0f64;
             let total_spacing = if media_count > 1 { media_spacing_px * (media_count as f64 - 1.0) } else { 0.0 };
