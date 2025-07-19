@@ -3,6 +3,7 @@ use cairo::{Context};
 const BUTTON_COLOR_INACTIVE: f64 = 0.350;
 const PILL_RADIUS: f64 = 8.0;
 
+/// Draws the login screen with fade in/out using anim_progress as alpha (0.0 = transparent, 1.0 = opaque)
 pub fn draw_login_screen(
     c: &Context,
     login_x: f64,
@@ -15,8 +16,8 @@ pub fn draw_login_screen(
     _height: i32,
     complete_redraw: bool,
     modified_regions: &mut Vec<drm::control::ClipRect>,
-    session_state: Option<&crate::services::sessionmanager::SessionState>,
-    anim_progress: f64,
+    _session_state: Option<&crate::services::sessionmanager::SessionState>,
+    anim_progress: f64, // 0.0 = transparent, 1.0 = opaque
 ) {
     // --- Media-style vertical position and height ---
     let pill_y = bot - PILL_RADIUS;
@@ -24,29 +25,22 @@ pub fn draw_login_screen(
     let pill_x = login_x;
     let pill_w = login_area_width;
 
-    // --- Text ---
-    let text_size = (pill_h * 0.38).min(20.0).max(13.0); // 13–20px
-    let user_text = session_state
-        .and_then(|s| if !s.user.is_empty() { Some(format!("Welcome, {}", s.user)) } else { None })
-        .unwrap_or_else(|| "Please Enter User Password!".to_string());
+    // --- Modern single-line message with emoji ---
+    let message = "🔒 Welcome to login screen. Unlock your session.";
+    let text_size = (pill_h * 0.38).min(22.0).max(14.0); // 14–22px, a bit larger for single line
     c.set_font_size(text_size);
     c.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
-    let ext = c.text_extents(&user_text).unwrap();
+    let ext = c.text_extents(&message).unwrap();
     let group_h = ext.height();
     let group_w = ext.width();
-    // For vertical centering, center the group in the pill
+    // Center the text in the pill
     let group_y = pill_y + (pill_h - group_h) / 2.0;
     let group_x = pill_x + (pill_w - group_w) / 2.0;
 
-    // --- Draw pill background: matches modules area ---
-    c.set_source_rgba(BUTTON_COLOR_INACTIVE, BUTTON_COLOR_INACTIVE, BUTTON_COLOR_INACTIVE, anim_progress);
-    rounded_rect(c, pill_x, pill_y, pill_w, pill_h, PILL_RADIUS);
-    c.fill().unwrap();
-
-    // --- Draw text ---
+    // --- Draw text with emoji (no background) ---
     c.set_source_rgba(1.0, 1.0, 1.0, anim_progress);
     c.move_to(group_x, group_y + group_h - 2.0);
-    c.show_text(&user_text).unwrap();
+    c.show_text(&message).unwrap();
 
     // Add modified region for login screen
     if !complete_redraw {
