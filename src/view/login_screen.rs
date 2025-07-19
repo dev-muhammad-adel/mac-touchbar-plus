@@ -16,6 +16,7 @@ pub fn draw_login_screen(
     complete_redraw: bool,
     modified_regions: &mut Vec<drm::control::ClipRect>,
     session_state: Option<&crate::services::sessionmanager::SessionState>,
+    anim_progress: f64,
 ) {
     // --- Media-style vertical position and height ---
     let pill_y = bot - PILL_RADIUS;
@@ -38,12 +39,12 @@ pub fn draw_login_screen(
     let group_x = pill_x + (pill_w - group_w) / 2.0;
 
     // --- Draw pill background: matches modules area ---
-    c.set_source_rgb(BUTTON_COLOR_INACTIVE, BUTTON_COLOR_INACTIVE, BUTTON_COLOR_INACTIVE);
+    c.set_source_rgba(BUTTON_COLOR_INACTIVE, BUTTON_COLOR_INACTIVE, BUTTON_COLOR_INACTIVE, anim_progress);
     rounded_rect(c, pill_x, pill_y, pill_w, pill_h, PILL_RADIUS);
     c.fill().unwrap();
 
     // --- Draw text ---
-    c.set_source_rgb(1.0, 1.0, 1.0);
+    c.set_source_rgba(1.0, 1.0, 1.0, anim_progress);
     c.move_to(group_x, group_y + group_h - 2.0);
     c.show_text(&user_text).unwrap();
 

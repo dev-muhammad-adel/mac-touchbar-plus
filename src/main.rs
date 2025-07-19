@@ -383,7 +383,7 @@ impl FunctionLayer {
             }),
         }
     }
-    fn draw(&mut self, config: &Config, width: i32, height: i32, surface: &Surface, pixel_shift: (f64, f64), complete_redraw: bool, modules_only_redraw: bool, session_state: Option<&SessionState>, layer_index: Option<usize>) -> Vec<ClipRect> {
+    fn draw(&mut self, config: &Config, width: i32, height: i32, surface: &Surface, pixel_shift: (f64, f64), complete_redraw: bool, modules_only_redraw: bool, session_state: Option<&SessionState>, layer_index: Option<usize>, login_anim_progress: f64) -> Vec<ClipRect> {
         match &mut self.split {
             Some(split) => {
                 let c = Context::new(&surface).unwrap();
@@ -471,7 +471,6 @@ impl FunctionLayer {
                         }
                     }
                     }
-                    // Reverse the login screen condition for testing
                     Some(state) if state.session_type == "login-screen" => {
                     // No user logged in - show login screen
                     let login_area_width = modules_width;
@@ -492,6 +491,7 @@ impl FunctionLayer {
                         complete_redraw,
                         &mut modified_regions,
                         session_state,
+                        login_anim_progress,
                     );
                     }
                     _ => {
@@ -883,6 +883,9 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
     let mut surface = ImageSurface::create(Format::ARgb32, db_width as i32, db_height as i32).unwrap();
     let mut active_layer = 0;
     let mut needs_complete_redraw = true;
+    let mut login_anim_progress: f64 = 0.0;
+    let mut login_animating: bool = false;
+    let mut last_anim_time = std::time::Instant::now();
 
     let mut input_tb = Libinput::new_with_udev(Interface);
     let mut input_main = Libinput::new_with_udev(Interface);
@@ -947,6 +950,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
     });
     // --- end eventfd integration ---
     let mut current_session: Option<SessionState> = None;
+    
     // --- main event loop ---
     loop {
         if cfg_mgr.update_config(&mut cfg, &mut layers, width) {
@@ -960,6 +964,11 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                 needs_complete_redraw = true;
             }
             next_timeout_ms = min(next_timeout_ms, pixel_shift_next_timeout_ms);
+        }
+        
+        // Add animation timeout - ensure animation runs even without input events
+        if login_animating {
+            next_timeout_ms = min(next_timeout_ms, 16); // 16ms = ~60fps for smooth animation
         }
         let current_minute = Local::now().minute();
 	for button in &mut layers[active_layer].buttons {
@@ -982,7 +991,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
             } else {
                 (0.0, 0.0)
             };
-            let clips = layers[active_layer].draw(&cfg, width as i32, height as i32, &surface, shift, needs_complete_redraw, false, current_session.as_ref(), Some(active_layer));
+            let clips = layers[active_layer].draw(&cfg, width as i32, height as i32, &surface, shift, needs_complete_redraw, false, current_session.as_ref(), Some(active_layer), login_anim_progress);
             let data = surface.data().unwrap();
             drm.map().unwrap().as_mut()[..data.len()].copy_from_slice(&data);
             drm.dirty(&clips).unwrap();
@@ -1005,6 +1014,18 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                     // Now process event_rx as before
                     if let Ok(new_state) = event_rx.try_recv() {
                         println!("[main] Session state changed: {:?}", new_state);
+                        
+                        // Step 2: Trigger animation when login screen becomes visible
+                        if new_state.session_type == "login-screen" && !login_animating {
+                            login_anim_progress = 0.0;
+                            login_animating = true;
+                            needs_complete_redraw = true;
+                        } else if new_state.session_type != "login-screen" && login_animating {
+                            login_animating = false;
+                            login_anim_progress = 0.0;
+                            needs_complete_redraw = true;
+                        }
+                        
                         current_session = Some(new_state);
                         needs_complete_redraw = true;
                         println!("[main] Set needs_complete_redraw = true");
@@ -1180,9 +1201,42 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
         
         backlight.update_backlight(&cfg);
         
+        // Step 3: Increment animation in main loop (time-based)
+        if login_animating && login_anim_progress < 1.0 {
+            let now = std::time::Instant::now();
+            let elapsed = now.duration_since(last_anim_time).as_millis() as f64;
+            
+            // Update animation every 50ms (20fps for smooth animation)
+            if elapsed >= 50.0 {
+                login_anim_progress += 0.05; // Increment by 0.05 every 50ms
+                last_anim_time = now;
+                
+                if login_anim_progress >= 1.0 {
+                    login_anim_progress = 1.0;
+                    login_animating = false;
+                }
+                needs_complete_redraw = true;
+            }
+        }
+        
         // Process session events (event-driven)
         if let Ok(new_state) = event_rx.try_recv() {
             println!("[main] Session state changed: {:?}", new_state);
+            
+            // Step 2: Trigger animation when login screen becomes visible
+            // For testing: trigger when desktop-logged (inverted conditions)
+            if new_state.session_type == "desktop-logged" && !login_animating {
+                println!("[ANIM] Starting login animation (testing mode)");
+                login_anim_progress = 0.0;
+                login_animating = true;
+                needs_complete_redraw = true;
+            } else if new_state.session_type != "desktop-logged" && login_animating {
+                println!("[ANIM] Stopping login animation");
+                login_animating = false;
+                login_anim_progress = 0.0;
+                needs_complete_redraw = true;
+            }
+            
             current_session = Some(new_state);
             needs_complete_redraw = true;
             println!("[main] Set needs_complete_redraw = true");
