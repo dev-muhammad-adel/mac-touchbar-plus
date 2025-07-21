@@ -50,7 +50,6 @@ mod config;
 mod services;
 mod view;
 mod animation;
-mod crash_handler;
 
 use backlight::BacklightManager;
 use display::DrmBackend;
@@ -861,31 +860,35 @@ fn toggle_key<F>(uinput: &mut UInputHandle<F>, code: Key, value: i32) where F: A
 }
 
 fn main() {
-    let drm = match DrmBackend::open_card() {
-        Ok(drm) => drm,
-        Err(e) => {
-            eprintln!("Failed to open DRM card: {}", e);
-            return;
-        }
-    };
-
-    // Create a Tokio runtime for async operations
-    let rt = match tokio::runtime::Runtime::new() {
-        Ok(rt) => rt,
-        Err(e) => {
-            eprintln!("Failed to create Tokio runtime: {}", e);
-            return;
-        }
-    };
-
-    // Run the main application with crash handler
-    let _drm = crash_handler::run_with_crash_handler(drm, |drm| {
+    let mut drm = DrmBackend::open_card().unwrap();
+    let (height, width) = drm.mode().size();
+    let _ = panic::catch_unwind(AssertUnwindSafe(|| {
+        // Create a Tokio runtime for async operations
+        let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            if let Err(e) = real_main(drm).await {
-                eprintln!("Application error: {}", e);
-            }
-        })
-    });
+            let _ = real_main(&mut drm).await;
+        });
+    }));
+    let crash_bitmap = include_bytes!("crash_bitmap.raw");
+    let mut map = drm.map().unwrap();
+    let data = map.as_mut();
+    let mut wptr = 0;
+    for byte in crash_bitmap {
+        for i in 0..8 {
+            let bit = ((byte >> i) & 0x1) == 0;
+            let color = if bit { 0xFF } else { 0x0 };
+            data[wptr] = color;
+            data[wptr + 1] = color;
+            data[wptr + 2] = color;
+            data[wptr + 3] = color;
+            wptr += 4;
+        }
+    }
+    drop(map);
+    drm.dirty(&[ClipRect::new(0, 0, height as u16, width as u16)]).unwrap();
+    let mut sigset = SigSet::empty();
+    sigset.add(Signal::SIGTERM);
+    sigset.wait().unwrap();
 }
 
 async fn real_main(drm: &mut DrmBackend) -> Result<()> {
