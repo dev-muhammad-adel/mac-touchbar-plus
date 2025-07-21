@@ -26,7 +26,7 @@ pub fn draw_login_screen(
     let pill_w = login_area_width;
 
     // --- Modern single-line message with emoji ---
-    let message = "🔒 Welcome to login screen. Unlock your session.";
+    let message = "Welcome to login screen. Unlock your session.";
     let text_size = (pill_h * 0.38).min(22.0).max(14.0); // 14–22px, a bit larger for single line
     c.set_font_size(text_size);
     c.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Bold);

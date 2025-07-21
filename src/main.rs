@@ -50,6 +50,7 @@ mod config;
 mod services;
 mod view;
 mod animation;
+mod crash_handler;
 
 use backlight::BacklightManager;
 use display::DrmBackend;
@@ -386,7 +387,7 @@ impl FunctionLayer {
             }),
         }
     }
-    fn draw(&mut self, config: &Config, width: i32, height: i32, surface: &Surface, pixel_shift: (f64, f64), complete_redraw: bool, modules_only_redraw: bool, session_state: Option<&SessionState>, layer_index: Option<usize>, login_anim_progress: f64) -> Vec<ClipRect> {
+    fn draw(&mut self, config: &Config, width: i32, height: i32, surface: &Surface, pixel_shift: (f64, f64), complete_redraw: bool, modules_only_redraw: bool, session_state: Option<&SessionState>, layer_index: Option<usize>, login_anim_progress: f64, app_layer3_slide_progress: f64) -> Vec<ClipRect> {
         match &mut self.split {
             Some(split) => {
                 let c = Context::new(&surface).unwrap();
@@ -552,6 +553,26 @@ impl FunctionLayer {
                 let pixel_shift_width = if config.enable_pixel_shift { PIXEL_SHIFT_WIDTH_PX } else { 0 };
                 // Use custom gap for AppLayerKeys3 (layer index 3), else default
                 let gap = if let Some(3) = layer_index { APP_LAYER_KEYS3_GAP_PX } else { BUTTON_SPACING_PX as f64 };
+                // --- AppLayerKeys3 slide animation translation ---
+                if let Some(3) = layer_index {
+                    // If progress is 0.0, skip drawing (prevents flicker)
+                    if app_layer3_slide_progress == 0.0 {
+                        return modified_regions;
+                    }
+                    // Slide in: progress 0.0 (off right) to 1.0 (onscreen)
+                    // Slide out: progress 1.0 (onscreen) to 0.0 (off left)
+                    let slide_offset = if app_layer3_slide_progress < 1.0 {
+                        let direction = if app_layer3_slide_progress > 0.0 { 1.0 } else { -1.0 };
+                        if direction > 0.0 {
+                            (1.0 - app_layer3_slide_progress) * width as f64
+                        } else {
+                            -app_layer3_slide_progress * width as f64
+                        }
+                    } else {
+                        0.0
+                    };
+                    c.translate(slide_offset, 0.0);
+                }
                 // --- FLAT BUTTON WIDTHS WITH FRACTION ---
                 let count = self.buttons.len();
                 let spacing = if count > 1 { gap * (count as f64 - 1.0) } else { 0.0 };
@@ -840,35 +861,31 @@ fn toggle_key<F>(uinput: &mut UInputHandle<F>, code: Key, value: i32) where F: A
 }
 
 fn main() {
-    let mut drm = DrmBackend::open_card().unwrap();
-    let (height, width) = drm.mode().size();
-    let _ = panic::catch_unwind(AssertUnwindSafe(|| {
-        // Create a Tokio runtime for async operations
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let _ = real_main(&mut drm).await;
-        });
-    }));
-    let crash_bitmap = include_bytes!("crash_bitmap.raw");
-    let mut map = drm.map().unwrap();
-    let data = map.as_mut();
-    let mut wptr = 0;
-    for byte in crash_bitmap {
-        for i in 0..8 {
-            let bit = ((byte >> i) & 0x1) == 0;
-            let color = if bit { 0xFF } else { 0x0 };
-            data[wptr] = color;
-            data[wptr + 1] = color;
-            data[wptr + 2] = color;
-            data[wptr + 3] = color;
-            wptr += 4;
+    let drm = match DrmBackend::open_card() {
+        Ok(drm) => drm,
+        Err(e) => {
+            eprintln!("Failed to open DRM card: {}", e);
+            return;
         }
-    }
-    drop(map);
-    drm.dirty(&[ClipRect::new(0, 0, height as u16, width as u16)]).unwrap();
-    let mut sigset = SigSet::empty();
-    sigset.add(Signal::SIGTERM);
-    sigset.wait().unwrap();
+    };
+
+    // Create a Tokio runtime for async operations
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("Failed to create Tokio runtime: {}", e);
+            return;
+        }
+    };
+
+    // Run the main application with crash handler
+    let _drm = crash_handler::run_with_crash_handler(drm, |drm| {
+        rt.block_on(async {
+            if let Err(e) = real_main(drm).await {
+                eprintln!("Application error: {}", e);
+            }
+        })
+    });
 }
 
 async fn real_main(drm: &mut DrmBackend) -> Result<()> {
@@ -887,6 +904,10 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
     let mut active_layer = 0;
     let mut needs_complete_redraw = true;
     let mut animation = Animation::new(0.05, 50.0); // step, interval_ms
+    // --- AppLayerKeys3 slide animation ---
+    let mut app_layer3_slide_anim = Animation::new(0.18, 16.0); // 60fps for smooth slide
+    let mut last_layer = active_layer;
+    let mut pending_layer: Option<usize> = None;
 
     let mut input_tb = Libinput::new_with_udev(Interface);
     let mut input_main = Libinput::new_with_udev(Interface);
@@ -966,19 +987,50 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
             }
             next_timeout_ms = min(next_timeout_ms, pixel_shift_next_timeout_ms);
         }
-        
         // Add animation timeout - ensure animation runs even without input events
         if animation.is_running() {
             next_timeout_ms = min(next_timeout_ms, 16); // 16ms = ~60fps for smooth animation
         }
+        // --- AppLayerKeys3 slide animation update ---
+        if app_layer3_slide_anim.is_running() {
+            next_timeout_ms = min(next_timeout_ms, 16);
+        }
         let current_minute = Local::now().minute();
-	for button in &mut layers[active_layer].buttons {
-    	    if (button.action == Key::Time) && (current_minute != last_redraw_minute) {
+        for button in &mut layers[active_layer].buttons {
+            if (button.action == Key::Time) && (current_minute != last_redraw_minute) {
                 needs_complete_redraw = true;
                 last_redraw_minute = current_minute;
-    	    }
-    	}
-
+            }
+        }
+        // --- Detect layer switch and trigger slide animation ---
+        if last_layer != active_layer {
+            if active_layer == 3 {
+                app_layer3_slide_anim.set_progress(0.0); // Set before animate_in
+                app_layer3_slide_anim.animate_in();
+            } else if last_layer == 3 {
+                // Only animate out if NOT switching to Fn keys (assume Fn keys is layer 1 or 0)
+                let fn_layer_indices = [1];
+                if !fn_layer_indices.contains(&active_layer) {
+                    app_layer3_slide_anim.animate_out();
+                    pending_layer = Some(active_layer); // Remember where we want to go
+                    active_layer = 3; // Stay on 3 until animation is done
+                }
+                // If switching to Fn keys, just switch immediately (no animation)
+            }
+            last_layer = active_layer;
+            needs_complete_redraw = true;
+        }
+        // --- Update AppLayerKeys3 slide animation ---
+        if app_layer3_slide_anim.update() {
+            needs_complete_redraw = true;
+        }
+        // After slide-out animation, switch to pending layer if needed
+        if !app_layer3_slide_anim.is_animating_out() && pending_layer.is_some() {
+            active_layer = pending_layer.take().unwrap();
+            last_layer = active_layer;
+            needs_complete_redraw = true;
+        }
+        // --- Restore any_changed variable for redraw logic ---
         let any_changed = if let Some(split) = &layers[active_layer].split {
             split.modules.iter().any(|b| b.changed) || split.media.iter().any(|b| b.changed)
         } else {
@@ -998,7 +1050,14 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
             } else {
                 current_session.as_ref()
             };
-            let clips = layers[active_layer].draw(&cfg, width as i32, height as i32, &surface, shift, needs_complete_redraw, false, session_for_draw, Some(active_layer), animation.progress());
+            // --- Pass slide progress for AppLayerKeys3 ---
+            let app_layer3_slide_progress = if active_layer == 3 || last_layer == 3 {
+                app_layer3_slide_anim.progress()
+            } else {
+                1.0
+            };
+            // Draw only the current active layer (layer 3 during slide-out)
+            let mut clips = layers[active_layer].draw(&cfg, width as i32, height as i32, &surface, shift, needs_complete_redraw, false, session_for_draw, Some(active_layer), animation.progress(), app_layer3_slide_progress);
             let data = surface.data().unwrap();
             drm.map().unwrap().as_mut()[..data.len()].copy_from_slice(&data);
             drm.dirty(&clips).unwrap();

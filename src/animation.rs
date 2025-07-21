@@ -75,4 +75,7 @@ impl Animation {
     }
     pub fn progress(&self) -> f64 { self.progress }
     pub fn is_running(&self) -> bool { self.running }
+    pub fn set_progress(&mut self, value: f64) {
+        self.progress = value.clamp(0.0, 1.0);
+    }
 } 
