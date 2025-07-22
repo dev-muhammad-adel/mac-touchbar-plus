@@ -71,4 +71,50 @@ pub fn draw_module_section(
             local_left_edge += crate::BUTTON_SPACING_PX as f64;
         }
     }
+}
+
+pub fn draw_module_screen(
+    c: &Context,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    radius: f64,
+    area_height: i32,
+    complete_redraw: bool,
+    window_class: &str,
+    anim_progress: f64, // 0.0 = transparent, 1.0 = opaque
+) {
+    // --- Modern pill background (rounded rectangle) ---
+    let pill_x = x;
+    let pill_y = y - radius;
+    let pill_w = width;
+    let pill_h = height + radius * 2.0;
+    c.save().unwrap();
+    c.set_source_rgba(0.0, 0.0, 0.0, anim_progress); // Inactive button color, faded in
+    // Draw rounded rectangle (pill)
+    c.new_sub_path();
+    c.arc(pill_x + pill_w - radius, pill_y + radius, radius, (-90.0f64).to_radians(), (0.0f64).to_radians());
+    c.arc(pill_x + pill_w - radius, pill_y + pill_h - radius, radius, (0.0f64).to_radians(), (90.0f64).to_radians());
+    c.arc(pill_x + radius, pill_y + pill_h - radius, radius, (90.0f64).to_radians(), (180.0f64).to_radians());
+    c.arc(pill_x + radius, pill_y + radius, radius, (180.0f64).to_radians(), (270.0f64).to_radians());
+    c.close_path();
+    c.fill().unwrap();
+    c.restore().unwrap();
+
+    // --- Centered window class text ---
+    c.save().unwrap();
+    // Font size logic similar to login screen
+    let text_size = (pill_h * 0.38).min(22.0).max(14.0);
+    c.set_font_size(text_size);
+    c.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
+    let ext = c.text_extents(window_class).unwrap();
+    let group_h = ext.height();
+    let group_w = ext.width();
+    let group_y = pill_y + (pill_h - group_h) / 2.0;
+    let group_x = pill_x + (pill_w - group_w) / 2.0;
+    c.set_source_rgba(1.0, 1.0, 1.0, anim_progress); // Red text, faded in
+    c.move_to(group_x, group_y + group_h - 2.0);
+    c.show_text(window_class).unwrap();
+    c.restore().unwrap();
 } 

@@ -1,14 +1,16 @@
 use std::{
-    fs::{File, OpenOptions},
+    fs::{File, OpenOptions, self},
     os::{
-        fd::{AsRawFd, AsFd},
-        unix::{io::OwnedFd, fs::OpenOptionsExt}
+        fd::{AsRawFd, AsFd, IntoRawFd},
+        unix::{io::{OwnedFd, FromRawFd}, fs::OpenOptionsExt, net::{UnixListener, UnixStream}},
     },
     path::{Path, PathBuf},
     collections::HashMap,
     cmp::min,
-    panic::{self, AssertUnwindSafe}
+    panic::{self, AssertUnwindSafe},
+    process::{Command, Child},
 };
+use std::io::{BufReader, Read};
 use std::sync::Arc;
 use cairo::{ImageSurface, Format, Context, Surface, Rectangle, FontSlant, FontWeight, Antialias};
 use rsvg::{Loader, CairoRenderer, SvgHandle};
@@ -29,18 +31,17 @@ use nix::{
     sys::{
         signal::{Signal, SigSet},
         epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags}
-    }, 
-    errno::Errno,
-    sys::eventfd::{eventfd, EfdFlags}
+    },
+    sys::eventfd::{eventfd, EfdFlags},
+    unistd::{chown, Uid, Gid, User},
 };
 use icon_loader::{IconFileType, IconLoader};
 use chrono::{Local, Locale, Timelike};
 use crate::services::sessionmanager::{SessionState, monitor_sessions};
 use tokio::sync::{watch, mpsc};
 use view::login_screen::draw_login_screen;
-use view::module_screen::draw_module_section;
-use view::media_screen::{draw_media_section, media_hit_test};
-use std::time::Instant;
+use view::media_screen::{draw_media_section};
+use view::module_screen::draw_module_screen;
 
 mod backlight;
 mod display;
@@ -57,6 +58,116 @@ use pixel_shift::{PixelShiftManager, PIXEL_SHIFT_WIDTH_PX};
 use config::{ButtonConfig, Config};
 use crate::config::ConfigManager;
 use crate::animation::Animation;
+
+fn get_env_from_pid(pid: u32) -> HashMap<String, String> {
+    let mut env = HashMap::new();
+    let path = format!("/proc/{}/environ", pid);
+    if let Ok(data) = fs::read(path) {
+        for entry in data.split(|&b| b == 0) {
+            if let Some(eq) = entry.iter().position(|&b| b == b'=') {
+                let key = String::from_utf8_lossy(&entry[..eq]).to_string();
+                let value = String::from_utf8_lossy(&entry[eq+1..]).to_string();
+                env.insert(key, value);
+            }
+        }
+    }
+    env
+}
+
+fn find_user_session_pid(user: &str) -> Option<u32> {
+    // Look for common graphical session processes
+    let session_procs = ["i3", "gnome-session", "plasmashell", "startplasma-x11", "ksmserver", "xfce4-session", "openbox", "sway"]; // add more as needed
+    let output = Command::new("pgrep").arg("-u").arg(user).output().ok()?;
+    let pids: Vec<u32> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse().ok())
+        .collect();
+    for pid in pids {
+        if let Ok(cmdline) = fs::read_to_string(format!("/proc/{}/cmdline", pid)) {
+            for proc in &session_procs {
+                if cmdline.contains(proc) {
+                    return Some(pid);
+                }
+            }
+        }
+    }
+    None
+}
+
+struct HelperManager {
+    process: Option<Child>,
+    listener: Option<UnixListener>,
+}
+
+impl HelperManager {
+    fn new() -> Self {
+        HelperManager {
+            process: None,
+            listener: None,
+        }
+    }
+
+    fn start(&mut self, user: &str) -> Option<i32> {
+        if self.process.is_some() {
+            return None;
+        }
+
+        let socket_path = "/tmp/touchbar.sock";
+        // Clean up old socket file if it exists
+        let _ = fs::remove_file(&socket_path);
+
+        let listener = UnixListener::bind(socket_path).expect("Failed to bind socket");
+        listener.set_nonblocking(true).expect("Failed to set socket non-blocking");
+
+        // Change ownership of the socket to the logged-in user
+        if let Some(userinfo) = User::from_name(user).unwrap() {
+            chown(socket_path, Some(userinfo.uid), Some(userinfo.gid)).expect("Failed to chown socket");
+        }
+
+        let fd = listener.as_raw_fd();
+        self.listener = Some(listener);
+
+        // Find the user's session process and extract its environment
+        let mut env_vars = HashMap::new();
+        if let Some(pid) = find_user_session_pid(user) {
+            env_vars = get_env_from_pid(pid);
+        }
+
+        let helper_path = "/home/aura/Documents/tiny-dfr/target/release/tiny-dfr-helper";
+        let mut cmd = Command::new("sudo");
+        cmd.arg("-u").arg(user)
+           .arg("env");
+        // Pass relevant environment variables if found
+        for key in &["DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XAUTHORITY"] {
+            if let Some(val) = env_vars.get(*key) {
+                cmd.arg(format!("{}={}", key, val));
+            }
+        }
+        cmd.arg(helper_path);
+        // (Optional) Print for debugging:
+        // println!("[main] Spawning: sudo -u {} env ... {} with env {:?}", user, helper_path, env_vars);
+        let child = cmd.spawn().expect("Failed to start helper");
+        self.process = Some(child);
+        Some(fd)
+    }
+
+    fn stop(&mut self) {
+        if let Some(mut child) = self.process.take() {
+            child.kill().expect("Failed to kill helper");
+        }
+        self.listener.take();
+    }
+
+    fn accept_connection(&mut self) -> Option<UnixStream> {
+        if let Some(listener) = &self.listener {
+            if let Ok((stream, _)) = listener.accept() {
+                stream.set_nonblocking(true).expect("Failed to set stream non-blocking");
+                return Some(stream);
+            }
+        }
+        None
+    }
+}
 
 const BUTTON_SPACING_PX: i32 = 16;
 const APP_LAYER_KEYS3_GAP_PX: f64 = 4.0; // Custom gap for AppLayerKeys3
@@ -386,9 +497,11 @@ impl FunctionLayer {
             }),
         }
     }
-    fn draw(&mut self, config: &Config, width: i32, height: i32, surface: &Surface, pixel_shift: (f64, f64), complete_redraw: bool, modules_only_redraw: bool, session_state: Option<&SessionState>, layer_index: Option<usize>, login_anim_progress: f64, app_layer3_slide_progress: f64) -> Vec<ClipRect> {
+    fn draw(&mut self, config: &Config, width: i32, height: i32, surface: &Surface, pixel_shift: (f64, f64), complete_redraw: bool, modules_only_redraw: bool, session_state: Option<&SessionState>, layer_index: Option<usize>, login_anim_progress: f64, app_layer3_slide_progress: f64, current_window_class: Option<&str>) -> Vec<ClipRect> {
         match &mut self.split {
             Some(split) => {
+                eprintln!("Entered split layout branch in FunctionLayer::draw");
+                eprintln!("split.modules.len(): {}", split.modules.len());
                 let c = Context::new(&surface).unwrap();
                 let mut modified_regions = if complete_redraw {
                     vec![ClipRect::new(0, 0, height as u16, width as u16)]
@@ -455,22 +568,23 @@ impl FunctionLayer {
                         modules => {
                             let modules_count = modules.len();
                             let mut left_edge = pixel_shift_x + (pixel_shift_width / 2) as f64;
-                            draw_module_section(
-                                &c,
-                                modules,
-                                &modules_button_widths,
-                                modules_width,
-                                modules_count,
-                                left_edge,
-                                bot,
-                                top,
-                                radius,
-                                height,
-                                config,
-                                complete_redraw,
-                                &mut modified_regions,
-                                session_state,
-                            );
+                      
+                            if let Some(window_class) = current_window_class {
+                                eprintln!("At draw: current_window_class = {:?}", current_window_class);
+                                eprintln!("Drawing module screen with window_class: {}", window_class);
+                                draw_module_screen(
+                                    &c,
+                                    left_edge,
+                                    bot,
+                                    modules_width,
+                                    top - bot,
+                                    radius,
+                                    height,
+                                    complete_redraw,
+                                    window_class,
+                                    login_anim_progress, // Use the same animation progress as login screen
+                                );
+                            }
                         }
                     }
                     }
@@ -900,6 +1014,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
     let mut cfg_mgr = ConfigManager::new();
     let (mut cfg, mut layers) = cfg_mgr.load_config(width);
     let mut pixel_shift = PixelShiftManager::new();
+    let mut helper_manager = HelperManager::new();
 
     // Privilege dropping removed - run with appropriate permissions
 
@@ -976,6 +1091,10 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
     // --- end eventfd integration ---
     let mut current_session: Option<SessionState> = None;
     let mut last_login_session_state: Option<SessionState> = None;
+    let mut helper_listener_fd: Option<i32> = None;
+    let mut helper_stream: Option<UnixStream> = None;
+    let mut helper_reader: Option<BufReader<UnixStream>> = None;
+    let mut current_window_class: Option<String> = None;
     // --- main event loop ---
     loop {
         if cfg_mgr.update_config(&mut cfg, &mut layers, width) {
@@ -1060,7 +1179,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                 1.0
             };
             // Draw only the current active layer (layer 3 during slide-out)
-            let mut clips = layers[active_layer].draw(&cfg, width as i32, height as i32, &surface, shift, needs_complete_redraw, false, session_for_draw, Some(active_layer), animation.progress(), app_layer3_slide_progress);
+            let mut clips = layers[active_layer].draw(&cfg, width as i32, height as i32, &surface, shift, needs_complete_redraw, false, session_for_draw, Some(active_layer), animation.progress(), app_layer3_slide_progress, current_window_class.as_deref());
             let data = surface.data().unwrap();
             drm.map().unwrap().as_mut()[..data.len()].copy_from_slice(&data);
             drm.dirty(&clips).unwrap();
@@ -1068,8 +1187,9 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
         }
         
         // --- epoll wait and event handling ---
-        let mut events = [EpollEvent::empty(); 4];
+        let mut events = [EpollEvent::empty(); 5];
         let n = epoll.wait(&mut events, next_timeout_ms as isize).unwrap();
+
         for i in 0..n {
             let event = events[i];
             match event.data() {
@@ -1080,7 +1200,6 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                     // eventfd triggered: read and process session event
                     let mut buf = [0u8; 8];
                     let _ = nix::unistd::read(event_fd.as_raw_fd(), &mut buf);
-                    // Now process event_rx as before
                     if let Ok(new_state) = event_rx.try_recv() {
                         println!("[main] Session state changed: {:?}", new_state);
                         let session_changed = match &current_session {
@@ -1088,11 +1207,32 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                             None => true,
                         };
                         if session_changed {
-                            // Step 2: Trigger animation when login screen becomes visible
-                            if new_state.session_type == "login-screen" && !animation.is_animating_in() {
+                            if new_state.is_logged_in {
+                                println!("[main] User '{}' logged in. Starting helper...", new_state.user);
+                                if let Some(fd) = helper_manager.start(&new_state.user) {
+                                    let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
+                                    epoll.add(listener_fd_obj.as_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 4)).unwrap();
+                                    helper_listener_fd = Some(listener_fd_obj.into_raw_fd()); // Store the raw fd
+                                }
+                            } else {
+                                if let Some(fd) = helper_listener_fd.take() {
+                                    let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
+                                    epoll.delete(listener_fd_obj.as_fd()).unwrap();
+                                }
+                                if let Some(stream) = helper_stream.take() {
+                                    epoll.delete(&stream).unwrap();
+                                    helper_reader = None;
+                                }
+                                helper_manager.stop();
+                            }
+                            // Step 2: Trigger animation when login screen or desktop-logged becomes visible
+                            if (new_state.session_type == "login-screen" || new_state.session_type == "desktop-logged") && !animation.is_animating_in() {
                                 animation.animate_in();
                                 needs_complete_redraw = true;
-                            } else if new_state.session_type != "login-screen" && !animation.is_animating_out() && current_session.as_ref().map(|s| s.session_type.as_str()) == Some("login-screen") {
+                            } else if new_state.session_type != "login-screen" && new_state.session_type != "desktop-logged" && !animation.is_animating_out() && current_session.as_ref().map(|s| {
+    let t = s.session_type.as_str();
+    t == "login-screen" || t == "desktop-logged"
+}) == Some(true) {
                                 animation.animate_out();
                                 needs_complete_redraw = true;
                             }
@@ -1109,12 +1249,75 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                         println!("[session_monitor]#################### end  #######################     #################################################################################################################################");
                     }
                 }
+                4 => { // Helper listener event
+                    if let Some(stream) = helper_manager.accept_connection() {
+                        println!("[main] Helper connected to socket.");
+                        epoll.add(&stream, EpollEvent::new(EpollFlags::EPOLLIN, 5)).unwrap();
+                        helper_reader = Some(BufReader::new(stream.try_clone().unwrap()));
+                        helper_stream = Some(stream);
+                        // Stop listening for new connections
+                        if let Some(fd) = helper_listener_fd.take() {
+                            let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
+                            epoll.delete(listener_fd_obj.as_fd()).unwrap();
+                        }
+                    }
+                }
+                5 => { // Helper stream event
+                    if let Some(reader) = &mut helper_reader {
+                        eprintln!("[main] DEBUG: Reading from helper socket...");
+                        loop {
+                           let mut buf = vec![0; 1024];
+                           match reader.get_mut().read(&mut buf) {
+                               Ok(0) => { // EOF
+                                   println!("[main] Helper disconnected.");
+                                   if let Some(stream) = helper_stream.take() {
+                                       epoll.delete(&stream).unwrap();
+                                   }
+                                   helper_reader = None;
+                                   break;
+                               },
+                               Ok(n) => {
+                                   let data = &buf[..n];
+                                   eprintln!("[main] DEBUG: Received {} bytes of raw data", n);
+                                   eprintln!("[main] DEBUG: Raw data as string: {:?}", std::str::from_utf8(data));
+                                   if let Ok(text) = std::str::from_utf8(data) {
+                                       for part in text.split('\n') {
+                                           let class = part.trim();
+                                           if class.is_empty() {
+                                               eprintln!("[main] DEBUG: Skipping empty line");
+                                               continue;
+                                           }
+                                           current_window_class = Some(class.to_string());
+                                           println!("[main] Active window class: {}", class);
+                                           needs_complete_redraw = true;
+                                       }
+                                   } else {
+                                       eprintln!("[main] DEBUG: Received invalid UTF-8 data");
+                                   }
+                               },
+                               Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                   eprintln!("[main] DEBUG: No more data available right now");
+                                   break; // No more data right now
+                               },
+                               Err(e) => {
+                                   eprintln!("[main] Error reading from helper: {}", e);
+                                   if let Some(stream) = helper_stream.take() {
+                                       epoll.delete(&stream).unwrap();
+                                   }
+                                   helper_reader = None;
+                                   break;
+                               }
+                           }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
         // // After epoll, always process all pending input events:
         input_tb.dispatch().unwrap();
         input_main.dispatch().unwrap();
+
         for event in &mut input_tb.clone().chain(input_main.clone()) {
             backlight.process_event(&event);
             match event {
