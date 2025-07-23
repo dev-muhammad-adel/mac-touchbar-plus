@@ -133,7 +133,7 @@ impl HelperManager {
             env_vars = get_env_from_pid(pid);
         }
 
-        let helper_path = "/home/aura/Documents/tiny-dfr/target/release/tiny-dfr-helper";
+        let helper_path = "tiny-dfr-helper";
         let mut cmd = Command::new("sudo");
         cmd.arg("-u").arg(user)
            .arg("env");
