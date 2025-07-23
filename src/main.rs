@@ -974,17 +974,22 @@ fn toggle_key<F>(uinput: &mut UInputHandle<F>, code: Key, value: i32) where F: A
 }
 
 fn main() {
-    let mut drm = DrmBackend::open_card().unwrap();
+    if let Err(e) = run() {
+        eprintln!("Error: {e}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let mut drm = DrmBackend::open_card()?;
     let (height, width) = drm.mode().size();
-    let _ = panic::catch_unwind(AssertUnwindSafe(|| {
-        // Create a Tokio runtime for async operations
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let _ = real_main(&mut drm).await;
-        });
-    }));
+    // Create a Tokio runtime for async operations
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        real_main(&mut drm).await
+    })?;
     let crash_bitmap = include_bytes!("crash_bitmap.raw");
-    let mut map = drm.map().unwrap();
+    let mut map = drm.map()?;
     let data = map.as_mut();
     let mut wptr = 0;
     for byte in crash_bitmap {
@@ -999,10 +1004,11 @@ fn main() {
         }
     }
     drop(map);
-    drm.dirty(&[ClipRect::new(0, 0, height as u16, width as u16)]).unwrap();
+    drm.dirty(&[ClipRect::new(0, 0, height as u16, width as u16)])?;
     let mut sigset = SigSet::empty();
     sigset.add(Signal::SIGTERM);
-    sigset.wait().unwrap();
+    sigset.wait()?;
+    Ok(())
 }
 
 async fn real_main(drm: &mut DrmBackend) -> Result<()> {
