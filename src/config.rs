@@ -1,6 +1,8 @@
+//! Configuration loading, validation, and management.
 use std::{
     fs::read_to_string,
-    os::fd::AsFd
+    os::fd::AsFd,
+    collections::HashMap
 };
 use anyhow::Error;
 use cairo::FontFace;
@@ -13,11 +15,11 @@ use nix::{
     sys::inotify::{AddWatchFlags, InitFlags, Inotify, WatchDescriptor}
 };
 use serde::Deserialize;
+use crate::LayerKey;
 
 const USER_CFG_PATH: &'static str = "/etc/tiny-dfr/config.json";
 
 pub struct Config {
-    pub media_layer_default: bool,
     pub show_button_outlines: bool,
     pub enable_pixel_shift: bool,
     pub font_renderer: String,
@@ -53,8 +55,6 @@ struct AppLayerSplitedLayout {
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct ConfigProxy {
-    media_layer_default: Option<bool>,
-    special_extended_mode: Option<bool>,
     show_button_outlines: Option<bool>,
     enable_pixel_shift: Option<bool>,
     font_renderer: Option<String>,
@@ -118,13 +118,11 @@ fn load_theme() -> Theme {
     }
 }
 
-fn load_config(width: u16) -> (Config, Vec<FunctionLayer>) {
+fn load_config(width: u16) -> (Config, HashMap<LayerKey, FunctionLayer>) {
     let mut base = serde_json::from_str::<ConfigProxy>(&read_to_string("/usr/share/tiny-dfr/config.json").unwrap()).unwrap();
     let user = read_to_string(USER_CFG_PATH).map_err::<Error, _>(|e| e.into())
         .and_then(|r| Ok(serde_json::from_str::<ConfigProxy>(&r)?));
     if let Ok(user) = user {
-        base.media_layer_default = user.media_layer_default.or(base.media_layer_default);
-        base.special_extended_mode = user.special_extended_mode.or(base.special_extended_mode);
         base.show_button_outlines = user.show_button_outlines.or(base.show_button_outlines);
         base.enable_pixel_shift = user.enable_pixel_shift.or(base.enable_pixel_shift);
         base.font_renderer = user.font_renderer.or(base.font_renderer);
@@ -157,26 +155,17 @@ fn load_config(width: u16) -> (Config, Vec<FunctionLayer>) {
     // ---
     let app_layer2 = FunctionLayer::with_config(base.app_layer_keys2.unwrap());
     let app_layer3 = FunctionLayer::with_config(base.app_layer_keys3.unwrap());
-    let mut layers = if base.media_layer_default.unwrap() {
-            if base.special_extended_mode.unwrap() {
-                vec![app_layer1, fkey_layer, app_layer2, app_layer3]
-            } else {
-                vec![media_layer, fkey_layer]
-            }
-        } else {
-            if base.special_extended_mode.unwrap() {
-                vec![fkey_layer, app_layer1, app_layer2, app_layer3]
-            } else {
-                vec![fkey_layer, media_layer]
-            }
-        };
+    let mut layers = HashMap::new();
+    layers.insert(LayerKey::Media, app_layer1);
+    layers.insert(LayerKey::Fn, fkey_layer);
+    layers.insert(LayerKey::Custom2, app_layer2);
+    layers.insert(LayerKey::Custom3, app_layer3);
     if width >= 2170 {
-        for layer in &mut layers {
+        for layer in layers.values_mut() {
             layer.buttons.insert(0, Button::new_text("esc".to_string(), Key::Esc, true));
         }
     }
     let cfg = Config {
-        media_layer_default: base.media_layer_default.unwrap(),
         show_button_outlines: base.show_button_outlines.unwrap(),
         enable_pixel_shift: base.enable_pixel_shift.unwrap(),
         adaptive_brightness: base.adaptive_brightness.unwrap(),
@@ -212,13 +201,13 @@ impl ConfigManager {
             inotify_fd, watch_desc
         }
     }
-    pub fn load_config(&self, width: u16) -> (Config, Vec<FunctionLayer>) {
+    pub fn load_config(&self, width: u16) -> (Config, HashMap<LayerKey, FunctionLayer>) {
         load_config(width)
     }
     pub fn load_theme(&self) -> Theme {
         load_theme()
     }
-    pub fn update_config(&mut self, cfg: &mut Config, layers: &mut Vec<FunctionLayer>, width: u16) -> bool {
+    pub fn update_config(&mut self, cfg: &mut Config, layers: &mut HashMap<LayerKey, FunctionLayer>, width: u16) -> bool {
         if self.watch_desc.is_none() {
             self.watch_desc = arm_inotify(&self.inotify_fd);
             return false;

@@ -1,3 +1,4 @@
+//! Font handling and rendering utilities.
 #![allow(non_upper_case_globals)]
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::ptr;

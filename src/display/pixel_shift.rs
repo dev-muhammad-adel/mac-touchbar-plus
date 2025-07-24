@@ -103,4 +103,4 @@ impl PixelShiftManager {
         }
         (x_progress - (PIXEL_SHIFT_WIDTH_PX / 2) as f64, y_progress - (PIXEL_SHIFT_HEIGHT_PX / 2) as f64)
     }
-}
+} 

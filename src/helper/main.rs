@@ -1,3 +1,4 @@
+//! Helper binary for tiny-dfr, providing auxiliary functionality.
 use std::os::unix::net::UnixStream;
 use std::io::Write;
 use std::thread;

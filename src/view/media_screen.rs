@@ -1,3 +1,4 @@
+//! UI logic for the media control screen.
 use cairo::Context;
 use drm::control::ClipRect;
 use crate::services::sessionmanager::SessionState;

@@ -1,6 +1,7 @@
+//! Crash handling and recovery logic.
 use std::panic;
 use drm::control::ClipRect;
-use crate::display::DrmBackend;
+use crate::display::display::DrmBackend;
 use nix::sys::signal::{Signal, SigSet};
 
 const CRASH_BITMAP: &[u8] = include_bytes!("crash_bitmap.raw");

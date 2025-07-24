@@ -91,7 +91,6 @@ impl BacklightManager {
                 match toggle.switch() {
                     Some(Switch::Lid) => {
                         self.lid_state = toggle.switch_state();
-                        println!("Lid Switch event: {:?}", self.lid_state);
                         if toggle.switch_state() == SwitchState::Off {
                             self.last_active = Instant::now();
                         }
@@ -125,4 +124,4 @@ impl BacklightManager {
     pub fn current_bl(&self) -> u32 {
         self.current_bl
     }
-}
+} 

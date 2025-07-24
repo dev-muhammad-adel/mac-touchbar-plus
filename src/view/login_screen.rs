@@ -1,3 +1,4 @@
+//! UI logic for the login screen.
 use cairo::{Context};
 
 const BUTTON_COLOR_INACTIVE: f64 = 0.350;

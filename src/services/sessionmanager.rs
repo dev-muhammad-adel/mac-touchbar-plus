@@ -1,3 +1,4 @@
+//! Session management and user session logic.
 
 
 use serde::Serialize;

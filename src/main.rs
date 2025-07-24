@@ -40,24 +40,34 @@ use chrono::{Local, Locale, Timelike};
 use crate::services::sessionmanager::{SessionState, monitor_sessions};
 use tokio::sync::{watch, mpsc};
 use view::login_screen::draw_login_screen;
-use view::media_screen::{draw_media_section};
+use view::media_screen::draw_media_section;
 use view::module_screen::draw_module_screen;
-
-mod backlight;
-mod display;
-mod pixel_shift;
-mod fonts;
-mod config;
-mod services;
-mod view;
-mod animation;
-
-use backlight::BacklightManager;
-use display::DrmBackend;
-use pixel_shift::{PixelShiftManager, PIXEL_SHIFT_WIDTH_PX};
+use crate::display::display::DrmBackend;
+use display::animation::Animation;
+use display::backlight::BacklightManager;
+use display::pixel_shift::{PixelShiftManager, PIXEL_SHIFT_WIDTH_PX};
 use config::{ButtonConfig, Config};
-use crate::config::ConfigManager;
-use crate::animation::Animation;
+use config::ConfigManager;
+
+mod config;
+mod fonts;
+mod crash_handler;
+pub mod display {
+    pub mod animation;
+    pub mod backlight;
+    pub mod display;
+    pub mod pixel_shift;
+}
+pub mod view;
+pub mod services;
+
+#[derive(Hash, Eq, PartialEq, Clone, Debug)]
+enum LayerKey {
+    Media,
+    Fn,
+    Custom2,
+    Custom3,
+}
 
 fn get_env_from_pid(pid: u32) -> HashMap<String, String> {
     let mut env = HashMap::new();
@@ -497,11 +507,9 @@ impl FunctionLayer {
             }),
         }
     }
-    fn draw(&mut self, config: &Config, width: i32, height: i32, surface: &Surface, pixel_shift: (f64, f64), complete_redraw: bool, modules_only_redraw: bool, session_state: Option<&SessionState>, layer_index: Option<usize>, login_anim_progress: f64, app_layer3_slide_progress: f64, current_window_class: Option<&str>) -> Vec<ClipRect> {
+    fn draw(&mut self, config: &Config, width: i32, height: i32, surface: &Surface, pixel_shift: (f64, f64), complete_redraw: bool, modules_only_redraw: bool, session_state: Option<&SessionState>, layer_index: Option<LayerKey>, login_anim_progress: f64, app_layer3_slide_progress: f64, current_window_class: Option<&str>) -> Vec<ClipRect> {
         match &mut self.split {
             Some(split) => {
-                eprintln!("Entered split layout branch in FunctionLayer::draw");
-                eprintln!("split.modules.len(): {}", split.modules.len());
                 let c = Context::new(&surface).unwrap();
                 let mut modified_regions = if complete_redraw {
                     vec![ClipRect::new(0, 0, height as u16, width as u16)]
@@ -515,19 +523,9 @@ impl FunctionLayer {
                 let group_spacing = BUTTON_SPACING_PX as f64; // space between groups
                 let modules_width = (split.modules_width as f64 * total_width).round();
                 let media_width = total_width - modules_width - group_spacing;
-                let modules_count = split.modules.len();
                 let media_count = split.media.len();
-                let modules_spacing = if modules_count > 1 { BUTTON_SPACING_PX as f64 * (modules_count as f64 - 1.0) } else { 0.0 };
                 let media_spacing = if media_count > 1 { BUTTON_SPACING_PX as f64 * (media_count as f64 - 1.0) } else { 0.0 };
-                // --- MODULES BUTTON WIDTHS WITH FRACTION ---
-                let weights: Vec<f32> = split.modules.iter().map(|b| b.fraction.unwrap_or(1.0)).collect();
-                let total_weight: f32 = weights.iter().sum();
-                let mut modules_button_widths: Vec<f64> = weights.iter().map(|w| (modules_width - modules_spacing) * (*w as f64 / total_weight as f64)).collect();
-                // Last button absorbs rounding error
-                let sum_widths: f64 = modules_button_widths.iter().sum();
-                if let Some(last) = modules_button_widths.last_mut() {
-                    *last += (modules_width - modules_spacing) - sum_widths;
-                }
+         
                 // --- MEDIA BUTTON WIDTHS WITH FRACTION ---
                 let media_spacing_px = 2.0f64; // 2px spacing for AppLayerKeys1Media
                 let total_spacing = if media_count > 1 { media_spacing_px * (media_count as f64 - 1.0) } else { 0.0 };
@@ -566,7 +564,6 @@ impl FunctionLayer {
                     // User is logged in - show normal modules
                     match split.modules.as_mut_slice() {
                         modules => {
-                            let modules_count = modules.len();
                             let mut left_edge = pixel_shift_x + (pixel_shift_width / 2) as f64;
                       
                             if let Some(window_class) = current_window_class {
@@ -589,18 +586,14 @@ impl FunctionLayer {
                     }
                     }
                     Some(state) if state.session_type == "login-screen" => {
-                    // No user logged in - show login screen
-                    let login_area_width = modules_width;
-                    let login_area_height = top - bot;
-                    let login_x = pixel_shift_x + (pixel_shift_width / 2) as f64;
-                    let login_y = bot;
-                    // Draw login screen using the separated function
+                        let mut left_edge = pixel_shift_x + (pixel_shift_width / 2) as f64;
+
                     draw_login_screen(
                         &c,
-                        login_x,
-                        login_y,
-                        login_area_width,
-                        login_area_height,
+                        left_edge,
+                        bot,
+                        modules_width,
+                        top - bot,
                         top,
                         bot,
                         radius,
@@ -618,8 +611,7 @@ impl FunctionLayer {
                 
                 // Add spacing between modules and media sections
                 let mut left_edge = pixel_shift_x + (pixel_shift_width / 2) as f64 + modules_width + group_spacing;
-                println!("modules_width: {}", modules_width);
-                println!("left_edge: {}", left_edge);
+            
                 // Skip media section if this is a modules-only redraw
                 if !modules_only_redraw {
                     // Draw media section
@@ -665,9 +657,9 @@ impl FunctionLayer {
                 c.rotate((90.0f64).to_radians());
                 let pixel_shift_width = if config.enable_pixel_shift { PIXEL_SHIFT_WIDTH_PX } else { 0 };
                 // Use custom gap for AppLayerKeys3 (layer index 3), else default
-                let gap = if let Some(3) = layer_index { APP_LAYER_KEYS3_GAP_PX } else { BUTTON_SPACING_PX as f64 };
+                let gap = if let Some(LayerKey::Custom3) = layer_index { APP_LAYER_KEYS3_GAP_PX } else { BUTTON_SPACING_PX as f64 };
                 // --- AppLayerKeys3 slide animation translation ---
-                if let Some(3) = layer_index {
+                if let Some(LayerKey::Custom3) = layer_index {
                     // If progress is 0.0, skip drawing (prevents flicker)
                     if app_layer3_slide_progress == 0.0 {
                         return modified_regions;
@@ -1025,13 +1017,9 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
     // Privilege dropping removed - run with appropriate permissions
 
     let mut surface = ImageSurface::create(Format::ARgb32, db_width as i32, db_height as i32).unwrap();
-    let mut active_layer = 0;
-    let mut needs_complete_redraw = true;
-    let mut animation = Animation::new(0.05, 50.0); // step, interval_ms
-    // --- AppLayerKeys3 slide animation ---
-    let mut app_layer3_slide_anim = Animation::new(0.18, 16.0); // 60fps for smooth slide
-    let mut last_layer = active_layer;
-    let mut pending_layer: Option<usize> = None;
+    let mut active_layer = LayerKey::Media;
+    let mut last_layer = active_layer.clone();
+    let mut pending_layer: Option<LayerKey> = None;
 
     let mut input_tb = Libinput::new_with_udev(Interface);
     let mut input_main = Libinput::new_with_udev(Interface);
@@ -1046,7 +1034,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
     epoll.add(&*event_fd, EpollEvent::new(EpollFlags::EPOLLIN, 3)).unwrap();
     // --- end eventfd integration ---
     uinput.set_evbit(EventKind::Key).unwrap();
-    for layer in &layers {
+    for layer in layers.values() {
         for button in &layer.buttons {
             uinput.set_keybit(button.action).unwrap();
         }
@@ -1101,10 +1089,14 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
     let mut helper_stream: Option<UnixStream> = None;
     let mut helper_reader: Option<BufReader<UnixStream>> = None;
     let mut current_window_class: Option<String> = None;
+    let mut needs_complete_redraw = false;
+    let mut animation = Animation::new(0.05, 50.0); // step, interval_ms
+    let mut app_layer3_slide_anim = Animation::new(0.18, 16.0); // 60fps for smooth slide
+
     // --- main event loop ---
     loop {
         if cfg_mgr.update_config(&mut cfg, &mut layers, width) {
-            active_layer = 0;
+            active_layer = LayerKey::Media;
             needs_complete_redraw = true;
         }
         let mut next_timeout_ms = TIMEOUT_MS;
@@ -1124,7 +1116,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
             next_timeout_ms = min(next_timeout_ms, 16);
         }
         let current_minute = Local::now().minute();
-        for button in &mut layers[active_layer].buttons {
+        for button in &mut layers.get_mut(&active_layer).unwrap().buttons {
             if (button.action == Key::Time) && (current_minute != last_redraw_minute) {
                 needs_complete_redraw = true;
                 last_redraw_minute = current_minute;
@@ -1132,20 +1124,20 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
         }
         // --- Detect layer switch and trigger slide animation ---
         if last_layer != active_layer {
-            if active_layer == 3 {
+            if active_layer == LayerKey::Custom3 {
                 app_layer3_slide_anim.set_progress(0.0); // Set before animate_in
                 app_layer3_slide_anim.animate_in();
-            } else if last_layer == 3 {
+            } else if last_layer == LayerKey::Custom3 {
                 // Only animate out if NOT switching to Fn keys (assume Fn keys is layer 1 or 0)
-                let fn_layer_indices = [1];
+                let fn_layer_indices = [LayerKey::Fn];
                 if !fn_layer_indices.contains(&active_layer) {
                     app_layer3_slide_anim.animate_out();
-                    pending_layer = Some(active_layer); // Remember where we want to go
-                    active_layer = 3; // Stay on 3 until animation is done
+                    pending_layer = Some(active_layer.clone()); // Remember where we want to go
+                    active_layer = LayerKey::Custom3; // Stay on 3 until animation is done
                 }
                 // If switching to Fn keys, just switch immediately (no animation)
             }
-            last_layer = active_layer;
+            last_layer = active_layer.clone();
             needs_complete_redraw = true;
         }
         // --- Update AppLayerKeys3 slide animation ---
@@ -1154,15 +1146,15 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
         }
         // After slide-out animation, switch to pending layer if needed
         if !app_layer3_slide_anim.is_animating_out() && pending_layer.is_some() {
-            active_layer = pending_layer.take().unwrap();
-            last_layer = active_layer;
+            active_layer = pending_layer.take().unwrap().clone();
+            last_layer = active_layer.clone();
             needs_complete_redraw = true;
         }
         // --- Restore any_changed variable for redraw logic ---
-        let any_changed = if let Some(split) = &layers[active_layer].split {
+        let any_changed = if let Some(split) = &layers.get(&active_layer).unwrap().split {
             split.modules.iter().any(|b| b.changed) || split.media.iter().any(|b| b.changed)
         } else {
-            layers[active_layer].buttons.iter().any(|b| b.changed)
+            layers.get(&active_layer).unwrap().buttons.iter().any(|b| b.changed)
         };
         
         // Handle different types of redraws
@@ -1179,13 +1171,13 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                 current_session.as_ref()
             };
             // --- Pass slide progress for AppLayerKeys3 ---
-            let app_layer3_slide_progress = if active_layer == 3 || last_layer == 3 {
+            let app_layer3_slide_progress = if active_layer == LayerKey::Custom3 || last_layer == LayerKey::Custom3 {
                 app_layer3_slide_anim.progress()
             } else {
                 1.0
             };
             // Draw only the current active layer (layer 3 during slide-out)
-            let mut clips = layers[active_layer].draw(&cfg, width as i32, height as i32, &surface, shift, needs_complete_redraw, false, session_for_draw, Some(active_layer), animation.progress(), app_layer3_slide_progress, current_window_class.as_deref());
+            let mut clips = layers.get_mut(&active_layer).unwrap().draw(&cfg, width as i32, height as i32, &surface, shift, needs_complete_redraw, false, session_for_draw, Some(active_layer.clone()), animation.progress(), app_layer3_slide_progress, current_window_class.as_deref());
             let data = surface.data().unwrap();
             drm.map().unwrap().as_mut()[..data.len()].copy_from_slice(&data);
             drm.dirty(&clips).unwrap();
@@ -1214,7 +1206,6 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                         };
                         if session_changed {
                             if new_state.is_logged_in {
-                                println!("[main] User '{}' logged in. Starting helper...", new_state.user);
                                 if let Some(fd) = helper_manager.start(&new_state.user) {
                                     let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
                                     epoll.add(listener_fd_obj.as_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 4)).unwrap();
@@ -1248,11 +1239,9 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                             }
                             current_session = Some(new_state);
                             needs_complete_redraw = true;
-                            println!("[main] Set needs_complete_redraw = true");
                         } else {
                             println!("[main] Session state unchanged, skipping redraw");
                         }
-                        println!("[session_monitor]#################### end  #######################     #################################################################################################################################");
                     }
                 }
                 4 => { // Helper listener event
@@ -1284,8 +1273,6 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                },
                                Ok(n) => {
                                    let data = &buf[..n];
-                                   eprintln!("[main] DEBUG: Received {} bytes of raw data", n);
-                                   eprintln!("[main] DEBUG: Raw data as string: {:?}", std::str::from_utf8(data));
                                    if let Ok(text) = std::str::from_utf8(data) {
                                        for part in text.split('\n') {
                                            let class = part.trim();
@@ -1302,11 +1289,9 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                    }
                                },
                                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                                   eprintln!("[main] DEBUG: No more data available right now");
                                    break; // No more data right now
                                },
                                Err(e) => {
-                                   eprintln!("[main] Error reading from helper: {}", e);
                                    if let Some(stream) = helper_stream.take() {
                                        epoll.delete(&stream).unwrap();
                                    }
@@ -1336,21 +1321,21 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                 Event::Keyboard(KeyboardEvent::Key(key)) => {
                     if key.key() == Key::Fn as u32 {
                         let new_layer = match key.key_state() {
-                            KeyState::Pressed => 1,
-                            KeyState::Released => 0
+                            KeyState::Pressed => LayerKey::Fn,
+                            KeyState::Released => LayerKey::Media,
                         };
                         if active_layer != new_layer {
                             active_layer = new_layer;
                             needs_complete_redraw = true;
                         }
                     } else if key.key() == Key::Macro1 as u32 && key.key_state() == KeyState::Pressed {
-                        if cfg.media_layer_default {active_layer = 0;} else {active_layer = 1;}
+                        active_layer = LayerKey::Media;
                         needs_complete_redraw = true;
                     } else if key.key() == Key::Macro2 as u32 && key.key_state() == KeyState::Pressed {
-                        active_layer = 2;
+                        active_layer = LayerKey::Custom2;
                         needs_complete_redraw = true;
                     } else if key.key() == Key::Macro3 as u32 && key.key_state() == KeyState::Pressed {
-                        active_layer = 3;
+                        active_layer = LayerKey::Custom3;
                         needs_complete_redraw = true;
                     }
                 },
@@ -1362,38 +1347,34 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                         TouchEvent::Down(dn) => {
                             let _x = dn.x_transformed(width as u32);
                             let _y = dn.y_transformed(height as u32);
-                            if let Some((group, idx)) = layers[active_layer].hit_test(_x, width as i32) {
-                                println!("Touch hit: group={}, idx={}", group, idx);
+                            if let Some((group, idx)) = layers.get_mut(&active_layer).unwrap().hit_test(_x, width as i32) {
                                 match group {
                                     "modules" => {
-                                        if let Some(split) = &mut layers[active_layer].split {
+                                        if let Some(split) = &mut layers.get_mut(&active_layer).unwrap().split {
                                             let button = &mut split.modules[idx];
-                                            println!("Setting active for group=modules, idx={}, action={:?}", idx, button.action);
                                             if button.action == Key::Unknown || button.action == Key::Time {
                                                 continue;
                                             }
-                                            touches.insert(dn.seat_slot(), (active_layer, group, idx));
+                                            touches.insert(dn.seat_slot(), (active_layer.clone(), group, idx));
                                             button.set_active(&mut uinput, true);
                                         }
                                     }
                                     "media" => {
-                                        if let Some(split) = &mut layers[active_layer].split {
+                                        if let Some(split) = &mut layers.get_mut(&active_layer).unwrap().split {
                                             let button = &mut split.media[idx];
-                                            println!("Setting active for group=media, idx={}, action={:?}", idx, button.action);
                                             if button.action == Key::Unknown || button.action == Key::Time {
                                                 continue;
                                             }
-                                            touches.insert(dn.seat_slot(), (active_layer, group, idx));
+                                            touches.insert(dn.seat_slot(), (active_layer.clone(), group, idx));
                                             button.set_active(&mut uinput, true);
                                         }
                                     }
                                     "flat" => {
-                                        let button = &mut layers[active_layer].buttons[idx];
-                                        println!("Setting active for group=flat, idx={}, action={:?}", idx, button.action);
+                                        let button = &mut layers.get_mut(&active_layer).unwrap().buttons[idx];
                                         if button.action == Key::Unknown || button.action == Key::Time {
                                             continue;
                                         }
-                                        touches.insert(dn.seat_slot(), (active_layer, group, idx));
+                                        touches.insert(dn.seat_slot(), (active_layer.clone(), group, idx));
                                         button.set_active(&mut uinput, true);
                                     }
                                     _ => {}
@@ -1410,9 +1391,8 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                             println!("Motion: group={}, idx={}", group, idx);
                             match *group {
                                 "modules" => {
-                                    if let Some(split) = &mut layers[*layer].split {
+                                    if let Some(split) = &mut layers.get_mut(layer).unwrap().split {
                                         let button = &mut split.modules[*idx];
-                                        println!("Motion set active for group=modules, idx={}, action={:?}", idx, button.action);
                                         if button.action == Key::Unknown || button.action == Key::Time {
                                             continue;
                                         }
@@ -1420,9 +1400,8 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                     }
                                 }
                                 "media" => {
-                                    if let Some(split) = &mut layers[*layer].split {
+                                    if let Some(split) = &mut layers.get_mut(layer).unwrap().split {
                                         let button = &mut split.media[*idx];
-                                        println!("Motion set active for group=media, idx={}, action={:?}", idx, button.action);
                                         if button.action == Key::Unknown || button.action == Key::Time {
                                             continue;
                                         }
@@ -1430,8 +1409,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                     }
                                 }
                                 "flat" => {
-                                    let button = &mut layers[*layer].buttons[*idx];
-                                    println!("Motion set active for group=flat, idx={}, action={:?}", idx, button.action);
+                                    let button = &mut layers.get_mut(layer).unwrap().buttons[*idx];
                                     if button.action == Key::Unknown || button.action == Key::Time {
                                         continue;
                                     }
@@ -1448,9 +1426,8 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                             println!("Up: group={}, idx={}", group, idx);
                             match *group {
                                 "modules" => {
-                                    if let Some(split) = &mut layers[*layer].split {
+                                    if let Some(split) = &mut layers.get_mut(layer).unwrap().split {
                                         let button = &mut split.modules[*idx];
-                                        println!("Up set inactive for group=modules, idx={}, action={:?}", idx, button.action);
                                         if button.action == Key::Unknown || button.action == Key::Time {
                                             continue;
                                         }
@@ -1458,9 +1435,8 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                     }
                                 }
                                 "media" => {
-                                    if let Some(split) = &mut layers[*layer].split {
+                                    if let Some(split) = &mut layers.get_mut(layer).unwrap().split {
                                         let button = &mut split.media[*idx];
-                                        println!("Up set inactive for group=media, idx={}, action={:?}", idx, button.action);
                                         if button.action == Key::Unknown || button.action == Key::Time {
                                             continue;
                                         }
@@ -1468,8 +1444,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                     }
                                 }
                                 "flat" => {
-                                    let button = &mut layers[*layer].buttons[*idx];
-                                    println!("Up set inactive for group=flat, idx={}, action={:?}", idx, button.action);
+                                    let button = &mut layers.get_mut(layer).unwrap().buttons[*idx];
                                     if button.action == Key::Unknown || button.action == Key::Time {
                                         continue;
                                     }
