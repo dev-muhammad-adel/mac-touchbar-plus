@@ -181,8 +181,8 @@ impl HelperManager {
 
 const BUTTON_SPACING_PX: i32 = 16;
 const APP_LAYER_KEYS3_GAP_PX: f64 = 4.0; // Custom gap for AppLayerKeys3
-const BUTTON_COLOR_INACTIVE: f64 = 0.350;
-const BUTTON_COLOR_ACTIVE: f64 = 0.600;
+const BUTTON_COLOR_INACTIVE: f64 = 0.172;
+const BUTTON_COLOR_ACTIVE: f64 = 0.350;
 const ICON_SIZE: i32 = 48;
 const TIMEOUT_MS: i32 = 10 * 1000;
 
@@ -190,7 +190,6 @@ enum ButtonImage {
     Text(String),
     Svg(SvgHandle),
     Bitmap(ImageSurface),
-    Time(String, String),
     Blank
 }
 
@@ -340,18 +339,6 @@ impl Button {
                 let mut btn = Button::new_blank(cfg.action, background);
                 btn.fraction = cfg.fraction;
                 btn
-            } else if mode.to_lowercase() == "time" {
-                let format = match cfg.format {
-                    Some(f) => f,
-                    None => "24hr".to_string()
-                };
-                let locale = match cfg.locale {
-                    Some(l) => l,
-                    None => "POSIX".to_string()
-                };
-                let mut btn = Button::new_time(cfg.action, format, locale, background);
-                btn.fraction = cfg.fraction;
-                btn
             } else {
                 panic!("Invalid config, a button must have either Text, Icon or be Blank")
             }
@@ -378,16 +365,6 @@ impl Button {
             action, image,
             active: false,
             changed: false,
-            background,
-            fraction: None,
-        }
-    }
-    fn new_time(action: Key, format: String, locale: String, background: bool) -> Button {
-        Button {
-            action,
-            active: false,
-            changed: false,
-            image: ButtonImage::Time(format, locale),
             background,
             fraction: None,
         }
@@ -428,37 +405,6 @@ impl Button {
                 c.rectangle(x, y, ICON_SIZE as f64, ICON_SIZE as f64);
                 c.fill().unwrap();
             }
-            ButtonImage::Time(format, locale) => {
-                let current_time = Local::now();
-                let current_locale = Locale::try_from(locale.as_str()).unwrap_or(Locale::POSIX);
-                let formatted_time;
-                if format == "24hr" {
-                    formatted_time = format!(
-                    "{}:{}    {} {} {}",
-                     current_time.format_localized("%H", current_locale),
-                     current_time.format_localized("%M", current_locale),
-                     current_time.format_localized("%a", current_locale),
-                     current_time.format_localized("%-e", current_locale),
-                     current_time.format_localized("%b", current_locale)
-                );
-                } else {
-                    formatted_time = format!(
-                    "{}:{} {}    {} {} {}",
-                    current_time.format_localized("%-l", current_locale),
-                    current_time.format_localized("%M", current_locale),
-                    current_time.format_localized("%p", current_locale),
-                    current_time.format_localized("%a", current_locale),
-                    current_time.format_localized("%-e", current_locale),
-                    current_time.format_localized("%b", current_locale)
-                );
-                }
-                let time_extents = c.text_extents(&formatted_time).unwrap();
-                c.move_to(
-                    button_left_edge + (button_width as f64 / 2.0 - time_extents.width() / 2.0).round(),
-                    y_shift + (height as f64 / 2.0 + time_extents.height() / 2.0).round()
-                );
-                c.show_text(&formatted_time).unwrap();
-            }
             _ => {
             }
         }
@@ -480,7 +426,6 @@ pub struct FunctionLayer {
 }
 
 pub struct SplitLayout {
-    pub modules: Vec<Button>,
     pub modules_width: f32,
     pub media: Vec<Button>,
     pub media_width: f32,
@@ -496,11 +441,10 @@ impl FunctionLayer {
             split: None,
         }
     }
-    fn with_split(modules: Vec<ButtonConfig>, modules_width: f32, media: Vec<ButtonConfig>, media_width: f32) -> FunctionLayer {
+    fn with_split(modules_width: f32, media: Vec<ButtonConfig>, media_width: f32) -> FunctionLayer {
         FunctionLayer {
             buttons: vec![],
             split: Some(SplitLayout {
-                modules: modules.into_iter().map(Button::with_config).collect(),
                 modules_width,
                 media: media.into_iter().map(Button::with_config).collect(),
                 media_width,
@@ -561,29 +505,24 @@ impl FunctionLayer {
                 // Use new session state
                 match session_state {
                     Some(state) if state.session_type == "desktop-logged" => {
-                    // User is logged in - show normal modules
-                    match split.modules.as_mut_slice() {
-                        modules => {
-                            let mut left_edge = pixel_shift_x + (pixel_shift_width / 2) as f64;
-                      
-                            if let Some(window_class) = current_window_class {
-                                eprintln!("At draw: current_window_class = {:?}", current_window_class);
-                                eprintln!("Drawing module screen with window_class: {}", window_class);
-                                draw_module_screen(
-                                    &c,
-                                    left_edge,
-                                    bot,
-                                    modules_width,
-                                    top - bot,
-                                    radius,
-                                    height,
-                                    complete_redraw,
-                                    window_class,
-                                    login_anim_progress, // Use the same animation progress as login screen
-                                );
-                            }
+                        // User is logged in - show normal modules
+                        let mut left_edge = pixel_shift_x + (pixel_shift_width / 2) as f64;
+                        if let Some(window_class) = current_window_class {
+                            eprintln!("At draw: current_window_class = {:?}", current_window_class);
+                            eprintln!("Drawing module screen with window_class: {}", window_class);
+                            draw_module_screen(
+                                &c,
+                                left_edge,
+                                bot,
+                                modules_width,
+                                top - bot,
+                                radius,
+                                height,
+                                complete_redraw,
+                                window_class,
+                                login_anim_progress, // Use the same animation progress as login screen
+                            );
                         }
-                    }
                     }
                     Some(state) if state.session_type == "login-screen" => {
                         let mut left_edge = pixel_shift_x + (pixel_shift_width / 2) as f64;
@@ -723,15 +662,10 @@ impl FunctionLayer {
                     };
                     if !complete_redraw {
                         c.set_source_rgb(0.0, 0.0, 0.0);
-                        if button.action == Key::Time {
-                            c.rectangle(left_edge, bot - radius, this_button_width * 3.0, top - bot + radius * 2.0);
-                        } else {
-                            c.rectangle(left_edge, bot - radius, this_button_width, top - bot + radius * 2.0);
-                        }
+                        c.rectangle(left_edge, bot - radius, this_button_width, top - bot + radius * 2.0);
                         c.fill().unwrap();
                     }
                     if (button.action != Key::Unknown &&
-                       button.action != Key::Time &&
                        button.action != Key::Macro1 &&
                        button.action != Key::Macro2 &&
                        button.action != Key::Macro3 &&
@@ -776,30 +710,17 @@ impl FunctionLayer {
                     c.fill().unwrap();
                     }
                     c.set_source_rgb(1.0, 1.0, 1.0);
-                    if button.action == Key::Time {
-                        button.render(&c, height, left_edge, this_button_width.ceil() as u64 * 3, pixel_shift_y);
-                    } else {
-                        button.render(&c, height, left_edge, this_button_width.ceil() as u64, pixel_shift_y);
-                    }
+                    button.render(&c, height, left_edge, this_button_width.ceil() as u64, pixel_shift_y);
 
                     button.changed = false;
 
                     if !complete_redraw {
-                        if button.action == Key::Time {
-                            modified_regions.push(ClipRect::new(
-                                height as u16 - top as u16 - radius as u16,
-                                left_edge as u16,
-                                height as u16 - bot as u16 + radius as u16,
-                                left_edge as u16 + this_button_width as u16 * 3
-                            ));
-                        } else {
-                            modified_regions.push(ClipRect::new(
-                                height as u16 - top as u16 - radius as u16,
-                                left_edge as u16,
-                                height as u16 - bot as u16 + radius as u16,
-                                left_edge as u16 + this_button_width as u16
-                            ));
-                        }
+                        modified_regions.push(ClipRect::new(
+                            height as u16 - top as u16 - radius as u16,
+                            left_edge as u16,
+                            height as u16 - bot as u16 + radius as u16,
+                            left_edge as u16 + this_button_width as u16
+                        ));
                     }
                     left_edge += this_button_width;
                     if i != count - 1 {
@@ -819,22 +740,8 @@ impl FunctionLayer {
             let group_spacing = BUTTON_SPACING_PX as f64;
             let total_width = (width - group_spacing as i32) as f64;
             let modules_width = (split.modules_width as f64 * total_width).round();
-            let modules_count = split.modules.len();
-            let modules_spacing = if modules_count > 1 { BUTTON_SPACING_PX as f64 * (modules_count as f64 - 1.0) } else { 0.0 };
-            let weights: Vec<f32> = split.modules.iter().map(|b| b.fraction.unwrap_or(1.0)).collect();
-            let total_weight: f32 = weights.iter().sum();
-            let mut modules_button_widths: Vec<f64> = weights.iter().map(|w| (modules_width - modules_spacing) * (*w as f64 / total_weight as f64)).collect();
-            let sum_widths: f64 = modules_button_widths.iter().sum();
-            if let Some(last) = modules_button_widths.last_mut() {
-                *last += (modules_width - modules_spacing) - sum_widths;
-            }
-            let mut left_edge = 0.0;
-            for (i, _) in split.modules.iter().enumerate() {
-                let right_edge = left_edge + modules_button_widths[i];
-                if x >= left_edge && x < right_edge {
-                    return Some(i);
-                }
-                left_edge = right_edge + BUTTON_SPACING_PX as f64;
+            if x >= 0.0 && x < modules_width {
+                return Some(0);
             }
         }
         None
@@ -1152,7 +1059,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
         }
         // --- Restore any_changed variable for redraw logic ---
         let any_changed = if let Some(split) = &layers.get(&active_layer).unwrap().split {
-            split.modules.iter().any(|b| b.changed) || split.media.iter().any(|b| b.changed)
+            split.media.iter().any(|b| b.changed)
         } else {
             layers.get(&active_layer).unwrap().buttons.iter().any(|b| b.changed)
         };
@@ -1351,8 +1258,8 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                 match group {
                                     "modules" => {
                                         if let Some(split) = &mut layers.get_mut(&active_layer).unwrap().split {
-                                            let button = &mut split.modules[idx];
-                                            if button.action == Key::Unknown || button.action == Key::Time {
+                                            let button = &mut split.media[idx]; // Changed from split.modules
+                                            if button.action == Key::Unknown {
                                                 continue;
                                             }
                                             touches.insert(dn.seat_slot(), (active_layer.clone(), group, idx));
@@ -1362,7 +1269,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                     "media" => {
                                         if let Some(split) = &mut layers.get_mut(&active_layer).unwrap().split {
                                             let button = &mut split.media[idx];
-                                            if button.action == Key::Unknown || button.action == Key::Time {
+                                            if button.action == Key::Unknown {
                                                 continue;
                                             }
                                             touches.insert(dn.seat_slot(), (active_layer.clone(), group, idx));
@@ -1371,7 +1278,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                     }
                                     "flat" => {
                                         let button = &mut layers.get_mut(&active_layer).unwrap().buttons[idx];
-                                        if button.action == Key::Unknown || button.action == Key::Time {
+                                        if button.action == Key::Unknown {
                                             continue;
                                         }
                                         touches.insert(dn.seat_slot(), (active_layer.clone(), group, idx));
@@ -1392,8 +1299,8 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                             match *group {
                                 "modules" => {
                                     if let Some(split) = &mut layers.get_mut(layer).unwrap().split {
-                                        let button = &mut split.modules[*idx];
-                                        if button.action == Key::Unknown || button.action == Key::Time {
+                                        let button = &mut split.media[*idx]; // Changed from split.modules
+                                        if button.action == Key::Unknown {
                                             continue;
                                         }
                                         button.set_active(&mut uinput, true);
@@ -1402,7 +1309,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                 "media" => {
                                     if let Some(split) = &mut layers.get_mut(layer).unwrap().split {
                                         let button = &mut split.media[*idx];
-                                        if button.action == Key::Unknown || button.action == Key::Time {
+                                        if button.action == Key::Unknown {
                                             continue;
                                         }
                                         button.set_active(&mut uinput, true);
@@ -1410,7 +1317,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                 }
                                 "flat" => {
                                     let button = &mut layers.get_mut(layer).unwrap().buttons[*idx];
-                                    if button.action == Key::Unknown || button.action == Key::Time {
+                                    if button.action == Key::Unknown {
                                         continue;
                                     }
                                     button.set_active(&mut uinput, true);
@@ -1427,8 +1334,8 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                             match *group {
                                 "modules" => {
                                     if let Some(split) = &mut layers.get_mut(layer).unwrap().split {
-                                        let button = &mut split.modules[*idx];
-                                        if button.action == Key::Unknown || button.action == Key::Time {
+                                        let button = &mut split.media[*idx]; // Changed from split.modules
+                                        if button.action == Key::Unknown {
                                             continue;
                                         }
                                         button.set_active(&mut uinput, false);
@@ -1437,7 +1344,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                 "media" => {
                                     if let Some(split) = &mut layers.get_mut(layer).unwrap().split {
                                         let button = &mut split.media[*idx];
-                                        if button.action == Key::Unknown || button.action == Key::Time {
+                                        if button.action == Key::Unknown {
                                             continue;
                                         }
                                         button.set_active(&mut uinput, false);
@@ -1445,7 +1352,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                 }
                                 "flat" => {
                                     let button = &mut layers.get_mut(layer).unwrap().buttons[*idx];
-                                    if button.action == Key::Unknown || button.action == Key::Time {
+                                    if button.action == Key::Unknown {
                                         continue;
                                     }
                                     button.set_active(&mut uinput, false);

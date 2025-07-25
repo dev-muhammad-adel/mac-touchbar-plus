@@ -5,8 +5,8 @@ use crate::services::sessionmanager::SessionState;
 use crate::config::Config;
 use input_linux::Key;
 
-const BUTTON_COLOR_INACTIVE: f64 = 0.350;
-const BUTTON_COLOR_ACTIVE: f64 = 0.600;
+const BUTTON_COLOR_INACTIVE: f64 = 0.172;
+const BUTTON_COLOR_ACTIVE: f64 = 0.350;
 
 pub fn draw_media_section(
     c: &Context,

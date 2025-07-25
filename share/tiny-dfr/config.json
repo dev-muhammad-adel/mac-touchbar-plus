@@ -147,7 +147,7 @@
       "Mode": "Media",
       "Background": false
     },
-    { "Action": "Time", "Mode": "Time", "Format": "24hr", "Locale": "en_US" },
+    { "Action": "Unknown", "Mode": "Blank" },
     { "Action": "Unknown", "Mode": "Blank" },
     { "Action": "Unknown", "Mode": "Blank" },
     {

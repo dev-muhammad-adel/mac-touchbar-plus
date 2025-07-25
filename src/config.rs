@@ -40,6 +40,7 @@ pub struct Theme {
 #[serde(rename_all = "PascalCase")]
 struct AppLayerSplitSection {
     width: f32,
+    #[serde(default)]
     items: Vec<ButtonConfig>,
 }
 
@@ -83,8 +84,6 @@ pub struct ButtonConfig {
     pub mode: Option<String>,
     pub text: Option<String>,
     pub background: Option<bool>,
-    pub format: Option<String>,
-    pub locale: Option<String>,
     pub action: Key,
     pub fraction: Option<f32>, // Optional per-button width fraction
 }
@@ -144,7 +143,6 @@ fn load_config(width: u16) -> (Config, HashMap<LayerKey, FunctionLayer>) {
     // --- App Layer 1: support split layout ---
     let app_layer1 = if let Some(split) = base.app_layer_splited_layout {
         FunctionLayer::with_split(
-            split.app_layer_keys1_modules.items,
             split.app_layer_keys1_modules.width,
             split.app_layer_keys1_media.items,
             split.app_layer_keys1_media.width,
