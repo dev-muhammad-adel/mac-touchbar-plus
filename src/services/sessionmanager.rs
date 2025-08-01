@@ -1,5 +1,3 @@
-//! Session management and user session logic.
-
 
 use serde::Serialize;
 use zbus::{Connection, MessageType, MessageStream, MatchRule};
@@ -33,7 +31,7 @@ async fn check_session_state(connection: &Connection, tx: &watch::Sender<Session
     let mut found_graphical_user: Option<SessionState> = None;
     let mut found_greeter: bool = false;
 
-    for (session_id, uid, username, seat, path) in &sessions {
+    for (_session_id, _uid, username, seat, path) in &sessions {
         let session_proxy: zbus::Proxy<'_> = zbus::ProxyBuilder::new_bare(connection)
             .destination("org.freedesktop.login1")?
             .path(path.as_str())?

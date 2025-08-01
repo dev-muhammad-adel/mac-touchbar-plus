@@ -1,9 +1,5 @@
 //! UI logic for the module selection and interaction screen.
 use cairo::Context;
-use drm::control::ClipRect;
-use crate::services::sessionmanager::SessionState;
-use crate::config::Config;
-use crate::Key;
 
 const BUTTON_COLOR_ACTIVE: f64 = 0.600;
 const BUTTON_COLOR_INACTIVE: f64 = 0.350;
@@ -17,8 +13,8 @@ pub fn draw_module_screen(
     width: f64,
     height: f64,
     radius: f64,
-    area_height: i32,
-    complete_redraw: bool,
+    _area_height: i32,
+    _complete_redraw: bool,
     window_class: &str,
     anim_progress: f64, // 0.0 = transparent, 1.0 = opaque
 ) {

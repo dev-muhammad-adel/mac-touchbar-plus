@@ -138,7 +138,7 @@ fn load_config(width: u16) -> (Config, HashMap<LayerKey, FunctionLayer>) {
         base.active_brightness = user.active_brightness.or(base.active_brightness);
         base.app_layer_splited_layout = user.app_layer_splited_layout.or(base.app_layer_splited_layout);
     };
-    let media_layer = FunctionLayer::with_config(base.media_layer_keys.unwrap());
+    let _media_layer = FunctionLayer::with_config(base.media_layer_keys.unwrap());
     let fkey_layer = FunctionLayer::with_config(base.primary_layer_keys.unwrap());
     // --- App Layer 1: support split layout ---
     let app_layer1 = if let Some(split) = base.app_layer_splited_layout {

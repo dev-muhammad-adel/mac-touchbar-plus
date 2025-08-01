@@ -48,6 +48,8 @@ fn get_sway_active_window_title() -> Option<String> {
     }
 }
 
+
+
 fn detect_and_get_active_window_class() -> Option<String> {
     if std::env::var("WAYLAND_DISPLAY").is_ok() {
         // Sway logic (unchanged)

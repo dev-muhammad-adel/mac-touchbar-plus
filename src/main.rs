@@ -7,10 +7,10 @@ use std::{
     path::{Path, PathBuf},
     collections::HashMap,
     cmp::min,
-    panic::{self, AssertUnwindSafe},
+    // panic::self,
     process::{Command, Child},
 };
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Read, Write};
 use std::sync::Arc;
 use cairo::{ImageSurface, Format, Context, Surface, Rectangle, FontSlant, FontWeight, Antialias};
 use rsvg::{Loader, CairoRenderer, SvgHandle};
@@ -33,15 +33,24 @@ use nix::{
         epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags}
     },
     sys::eventfd::{eventfd, EfdFlags},
-    unistd::{chown, Uid, Gid, User},
+    unistd::{chown, User},
 };
 use icon_loader::{IconFileType, IconLoader};
-use chrono::{Local, Locale, Timelike};
+use chrono::{Local, Timelike};
 use crate::services::sessionmanager::{SessionState, monitor_sessions};
 use tokio::sync::{watch, mpsc};
 use view::login_screen::draw_login_screen;
 use view::media_screen::draw_media_section;
 use view::module_screen::draw_module_screen;
+use view::app_ui_manager::{AppUiManager, AppAction};
+use view::vlc_screen::VlcAction;
+
+// Helper function to send commands to VLC helper
+fn send_vlc_command(stream: &mut UnixStream, command: &str) -> Result<(), std::io::Error> {
+    let command_with_newline = format!("{}\n", command);
+    stream.write_all(command_with_newline.as_bytes())?;
+    Ok(())
+}
 use crate::display::display::DrmBackend;
 use display::animation::Animation;
 use display::backlight::BacklightManager;
@@ -60,6 +69,7 @@ pub mod display {
 }
 pub mod view;
 pub mod services;
+pub mod helper;
 
 #[derive(Hash, Eq, PartialEq, Clone, Debug)]
 enum LayerKey {
@@ -105,6 +115,11 @@ fn find_user_session_pid(user: &str) -> Option<u32> {
 }
 
 struct HelperManager {
+    process: Option<Child>,
+    listener: Option<UnixListener>,
+}
+
+struct VlcHelperManager {
     process: Option<Child>,
     listener: Option<UnixListener>,
 }
@@ -172,6 +187,75 @@ impl HelperManager {
         if let Some(listener) = &self.listener {
             if let Ok((stream, _)) = listener.accept() {
                 stream.set_nonblocking(true).expect("Failed to set stream non-blocking");
+                return Some(stream);
+            }
+        }
+        None
+    }
+}
+
+impl VlcHelperManager {
+    fn new() -> Self {
+        VlcHelperManager {
+            process: None,
+            listener: None,
+        }
+    }
+
+    fn start(&mut self, user: &str) -> Option<i32> {
+        if self.process.is_some() {
+            return None;
+        }
+
+        let socket_path = "/tmp/touchbar-vlc.sock";
+        // Clean up old socket file if it exists
+        let _ = fs::remove_file(&socket_path);
+
+        let listener = UnixListener::bind(socket_path).expect("Failed to bind VLC socket");
+        listener.set_nonblocking(true).expect("Failed to set VLC socket non-blocking");
+
+        // Change ownership of the socket to the logged-in user
+        if let Some(userinfo) = User::from_name(user).unwrap() {
+            chown(socket_path, Some(userinfo.uid), Some(userinfo.gid)).expect("Failed to chown VLC socket");
+        }
+
+        let fd = listener.as_raw_fd();
+        self.listener = Some(listener);
+
+        // Find the user's session process and extract its environment
+        let mut env_vars = HashMap::new();
+        if let Some(pid) = find_user_session_pid(user) {
+            env_vars = get_env_from_pid(pid);
+        }
+
+        let helper_path = "tiny-dfr-vlc-helper";
+        let mut cmd = Command::new("sudo");
+        cmd.arg("-u").arg(user)
+           .arg("env");
+        // Pass relevant environment variables if found
+        for key in &["DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XAUTHORITY"] {
+            if let Some(val) = env_vars.get(*key) {
+                cmd.arg(format!("{}={}", key, val));
+            }
+        }
+        cmd.arg(helper_path);
+        println!("[main] Spawning VLC helper: sudo -u {} env ... {}", user, helper_path);
+        let child = cmd.spawn().expect("Failed to start VLC helper");
+        self.process = Some(child);
+        Some(fd)
+    }
+
+    fn stop(&mut self) {
+        if let Some(mut child) = self.process.take() {
+            child.kill().expect("Failed to kill VLC helper");
+        }
+        self.listener.take();
+    }
+
+    fn accept_connection(&mut self) -> Option<UnixStream> {
+        if let Some(listener) = &self.listener {
+            if let Ok((stream, _)) = listener.accept() {
+                stream.set_nonblocking(true).expect("Failed to set VLC stream non-blocking");
                 return Some(stream);
             }
         }
@@ -451,7 +535,7 @@ impl FunctionLayer {
             }),
         }
     }
-    fn draw(&mut self, config: &Config, width: i32, height: i32, surface: &Surface, pixel_shift: (f64, f64), complete_redraw: bool, modules_only_redraw: bool, session_state: Option<&SessionState>, layer_index: Option<LayerKey>, login_anim_progress: f64, app_layer3_slide_progress: f64, current_window_class: Option<&str>) -> Vec<ClipRect> {
+    fn draw(&mut self, config: &Config, width: i32, height: i32, surface: &Surface, pixel_shift: (f64, f64), complete_redraw: bool, modules_only_redraw: bool, session_state: Option<&SessionState>, layer_index: Option<LayerKey>, login_anim_progress: f64, app_layer3_slide_progress: f64, current_window_class: Option<&str>, app_ui_manager: Option<&AppUiManager>, vlc_drag_position: Option<f64>) -> Vec<ClipRect> {
         match &mut self.split {
             Some(split) => {
                 let c = Context::new(&surface).unwrap();
@@ -468,7 +552,7 @@ impl FunctionLayer {
                 let modules_width = (split.modules_width as f64 * total_width).round();
                 let media_width = total_width - modules_width - group_spacing;
                 let media_count = split.media.len();
-                let media_spacing = if media_count > 1 { BUTTON_SPACING_PX as f64 * (media_count as f64 - 1.0) } else { 0.0 };
+                let _media_spacing = if media_count > 1 { BUTTON_SPACING_PX as f64 * (media_count as f64 - 1.0) } else { 0.0 };
          
                 // --- MEDIA BUTTON WIDTHS WITH FRACTION ---
                 let media_spacing_px = 2.0f64; // 2px spacing for AppLayerKeys1Media
@@ -485,7 +569,7 @@ impl FunctionLayer {
                 let radius = 8.0f64;
                 let bot = (height as f64) * 0.15;
                 let top = (height as f64) * 0.85;
-                let (pixel_shift_x, pixel_shift_y) = pixel_shift;
+                let (pixel_shift_x, _pixel_shift_y) = pixel_shift;
                 if complete_redraw {
                     c.set_source_rgb(0.0, 0.0, 0.0);
                     c.paint().unwrap();
@@ -506,26 +590,40 @@ impl FunctionLayer {
                 match session_state {
                     Some(state) if state.session_type == "desktop-logged" => {
                         // User is logged in - show normal modules
-                        let mut left_edge = pixel_shift_x + (pixel_shift_width / 2) as f64;
+                        let left_edge = pixel_shift_x + (pixel_shift_width / 2) as f64;
                         if let Some(window_class) = current_window_class {
-                            eprintln!("At draw: current_window_class = {:?}", current_window_class);
-                            eprintln!("Drawing module screen with window_class: {}", window_class);
-                            draw_module_screen(
-                                &c,
-                                left_edge,
-                                bot,
-                                modules_width,
-                                top - bot,
-                                radius,
-                                height,
-                                complete_redraw,
-                                window_class,
-                                login_anim_progress, // Use the same animation progress as login screen
-                            );
+                            
+                            // Use app-specific UI if available, otherwise fall back to default
+                            if let Some(app_ui_manager) = &app_ui_manager {
+                                app_ui_manager.draw_app_ui(
+                                    &c,
+                                    left_edge,
+                                    bot,
+                                    modules_width,
+                                    top - bot,
+                                    radius,
+                                    login_anim_progress,
+                                    window_class,
+                                    vlc_drag_position, // Pass drag position for visual feedback
+                                );
+                            } else {
+                                draw_module_screen(
+                                    &c,
+                                    left_edge,
+                                    bot,
+                                    modules_width,
+                                    top - bot,
+                                    radius,
+                                    height,
+                                    complete_redraw,
+                                    window_class,
+                                    login_anim_progress, // Use the same animation progress as login screen
+                                );
+                            }
                         }
                     }
                     Some(state) if state.session_type == "login-screen" => {
-                        let mut left_edge = pixel_shift_x + (pixel_shift_width / 2) as f64;
+                        let left_edge = pixel_shift_x + (pixel_shift_width / 2) as f64;
 
                     draw_login_screen(
                         &c,
@@ -549,7 +647,7 @@ impl FunctionLayer {
                 }
                 
                 // Add spacing between modules and media sections
-                let mut left_edge = pixel_shift_x + (pixel_shift_width / 2) as f64 + modules_width + group_spacing;
+                let left_edge = pixel_shift_x + (pixel_shift_width / 2) as f64 + modules_width + group_spacing;
             
                 // Skip media section if this is a modules-only redraw
                 if !modules_only_redraw {
@@ -920,6 +1018,15 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
     let (mut cfg, mut layers) = cfg_mgr.load_config(width);
     let mut pixel_shift = PixelShiftManager::new();
     let mut helper_manager = HelperManager::new();
+    let mut vlc_helper_manager = VlcHelperManager::new();
+    let mut vlc_helper_listener_fd: Option<i32> = None;
+    let mut vlc_helper_stream: Option<UnixStream> = None;
+    let mut vlc_helper_reader: Option<BufReader<UnixStream>> = None;
+    
+    // Add focus-based VLC helper management
+    let mut vlc_window_focused = false;
+    let mut last_window_class: Option<String> = None;
+    let mut current_user: Option<String> = None;
 
     // Privilege dropping removed - run with appropriate permissions
 
@@ -995,10 +1102,16 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
     let mut helper_listener_fd: Option<i32> = None;
     let mut helper_stream: Option<UnixStream> = None;
     let mut helper_reader: Option<BufReader<UnixStream>> = None;
+    let mut vlc_helper_listener_fd: Option<i32> = None;
+    let mut vlc_helper_stream: Option<UnixStream> = None;
+    let mut vlc_helper_reader: Option<BufReader<UnixStream>> = None;
     let mut current_window_class: Option<String> = None;
     let mut needs_complete_redraw = false;
     let mut animation = Animation::new(0.05, 50.0); // step, interval_ms
     let mut app_layer3_slide_anim = Animation::new(0.18, 16.0); // 60fps for smooth slide
+    let mut app_ui_manager = AppUiManager::new();
+    let mut vlc_touch_active = false; // Track if VLC touch interaction is active
+    let mut vlc_drag_position: Option<f64> = None; // Track current drag position for visual feedback
 
     // --- main event loop ---
     loop {
@@ -1084,7 +1197,10 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                 1.0
             };
             // Draw only the current active layer (layer 3 during slide-out)
-            let mut clips = layers.get_mut(&active_layer).unwrap().draw(&cfg, width as i32, height as i32, &surface, shift, needs_complete_redraw, false, session_for_draw, Some(active_layer.clone()), animation.progress(), app_layer3_slide_progress, current_window_class.as_deref());
+            if vlc_drag_position.is_some() {
+
+            }
+            let mut clips = layers.get_mut(&active_layer).unwrap().draw(&cfg, width as i32, height as i32, &surface, shift, needs_complete_redraw, false, session_for_draw, Some(active_layer.clone()), animation.progress(), app_layer3_slide_progress, current_window_class.as_deref(), Some(&app_ui_manager), vlc_drag_position);
             let data = surface.data().unwrap();
             drm.map().unwrap().as_mut()[..data.len()].copy_from_slice(&data);
             drm.dirty(&clips).unwrap();
@@ -1106,18 +1222,20 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                     let mut buf = [0u8; 8];
                     let _ = nix::unistd::read(event_fd.as_raw_fd(), &mut buf);
                     if let Ok(new_state) = event_rx.try_recv() {
-                        println!("[main] Session state changed: {:?}", new_state);
                         let session_changed = match &current_session {
                             Some(current) => current != &new_state,
                             None => true,
                         };
                         if session_changed {
                             if new_state.is_logged_in {
+                                current_user = Some(new_state.user.clone());
                                 if let Some(fd) = helper_manager.start(&new_state.user) {
                                     let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
                                     epoll.add(listener_fd_obj.as_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 4)).unwrap();
                                     helper_listener_fd = Some(listener_fd_obj.into_raw_fd()); // Store the raw fd
                                 }
+                                
+                                // VLC helper will be started when VLC window gains focus
                             } else {
                                 if let Some(fd) = helper_listener_fd.take() {
                                     let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
@@ -1127,6 +1245,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                     epoll.delete(&stream).unwrap();
                                     helper_reader = None;
                                 }
+                                // VLC helper will be stopped when VLC window loses focus
                                 helper_manager.stop();
                             }
                             // Step 2: Trigger animation when login screen or desktop-logged becomes visible
@@ -1184,11 +1303,46 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                        for part in text.split('\n') {
                                            let class = part.trim();
                                            if class.is_empty() {
-                                               eprintln!("[main] DEBUG: Skipping empty line");
                                                continue;
                                            }
                                            current_window_class = Some(class.to_string());
-                                           println!("[main] Active window class: {}", class);
+                                           
+                                           // Check if VLC window focus changed
+                                           let new_vlc_focused = class == "vlc";
+                                           if new_vlc_focused != vlc_window_focused {
+                                               vlc_window_focused = new_vlc_focused;
+                                               if vlc_window_focused {
+                                                   // VLC window gained focus - start VLC helper
+                                                   println!("[main] VLC window focused, starting VLC helper");
+                                                   if let Some(user) = &current_user {
+                                                       if let Some(fd) = vlc_helper_manager.start(user) {
+                                                           let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
+                                                           epoll.add(listener_fd_obj.as_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 6)).unwrap();
+                                                           vlc_helper_listener_fd = Some(listener_fd_obj.into_raw_fd());
+                                                       }
+                                                   } else {
+                                                       println!("[main] No current user available for VLC helper");
+                                                   }
+                                               } else {
+                                                   // VLC window lost focus - stop VLC helper
+                                                   println!("[main] VLC window lost focus, stopping VLC helper");
+                                                   if let Some(stream) = vlc_helper_stream.take() {
+                                                       epoll.delete(&stream).unwrap();
+                                                   }
+                                                   vlc_helper_reader = None;
+                                                   if let Some(fd) = vlc_helper_listener_fd.take() {
+                                                       let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
+                                                       epoll.delete(listener_fd_obj.as_fd()).unwrap();
+                                                   }
+                                                   vlc_helper_manager.stop();
+                                                   // Clear VLC drag position when losing focus
+                                                   vlc_drag_position = None;
+                                               }
+                                           }
+                                           
+                                           // Update app UI manager with new window class
+                                           app_ui_manager.update_app(&class).await;
+                                           
                                            needs_complete_redraw = true;
                                        }
                                    } else {
@@ -1198,13 +1352,103 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                                    break; // No more data right now
                                },
-                               Err(e) => {
-                                   if let Some(stream) = helper_stream.take() {
+                                                               Err(_e) => {
+                                    if let Some(stream) = helper_stream.take() {
+                                        epoll.delete(&stream).unwrap();
+                                    }
+                                    helper_reader = None;
+                                    break;
+                                }
+                           }
+                        }
+                    }
+                }
+                6 => { // VLC helper listener event
+                                    if let Some(stream) = vlc_helper_manager.accept_connection() {
+                    stream.set_nonblocking(true).expect("Failed to set VLC stream non-blocking");
+                    println!("[main] VLC helper connected to socket.");
+                    epoll.add(&stream, EpollEvent::new(EpollFlags::EPOLLIN, 7)).unwrap();
+                    vlc_helper_reader = Some(BufReader::new(stream.try_clone().unwrap()));
+                    vlc_helper_stream = Some(stream);
+                    // Stop listening for new connections
+                    if let Some(fd) = vlc_helper_listener_fd.take() {
+                        let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
+                        epoll.delete(listener_fd_obj.as_fd()).unwrap();
+                    }
+                }
+                }
+                7 => { // VLC helper stream event
+                    if let Some(reader) = &mut vlc_helper_reader {
+                        loop {
+                           let mut buf = vec![0; 1024];
+                           match reader.get_mut().read(&mut buf) {
+                               Ok(0) => { // EOF
+                                   println!("[main] VLC helper disconnected.");
+                                   if let Some(stream) = vlc_helper_stream.take() {
                                        epoll.delete(&stream).unwrap();
                                    }
-                                   helper_reader = None;
+                                   vlc_helper_reader = None;
                                    break;
-                               }
+                               },
+                               Ok(n) => {
+                                   let data = &buf[..n];
+                                   if let Ok(text) = std::str::from_utf8(data) {
+                                       for part in text.split('\n') {
+                                           let part = part.trim();
+                                           if part.is_empty() {
+                                               continue;
+                                           }
+                                           
+                                           // Handle VLC status message (plain JSON format)
+                                           if let Ok(vlc_status) = serde_json::from_str::<serde_json::Value>(part) {
+                                               // Update VLC screen with the status
+                                               if let Some(is_playing) = vlc_status.get("is_playing").and_then(|v| v.as_bool()) {
+                                                   if let Some(position) = vlc_status.get("position").and_then(|v| v.as_f64()) {
+                                                       if let Some(title) = vlc_status.get("title").and_then(|v| v.as_str()) {
+                                                           if let Some(artist) = vlc_status.get("artist").and_then(|v| v.as_str()) {
+                                                               if let Some(duration) = vlc_status.get("duration").and_then(|v| v.as_i64()) {
+                                                                   // Create a VlcStatus struct and update the VLC screen
+                                                                   let status = crate::helper::VlcStatus {
+                                                                       is_playing,
+                                                                       position,
+                                                                       duration,
+                                                                       title: title.to_string(),
+                                                                       artist: artist.to_string(),
+                                                                   };
+                                                                   
+                                                                   // If we have a drag position and VLC has updated to a new position,
+                                                                   // gradually fade out the drag position
+                                                                   if let Some(drag_pos) = vlc_drag_position {
+                                                                       if (position - drag_pos).abs() < 0.01 {
+                                                                           // VLC has caught up to the drag position, clear it
+                                                                           vlc_drag_position = None;
+                                                                           println!("[main] VLC caught up to drag position, clearing drag");
+                                                                       }
+                                                                   }
+                                                                   
+                                                                   app_ui_manager.vlc_screen.last_status = Some(status);
+                                                                   needs_complete_redraw = true;
+                                                               }
+                                                           }
+                                                       }
+                                                   }
+                                               }
+                                           }
+                                       }
+                                   } else {
+                                       eprintln!("[main] DEBUG: Received invalid UTF-8 data from VLC helper");
+                                   }
+                               },
+                               Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                   break; // No more data right now
+                               },
+                                                               Err(_e) => {
+                                    if let Some(stream) = vlc_helper_stream.take() {
+                                        epoll.delete(&stream).unwrap();
+                                    }
+                                    vlc_helper_reader = None;
+                                    break;
+                                }
                            }
                         }
                     }
@@ -1254,18 +1498,145 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                         TouchEvent::Down(dn) => {
                             let _x = dn.x_transformed(width as u32);
                             let _y = dn.y_transformed(height as u32);
+                            println!("[main] Touch down at ({}, {})", _x, _y);
                             if let Some((group, idx)) = layers.get_mut(&active_layer).unwrap().hit_test(_x, width as i32) {
                                 match group {
                                     "modules" => {
-                                        if let Some(split) = &mut layers.get_mut(&active_layer).unwrap().split {
-                                            let button = &mut split.media[idx]; // Changed from split.modules
-                                            if button.action == Key::Unknown {
-                                                continue;
-                                            }
-                                            touches.insert(dn.seat_slot(), (active_layer.clone(), group, idx));
-                                            button.set_active(&mut uinput, true);
+                                        // Store touch for modules group
+                                        touches.insert(dn.seat_slot(), (active_layer.clone(), group, idx));
+                                        println!("[main] Touch stored for modules group, slot: {}", dn.seat_slot());
+                                        
+                                        // Check for app-specific UI interactions
+                                        if let Some(window_class) = &current_window_class {
+                                            // Only handle VLC interactions when VLC is focused
+                                            if window_class == "vlc" {
+                                                println!("[main] VLC detected as focused window, processing touch events");
+                                                // Calculate modules area coordinates
+                                                let pixel_shift_width = if cfg.enable_pixel_shift { PIXEL_SHIFT_WIDTH_PX } else { 0 };
+                                                let total_width = (width as i32 - pixel_shift_width as i32) as f64;
+                                                let _group_spacing = BUTTON_SPACING_PX as f64;
+                                                let modules_width = (0.7 * total_width).round(); // Assuming 70% for modules
+                                                let modules_x = (pixel_shift_width / 2) as f64;
+                                                let modules_y = (height as f64) * 0.15;
+                                                let modules_height = (height as f64) * 0.7;
+                                                
+                                                // Reduced debug logging
+                                                
+                                                // Adjust touch coordinates relative to modules area
+                                                let adjusted_x = _x - modules_x;
+                                                let adjusted_y = _y - modules_y;
+                                                // Reduced debug logging
+                                                
+                                                if let Some(app_action) = app_ui_manager.hit_test_app_ui(adjusted_x, adjusted_y, modules_x, modules_y, modules_width, modules_height, 8.0, window_class) {
+                                                    // Only process VLC actions if VLC helper stream is available AND VLC window is focused
+                                                    if vlc_helper_stream.is_some() && vlc_window_focused {
+                                                        match app_action {
+                                                        AppAction::Vlc(VlcAction::TogglePlayPause) => {
+                                                            // Send play/pause command to VLC helper
+                                                            // Reduced debug logging
+                                                            vlc_touch_active = true; // Mark VLC touch as active
+                                                            if let Some(stream) = &mut vlc_helper_stream {
+                                                                if let Err(e) = send_vlc_command(stream, "play_pause") {
+                                                                    eprintln!("[main] Failed to send play/pause command to VLC helper: {}", e);
+                                                                }
+                                                            } else {
+                                                                eprintln!("[main] VLC helper stream not available!");
+                                                            }
+                                                        }
+                                                        AppAction::Vlc(VlcAction::Seek(position)) => {
+                                                            // Send seek command to VLC helper
+                                                            // Reduced debug logging
+                                                            vlc_touch_active = true; // Mark VLC touch as active
+                                                            if let Some(stream) = &mut vlc_helper_stream {
+                                                                let seek_command = format!("seek:{}", position);
+                                                                if let Err(e) = send_vlc_command(stream, &seek_command) {
+                                                                    eprintln!("[main] Failed to send seek command to VLC helper: {}", e);
+                                                                }
+                                                            }
+                                                        }
+                                                        AppAction::Vlc(VlcAction::DragHead(position)) => {
+                                                            // Send seek command to VLC helper for head dragging
+                                                            vlc_touch_active = true; // Mark VLC touch as active
+                                                            vlc_drag_position = Some(position); // Update drag position for visual feedback
+                                                            needs_complete_redraw = true; // Force redraw for visual feedback
+                                                            // Only send seek command if position changed significantly (avoid spam)
+                                                            static mut LAST_SEEK_POSITION: f64 = 0.0;
+                                                            unsafe {
+                                                                if (position - LAST_SEEK_POSITION).abs() > 0.01 {
+                                                                    LAST_SEEK_POSITION = position;
+                                                                                                                                    if let Some(stream) = &mut vlc_helper_stream {
+                                                                    let seek_command = format!("seek:{}", position);
+                                                                    if let Err(e) = send_vlc_command(stream, &seek_command) {
+                                                                        eprintln!("[main] Failed to send seek command to VLC helper: {}", e);
+                                                                    }
+                                                                }
+                                                                }
+                                                            }
+                                                        }
+                                                        AppAction::Vlc(VlcAction::Next) => {
+                                                            // Send next command to VLC helper
+                                                            println!("[main] Executing VLC Next");
+                                                            vlc_touch_active = true; // Mark VLC touch as active
+                                                            if let Some(stream) = &mut vlc_helper_stream {
+                                                                if let Err(e) = send_vlc_command(stream, "next") {
+                                                                    eprintln!("[main] Failed to send next command to VLC helper: {}", e);
+                                                                }
+                                                            }
+                                                        }
+                                                        AppAction::Vlc(VlcAction::Previous) => {
+                                                            // Send previous command to VLC helper
+                                                            println!("[main] Executing VLC Previous");
+                                                            vlc_touch_active = true; // Mark VLC touch as active
+                                                            if let Some(stream) = &mut vlc_helper_stream {
+                                                                if let Err(e) = send_vlc_command(stream, "previous") {
+                                                                    eprintln!("[main] Failed to send previous command to VLC helper: {}", e);
+                                                                }
+                                                            }
+                                                        }
+                                                        AppAction::Vlc(VlcAction::Stop) => {
+                                                            // Send stop command to VLC helper
+                                                            println!("[main] Executing VLC Stop");
+                                                            vlc_touch_active = true; // Mark VLC touch as active
+                                                            if let Some(stream) = &mut vlc_helper_stream {
+                                                                if let Err(e) = send_vlc_command(stream, "stop") {
+                                                                    eprintln!("[main] Failed to send stop command to VLC helper: {}", e);
+                                                                }
+                                                            }
+                                                        }
+                                                        AppAction::Vlc(VlcAction::Raise) => {
+                                                            // Send raise command to VLC helper
+                                                            println!("[main] Executing VLC Raise");
+                                                            vlc_touch_active = true; // Mark VLC touch as active
+                                                            if let Some(stream) = &mut vlc_helper_stream {
+                                                                if let Err(e) = send_vlc_command(stream, "raise") {
+                                                                    eprintln!("[main] Failed to send raise command to VLC helper: {}", e);
+                                                                }
+                                                            }
+                                                        }
+                                                        AppAction::Vlc(VlcAction::Quit) => {
+                                                            // Send quit command to VLC helper
+                                                            println!("[main] Executing VLC Quit");
+                                                            vlc_touch_active = true; // Mark VLC touch as active
+                                                            if let Some(stream) = &mut vlc_helper_stream {
+                                                                if let Err(e) = send_vlc_command(stream, "quit") {
+                                                                    eprintln!("[main] Failed to send quit command to VLC helper: {}", e);
+                                                                }
+                                                            }
+                                                        }
+                                                        _ => {
+                                                            // Ignore non-VLC actions
+                                                            println!("[main] Ignoring non-VLC action: {:?}", app_action);
+                                                        }
+                                                    }
+                                                } else {
+                                                    println!("[main] VLC helper stream not available, ignoring VLC action");
+                                                }
+                                                } else {
+                                                    println!("[main] No VLC action detected for touch at ({}, {})", _x, _y);
+                                                }
                                         }
                                     }
+                                }
                                     "media" => {
                                         if let Some(split) = &mut layers.get_mut(&active_layer).unwrap().split {
                                             let button = &mut split.media[idx];
@@ -1289,22 +1660,75 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                             }
                         },
                         TouchEvent::Motion(mtn) => {
+                            println!("[main] Motion event received for slot: {}", mtn.seat_slot());
                             if !touches.contains_key(&mtn.seat_slot()) {
+                                println!("[main] Motion event ignored - slot not in touches");
                                 continue;
                             }
                             let _x = mtn.x_transformed(width as u32);
                             let _y = mtn.y_transformed(height as u32);
                             let (layer, group, idx) = touches.get(&mtn.seat_slot()).unwrap();
-                            println!("Motion: group={}, idx={}", group, idx);
+                            println!("[main] Motion event: group={}, idx={}, coords=({}, {})", group, idx, _x, _y);
                             match *group {
                                 "modules" => {
-                                    if let Some(split) = &mut layers.get_mut(layer).unwrap().split {
-                                        let button = &mut split.media[*idx]; // Changed from split.modules
-                                        if button.action == Key::Unknown {
-                                            continue;
+                                    // Check for VLC touch interaction during motion
+                                    if let Some(window_class) = &current_window_class {
+                                        println!("[main] Motion - window_class: {}, vlc_touch_active: {}", window_class, vlc_touch_active);
+                                        if window_class == "vlc" && vlc_touch_active {
+                                            // Calculate modules area coordinates
+                                            let pixel_shift_width = if cfg.enable_pixel_shift { PIXEL_SHIFT_WIDTH_PX } else { 0 };
+                                            let total_width = (width as i32 - pixel_shift_width as i32) as f64;
+                                            let _group_spacing = BUTTON_SPACING_PX as f64;
+                                            let modules_width = (0.7 * total_width).round(); // Assuming 70% for modules
+                                            let modules_x = (pixel_shift_width / 2) as f64;
+                                            let modules_y = (height as f64) * 0.15;
+                                            let modules_height = (height as f64) * 0.7;
+                                            
+                                            // Adjust touch coordinates relative to modules area (same as in TouchEvent::Down)
+                                            let adjusted_x = _x - modules_x;
+                                            let adjusted_y = _y - modules_y;
+                                            println!("[main] Motion - Adjusted touch coordinates: ({}, {}) relative to modules area", adjusted_x, adjusted_y);
+                                            
+                                            if let Some(app_action) = app_ui_manager.hit_test_app_ui(adjusted_x, adjusted_y, modules_x, modules_y, modules_width, modules_height, 8.0, window_class) {
+                                                println!("[main] Motion - VLC action detected: {:?}", app_action);
+                                                // Only process VLC seek during motion if VLC helper stream is available
+                                                if vlc_helper_stream.is_some() {
+                                                    match app_action {
+                                                        AppAction::Vlc(VlcAction::Seek(position)) => {
+                                                            // Send seek command to VLC helper during motion
+                                                            println!("[main] VLC seek during motion to position: {}", position);
+                                                            if let Some(stream) = &mut vlc_helper_stream {
+                                                                let seek_command = format!("seek:{}", position);
+                                                                if let Err(e) = send_vlc_command(stream, &seek_command) {
+                                                                    eprintln!("[main] Failed to send seek command to VLC helper during motion: {}", e);
+                                                                }
+                                                            }
+                                                        }
+                                                        AppAction::Vlc(VlcAction::DragHead(position)) => {
+                                                            // Send seek command to VLC helper during head dragging
+                                                            println!("[main] VLC drag head during motion to position: {}", position);
+                                                            vlc_drag_position = Some(position); // Update drag position for visual feedback
+                                                            needs_complete_redraw = true; // Force redraw for visual feedback
+                                                            println!("[main] Set vlc_drag_position during motion to: {:?}", vlc_drag_position);
+                                                            if let Some(stream) = &mut vlc_helper_stream {
+                                                                let seek_command = format!("seek:{}", position);
+                                                                if let Err(e) = send_vlc_command(stream, &seek_command) {
+                                                                    eprintln!("[main] Failed to send seek command to VLC helper during motion: {}", e);
+                                                                }
+                                                            }
+                                                        }
+                                                        _ => {
+                                                            // For other VLC actions, only respond to initial touch, not motion
+                                                            println!("[main] Ignoring non-seek VLC action during motion: {:?}", app_action);
+                                                        }
+                                                    }
+                                                } else {
+                                                    println!("[main] VLC helper stream not available during motion, ignoring seek");
+                                                }
+                                            }
                                         }
-                                        button.set_active(&mut uinput, true);
                                     }
+                                    continue;
                                 }
                                 "media" => {
                                     if let Some(split) = &mut layers.get_mut(layer).unwrap().split {
@@ -1333,13 +1757,17 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                             println!("Up: group={}, idx={}", group, idx);
                             match *group {
                                 "modules" => {
-                                    if let Some(split) = &mut layers.get_mut(layer).unwrap().split {
-                                        let button = &mut split.media[*idx]; // Changed from split.modules
-                                        if button.action == Key::Unknown {
-                                            continue;
-                                        }
-                                        button.set_active(&mut uinput, false);
+                                    // Reset VLC touch state when touch ends
+                                    if vlc_touch_active {
+                                        vlc_touch_active = false;
+                                        // Don't immediately reset drag position - let VLC update naturally
+                                        // vlc_drag_position = None; // Reset drag position
+                                        // Reset VLC screen drag state
+                                        app_ui_manager.vlc_screen.reset_drag_state();
+                                        needs_complete_redraw = true; // Force redraw to reset visual feedback
+                                        println!("[main] VLC touch interaction ended, keeping drag position for smooth transition");
                                     }
+                                    continue;
                                 }
                                 "media" => {
                                     if let Some(split) = &mut layers.get_mut(layer).unwrap().split {
