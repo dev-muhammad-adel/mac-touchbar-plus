@@ -214,18 +214,28 @@ impl VlcScreen {
             c.set_source_rgba(0.95, 0.95, 0.95, anim_progress); // Brighter white like macOS
             
             let current_time_ext = c.text_extents(&current_time_str).unwrap();
-            let current_time_x = icon_x + icon_width + 16.0; // More spacing from icon
+            let current_time_x = icon_x + icon_width + 20.0; // More spacing from icon
             let current_time_y = pill_y + (pill_h + current_time_ext.height()) / 2.0;
             c.move_to(current_time_x, current_time_y);
             c.show_text(&current_time_str).unwrap();
             c.restore().unwrap();
 
             // 3. macOS Touch Bar style progress bar with Adwaita dark theme (2px more vertical padding)
-            let progress_x = current_time_x + current_time_ext.width() + 20.0; // More spacing from time
+            let progress_x = current_time_x + current_time_ext.width() + 24.0; // More spacing from time
             let progress_y = pill_y + 2.0; // 2px more vertical padding
             let progress_h = pill_h - 4.0; // Reduced height for 2px padding on top and bottom
-            let total_time_width = 65.0; // More space for total time
-            let progress_w = pill_w - (progress_x - pill_x) - total_time_width - 12.0; // More margin on right
+            
+            // Calculate total time width first to ensure proper spacing
+            let total_time_seconds = status.duration;
+            let total_time_str = format!("{}:{:02}", total_time_seconds / 60, total_time_seconds % 60);
+            c.save().unwrap();
+            c.set_font_size(18.0);
+            c.select_font_face("SF Pro Display", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
+            let total_time_ext = c.text_extents(&total_time_str).unwrap();
+            c.restore().unwrap();
+            
+            let total_time_width = total_time_ext.width() + 20.0; // Actual width plus padding
+            let progress_w = pill_w - (progress_x - pill_x) - total_time_width - 16.0; // More margin on right
             
             // Adwaita dark wrapper background for progress bar area
             c.save().unwrap();
@@ -290,17 +300,14 @@ impl VlcScreen {
                 c.restore().unwrap();
             }
 
-            // 4. Total time (macOS system font style)
-            let total_seconds = status.duration;
-            let total_time_str = format!("{}:{:02}", total_seconds / 60, total_seconds % 60);
-            
+            // 4. Total time (macOS system font style) - reuse the already calculated values
             c.save().unwrap();
             c.set_font_size(18.0); // Match current time font size
             c.select_font_face("SF Pro Display", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
             c.set_source_rgba(0.95, 0.95, 0.95, anim_progress); // Brighter white like macOS
             
-            let total_time_x = progress_x + progress_w + 16.0; // More spacing from progress bar
-            let total_time_y = pill_y + (pill_h + current_time_ext.height()) / 2.0;
+            let total_time_x = progress_x + progress_w + 20.0; // More spacing from progress bar
+            let total_time_y = pill_y + (pill_h + total_time_ext.height()) / 2.0;
             c.move_to(total_time_x, total_time_y);
             c.show_text(&total_time_str).unwrap();
             c.restore().unwrap();

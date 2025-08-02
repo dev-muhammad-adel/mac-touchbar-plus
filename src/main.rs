@@ -1564,10 +1564,10 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                                             unsafe {
                                                                 if (position - LAST_SEEK_POSITION).abs() > 0.01 {
                                                                     LAST_SEEK_POSITION = position;
-                                                                                                                                    if let Some(stream) = &mut vlc_helper_stream {
-                                                                    let seek_command = format!("seek:{}", position);
-                                                                    if let Err(e) = send_vlc_command(stream, &seek_command) {
-                                                                        eprintln!("[main] Failed to send seek command to VLC helper: {}", e);
+                                                            if let Some(stream) = &mut vlc_helper_stream {
+                                                                let seek_command = format!("seek:{}", position);
+                                                                if let Err(e) = send_vlc_command(stream, &seek_command) {
+                                                                    eprintln!("[main] Failed to send seek command to VLC helper: {}", e);
                                                                     }
                                                                 }
                                                                 }
