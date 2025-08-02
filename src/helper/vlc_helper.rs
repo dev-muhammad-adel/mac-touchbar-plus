@@ -185,7 +185,13 @@ fn handle_command(command: &str) {
         }
         cmd if cmd.starts_with("seek:") => {
             if let Some(position_str) = cmd.strip_prefix("seek:") {
-                if let Ok(position) = position_str.parse::<f64>() {
+                if let Ok(mut position) = position_str.parse::<f64>() {
+                    // Prevent seeking to exactly 0.0 or 1.0 to avoid VLC closing
+                    if position <= 0.001 {
+                        position = 0.001;
+                    } else if position >= 0.999 {
+                        position = 0.999;
+                    }
                     // Get current position and duration
                     let current_pos_output = Command::new("dbus-send")
                         .arg("--session")

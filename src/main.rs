@@ -535,7 +535,7 @@ impl FunctionLayer {
             }),
         }
     }
-    fn draw(&mut self, config: &Config, width: i32, height: i32, surface: &Surface, pixel_shift: (f64, f64), complete_redraw: bool, modules_only_redraw: bool, session_state: Option<&SessionState>, layer_index: Option<LayerKey>, login_anim_progress: f64, app_layer3_slide_progress: f64, current_window_class: Option<&str>, app_ui_manager: Option<&AppUiManager>, vlc_drag_position: Option<f64>) -> Vec<ClipRect> {
+    fn draw(&mut self, config: &Config, width: i32, height: i32, surface: &Surface, pixel_shift: (f64, f64), complete_redraw: bool, modules_only_redraw: bool, session_state: Option<&SessionState>, layer_index: Option<LayerKey>, login_anim_progress: f64, app_layer3_slide_progress: f64, current_window_class: Option<&str>, mut app_ui_manager: Option<&mut AppUiManager>, vlc_drag_position: Option<f64>) -> Vec<ClipRect> {
         match &mut self.split {
             Some(split) => {
                 let c = Context::new(&surface).unwrap();
@@ -594,7 +594,7 @@ impl FunctionLayer {
                         if let Some(window_class) = current_window_class {
                             
                             // Use app-specific UI if available, otherwise fall back to default
-                            if let Some(app_ui_manager) = &app_ui_manager {
+                            if let Some(app_ui_manager) = &mut app_ui_manager {
                                 app_ui_manager.draw_app_ui(
                                     &c,
                                     left_edge,
@@ -1200,7 +1200,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
             if vlc_drag_position.is_some() {
 
             }
-            let mut clips = layers.get_mut(&active_layer).unwrap().draw(&cfg, width as i32, height as i32, &surface, shift, needs_complete_redraw, false, session_for_draw, Some(active_layer.clone()), animation.progress(), app_layer3_slide_progress, current_window_class.as_deref(), Some(&app_ui_manager), vlc_drag_position);
+            let mut clips = layers.get_mut(&active_layer).unwrap().draw(&cfg, width as i32, height as i32, &surface, shift, needs_complete_redraw, false, session_for_draw, Some(active_layer.clone()), animation.progress(), app_layer3_slide_progress, current_window_class.as_deref(), Some(&mut app_ui_manager), vlc_drag_position);
             let data = surface.data().unwrap();
             drm.map().unwrap().as_mut()[..data.len()].copy_from_slice(&data);
             drm.dirty(&clips).unwrap();

@@ -31,7 +31,7 @@ impl AppUiManager {
     }
 
     pub fn draw_app_ui(
-        &self,
+        &mut self,
         c: &Context,
         x: f64,
         y: f64,
