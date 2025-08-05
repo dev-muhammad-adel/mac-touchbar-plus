@@ -16,6 +16,14 @@ pub struct SessionState {
 async fn check_session_state(connection: &Connection, tx: &watch::Sender<SessionState>) -> zbus::Result<()> {
     println!("[session_monitor] check_session_state: Starting session state check...");
     
+    // Debug: Show relevant environment variables
+    println!("[session_monitor] Environment check:");
+    println!("  XDG_CURRENT_DESKTOP: {:?}", std::env::var("XDG_CURRENT_DESKTOP"));
+    println!("  WAYLAND_DISPLAY: {:?}", std::env::var("WAYLAND_DISPLAY"));
+    println!("  DISPLAY: {:?}", std::env::var("DISPLAY"));
+    println!("  USER: {:?}", std::env::var("USER"));
+    println!("  XDG_SESSION_TYPE: {:?}", std::env::var("XDG_SESSION_TYPE"));
+    
     let manager_proxy: zbus::Proxy<'_> = zbus::ProxyBuilder::new_bare(connection)
         .destination("org.freedesktop.login1")?
         .path("/org/freedesktop/login1")?
@@ -44,24 +52,76 @@ async fn check_session_state(connection: &Connection, tx: &watch::Sender<Session
         let session_type: String = session_proxy.get_property("Type").await.unwrap_or_else(|_| "unknown".into());
         let user: String = session_proxy.get_property("User").await.unwrap_or_else(|_| username.clone());
 
+        println!("[session_monitor] Session: class={}, state={}, type={}, user={}, seat={}", 
+                class, state, session_type, user, seat);
+
         // Only consider sessions with a seat
         if seat.is_empty() {
             continue;
         }
 
-        // Check for graphical user session
-        if class == "user" && (state == "active" || state == "online") && (session_type == "x11" || session_type == "wayland") {
+        // Check for graphical user session - be more flexible for KDE
+        let is_graphical_session = class == "user" && 
+            (state == "active" || state == "online") && 
+            (session_type == "x11" || session_type == "wayland" || 
+             session_type == "tty" || session_type == "unspecified");
+        
+        if is_graphical_session {
             found_graphical_user = Some(SessionState {
                 session_type: "desktop-logged".into(),
                 is_logged_in: true,
-                user,
+                user: user.clone(),
             });
+            println!("[session_monitor] Found graphical user session: user={}, type={}", user, session_type);
             break;
         }
 
-        // Check for greeter (login screen)
-        if class == "greeter" && (session_type == "x11" || session_type == "wayland") {
+        // Special handling for TTY-started KDE sessions
+        if class == "user" && (state == "active" || state == "online") && session_type == "tty" {
+            // Check if this is likely a KDE session started from TTY
+            if let Ok(xdg_desktop) = std::env::var("XDG_CURRENT_DESKTOP") {
+                if xdg_desktop == "KDE" {
+                    found_graphical_user = Some(SessionState {
+                        session_type: "desktop-logged".into(),
+                        is_logged_in: true,
+                        user: user.clone(),
+                    });
+                    println!("[session_monitor] Found TTY-started KDE session: user={}", user);
+                    break;
+                }
+            }
+        }
+
+        // Check for greeter (login screen) - also be more flexible
+        let is_greeter_session = class == "greeter" && 
+            (session_type == "x11" || session_type == "wayland" || 
+             session_type == "tty" || session_type == "unspecified");
+        
+        if is_greeter_session {
             found_greeter = true;
+            println!("[session_monitor] Found greeter session: type={}", session_type);
+        }
+    }
+
+    // If no session found through login1, try environment-based detection for KDE
+    if found_graphical_user.is_none() && found_greeter == false {
+        println!("[session_monitor] No session found via login1, trying environment-based detection");
+        
+        // Check if we're in a KDE session
+        if let Ok(xdg_desktop) = std::env::var("XDG_CURRENT_DESKTOP") {
+            if xdg_desktop == "KDE" {
+                // Check if we have a user session
+                if let Ok(user) = std::env::var("USER") {
+                    if !user.is_empty() && user != "root" {
+                        found_graphical_user = Some(SessionState {
+                            session_type: "desktop-logged".into(),
+                            is_logged_in: true,
+                            user: user.clone(),
+                        });
+                        println!("[session_monitor] Found KDE session via environment: user={}", user);
+                    }
+                }
+            }
         }
     }
 
