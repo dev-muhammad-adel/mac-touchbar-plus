@@ -44,9 +44,17 @@ use view::media_screen::draw_media_section;
 use view::module_screen::draw_module_screen;
 use view::app_ui_manager::{AppUiManager, AppAction};
 use view::vlc_screen::VlcAction;
+use view::browser_screen::BrowserAction;
 
 // Helper function to send commands to VLC helper
 fn send_vlc_command(stream: &mut UnixStream, command: &str) -> Result<(), std::io::Error> {
+    let command_with_newline = format!("{}\n", command);
+    stream.write_all(command_with_newline.as_bytes())?;
+    Ok(())
+}
+
+// Helper function to send commands to browser helper
+fn send_browser_command(stream: &mut UnixStream, command: &str) -> Result<(), std::io::Error> {
     let command_with_newline = format!("{}\n", command);
     stream.write_all(command_with_newline.as_bytes())?;
     Ok(())
@@ -120,6 +128,11 @@ struct HelperManager {
 }
 
 struct VlcHelperManager {
+    process: Option<Child>,
+    listener: Option<UnixListener>,
+}
+
+struct BrowserHelperManager {
     process: Option<Child>,
     listener: Option<UnixListener>,
 }
@@ -256,6 +269,75 @@ impl VlcHelperManager {
         if let Some(listener) = &self.listener {
             if let Ok((stream, _)) = listener.accept() {
                 stream.set_nonblocking(true).expect("Failed to set VLC stream non-blocking");
+                return Some(stream);
+            }
+        }
+        None
+    }
+}
+
+impl BrowserHelperManager {
+    fn new() -> Self {
+        BrowserHelperManager {
+            process: None,
+            listener: None,
+        }
+    }
+
+    fn start(&mut self, user: &str) -> Option<i32> {
+        if self.process.is_some() {
+            return None;
+        }
+
+        let socket_path = "/tmp/touchbar-browser.sock";
+        // Clean up old socket file if it exists
+        let _ = fs::remove_file(&socket_path);
+
+        let listener = UnixListener::bind(socket_path).expect("Failed to bind browser socket");
+        listener.set_nonblocking(true).expect("Failed to set browser socket non-blocking");
+
+        // Change ownership of the socket to the logged-in user
+        if let Some(userinfo) = User::from_name(user).unwrap() {
+            chown(socket_path, Some(userinfo.uid), Some(userinfo.gid)).expect("Failed to chown browser socket");
+        }
+
+        let fd = listener.as_raw_fd();
+        self.listener = Some(listener);
+
+        // Find the user's session process and extract its environment
+        let mut env_vars = HashMap::new();
+        if let Some(pid) = find_user_session_pid(user) {
+            env_vars = get_env_from_pid(pid);
+        }
+
+        let helper_path = "tiny-dfr-browser-helper";
+        let mut cmd = Command::new("sudo");
+        cmd.arg("-u").arg(user)
+           .arg("env");
+        // Pass relevant environment variables if found
+        for key in &["DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XAUTHORITY"] {
+            if let Some(val) = env_vars.get(*key) {
+                cmd.arg(format!("{}={}", key, val));
+            }
+        }
+        cmd.arg(helper_path);
+        println!("[main] Spawning browser helper: sudo -u {} env ... {}", user, helper_path);
+        let child = cmd.spawn().expect("Failed to start browser helper");
+        self.process = Some(child);
+        Some(fd)
+    }
+
+    fn stop(&mut self) {
+        if let Some(mut child) = self.process.take() {
+            child.kill().expect("Failed to kill browser helper");
+        }
+        self.listener.take();
+    }
+
+    fn accept_connection(&mut self) -> Option<UnixStream> {
+        if let Some(listener) = &self.listener {
+            if let Ok((stream, _)) = listener.accept() {
+                stream.set_nonblocking(true).expect("Failed to set browser stream non-blocking");
                 return Some(stream);
             }
         }
@@ -605,6 +687,7 @@ impl FunctionLayer {
                                     login_anim_progress,
                                     window_class,
                                     vlc_drag_position, // Pass drag position for visual feedback
+                                    &mut modified_regions,
                                 );
                             } else {
                                 draw_module_screen(
@@ -965,7 +1048,7 @@ fn emit<F>(uinput: &mut UInputHandle<F>, ty: EventKind, code: u16, value: i32) w
     }]).unwrap();
 }
 
-fn toggle_key<F>(uinput: &mut UInputHandle<F>, code: Key, value: i32) where F: AsRawFd {
+pub fn toggle_key<F>(uinput: &mut UInputHandle<F>, code: Key, value: i32) where F: AsRawFd {
     emit(uinput, EventKind::Key, code as u16, value);
     emit(uinput, EventKind::Synchronize, SynchronizeKind::Report as u16, 0);
 }
@@ -1019,12 +1102,17 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
     let mut pixel_shift = PixelShiftManager::new();
     let mut helper_manager = HelperManager::new();
     let mut vlc_helper_manager = VlcHelperManager::new();
+    let mut browser_helper_manager = BrowserHelperManager::new();
     let mut vlc_helper_listener_fd: Option<i32> = None;
     let mut vlc_helper_stream: Option<UnixStream> = None;
     let mut vlc_helper_reader: Option<BufReader<UnixStream>> = None;
+    let mut browser_helper_listener_fd: Option<i32> = None;
+    let mut browser_helper_stream: Option<UnixStream> = None;
+    let mut browser_helper_reader: Option<BufReader<UnixStream>> = None;
     
     // Add focus-based VLC helper management
     let mut vlc_window_focused = false;
+    let mut browser_window_focused = false;
     let mut last_window_class: Option<String> = None;
     let mut current_user: Option<String> = None;
 
@@ -1053,6 +1141,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
             uinput.set_keybit(button.action).unwrap();
         }
     }
+    // Browser buttons use Key::Unknown (no uinput events needed)
     let mut dev_name_c = [0 as c_char; 80];
     let dev_name = "Dynamic Function Row Virtual Input Device".as_bytes();
     for i in 0..dev_name.len() {
@@ -1177,8 +1266,24 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
             layers.get(&active_layer).unwrap().buttons.iter().any(|b| b.changed)
         };
         
+        // Check for browser screen button changes
+        let browser_buttons_changed = app_ui_manager.browser_screen.buttons.iter().any(|b| b.changed);
+        let browser_buttons_active = app_ui_manager.browser_screen.buttons.iter().any(|b| b.active);
+        if browser_buttons_changed {
+            println!("[main] Browser buttons changed, triggering redraw");
+            println!("[main] Browser button states: Back(active={}, changed={}), Forward(active={}, changed={}), Refresh(active={}, changed={}), Home(active={}, changed={})", 
+                app_ui_manager.browser_screen.buttons[0].active, app_ui_manager.browser_screen.buttons[0].changed,
+                app_ui_manager.browser_screen.buttons[1].active, app_ui_manager.browser_screen.buttons[1].changed,
+                app_ui_manager.browser_screen.buttons[2].active, app_ui_manager.browser_screen.buttons[2].changed,
+                app_ui_manager.browser_screen.buttons[3].active, app_ui_manager.browser_screen.buttons[3].changed);
+        }
+        if browser_buttons_active {
+            println!("[main] Browser buttons active: {}", browser_buttons_active);
+        }
+        
         // Handle different types of redraws
-        if needs_complete_redraw || any_changed {
+        if needs_complete_redraw || any_changed || browser_buttons_changed {
+            println!("[main] REDRAW TRIGGERED: needs_complete_redraw={}, any_changed={}, browser_buttons_changed={}", needs_complete_redraw, any_changed, browser_buttons_changed);
             let shift = if cfg.enable_pixel_shift {
                 pixel_shift.get()
             } else {
@@ -1340,6 +1445,38 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                                }
                                            }
                                            
+                                           // Check if browser window focus changed
+                                           let class_lower = class.to_lowercase();
+                                           let new_browser_focused = class_lower == "firefox" || class_lower == "chrome" || class_lower == "chromium" || class_lower == "brave" || class_lower == "brave-browser" || class_lower == "edge" || class_lower == "safari" || class_lower == "opera" || class_lower == "google-chrome";
+                                           if new_browser_focused != browser_window_focused {
+                                               browser_window_focused = new_browser_focused;
+                                               if browser_window_focused {
+                                                   // Browser window gained focus - start browser helper
+                                                   println!("[main] Browser window focused, starting browser helper");
+                                                   if let Some(user) = &current_user {
+                                                       if let Some(fd) = browser_helper_manager.start(user) {
+                                                           let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
+                                                           epoll.add(listener_fd_obj.as_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 8)).unwrap();
+                                                           browser_helper_listener_fd = Some(listener_fd_obj.into_raw_fd());
+                                                       }
+                                                   } else {
+                                                       println!("[main] No current user available for browser helper");
+                                                   }
+                                               } else {
+                                                   // Browser window lost focus - stop browser helper
+                                                   println!("[main] Browser window lost focus, stopping browser helper");
+                                                   if let Some(stream) = browser_helper_stream.take() {
+                                                       epoll.delete(&stream).unwrap();
+                                                   }
+                                                   browser_helper_reader = None;
+                                                   if let Some(fd) = browser_helper_listener_fd.take() {
+                                                       let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
+                                                       epoll.delete(listener_fd_obj.as_fd()).unwrap();
+                                                   }
+                                                   browser_helper_manager.stop();
+                                               }
+                                           }
+                                           
                                            // Update app UI manager with new window class
                                            app_ui_manager.update_app(&class).await;
                                            
@@ -1453,6 +1590,89 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                         }
                     }
                 }
+                8 => { // Browser helper listener event
+                    if let Some(stream) = browser_helper_manager.accept_connection() {
+                        stream.set_nonblocking(true).expect("Failed to set browser stream non-blocking");
+                        println!("[main] Browser helper connected to socket.");
+                        epoll.add(&stream, EpollEvent::new(EpollFlags::EPOLLIN, 9)).unwrap();
+                        browser_helper_reader = Some(BufReader::new(stream.try_clone().unwrap()));
+                        browser_helper_stream = Some(stream);
+                        // Stop listening for new connections
+                        if let Some(fd) = browser_helper_listener_fd.take() {
+                            let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
+                            epoll.delete(listener_fd_obj.as_fd()).unwrap();
+                        }
+                    }
+                }
+                9 => { // Browser helper stream event
+                    if let Some(reader) = &mut browser_helper_reader {
+                        loop {
+                           let mut buf = vec![0; 1024];
+                           match reader.get_mut().read(&mut buf) {
+                               Ok(0) => { // EOF
+                                   println!("[main] Browser helper disconnected.");
+                                   if let Some(stream) = browser_helper_stream.take() {
+                                       epoll.delete(&stream).unwrap();
+                                   }
+                                   browser_helper_reader = None;
+                                   break;
+                               },
+                               Ok(n) => {
+                                   let data = &buf[..n];
+                                   if let Ok(text) = std::str::from_utf8(data) {
+                                       for part in text.split('\n') {
+                                           let part = part.trim();
+                                           if part.is_empty() {
+                                               continue;
+                                           }
+                                           
+                                           // Handle browser status message (plain JSON format)
+                                           if let Ok(browser_status) = serde_json::from_str::<serde_json::Value>(part) {
+                                               // Update browser screen with the status
+                                               if let Some(url) = browser_status.get("url").and_then(|v| v.as_str()) {
+                                                   if let Some(title) = browser_status.get("title").and_then(|v| v.as_str()) {
+                                                       if let Some(can_go_back) = browser_status.get("can_go_back").and_then(|v| v.as_bool()) {
+                                                           if let Some(can_go_forward) = browser_status.get("can_go_forward").and_then(|v| v.as_bool()) {
+                                                               if let Some(is_loading) = browser_status.get("is_loading").and_then(|v| v.as_bool()) {
+                                                                   let favicon_url = browser_status.get("favicon_url").and_then(|v| v.as_str()).map(|s| s.to_string());
+                                                                   
+                                                                   // Create a BrowserStatus struct and update the browser screen
+                                                                   let status = crate::helper::BrowserStatus {
+                                                                       url: url.to_string(),
+                                                                       title: title.to_string(),
+                                                                       favicon_url,
+                                                                       can_go_back,
+                                                                       can_go_forward,
+                                                                       is_loading,
+                                                                   };
+                                                                   
+                                                                   app_ui_manager.browser_screen.update_status(status);
+                                                                   needs_complete_redraw = true;
+                                                               }
+                                                           }
+                                                       }
+                                                   }
+                                               }
+                                           }
+                                       }
+                                   } else {
+                                       eprintln!("[main] DEBUG: Received invalid UTF-8 data from browser helper");
+                                   }
+                               },
+                               Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                   break; // No more data right now
+                               },
+                                                               Err(_e) => {
+                                    if let Some(stream) = browser_helper_stream.take() {
+                                        epoll.delete(&stream).unwrap();
+                                    }
+                                    browser_helper_reader = None;
+                                    break;
+                                }
+                           }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -1508,9 +1728,6 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                         
                                         // Check for app-specific UI interactions
                                         if let Some(window_class) = &current_window_class {
-                                            // Only handle VLC interactions when VLC is focused
-                                            if window_class == "vlc" {
-                                                println!("[main] VLC detected as focused window, processing touch events");
                                                 // Calculate modules area coordinates
                                                 let pixel_shift_width = if cfg.enable_pixel_shift { PIXEL_SHIFT_WIDTH_PX } else { 0 };
                                                 let total_width = (width as i32 - pixel_shift_width as i32) as f64;
@@ -1520,16 +1737,115 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                                 let modules_y = (height as f64) * 0.15;
                                                 let modules_height = (height as f64) * 0.7;
                                                 
-                                                // Reduced debug logging
-                                                
                                                 // Adjust touch coordinates relative to modules area
                                                 let adjusted_x = _x - modules_x;
                                                 let adjusted_y = _y - modules_y;
-                                                // Reduced debug logging
                                                 
+                                            // Compare window_class in lowercase for browser detection
+                                            let window_class_lc = window_class.to_lowercase();
                                                 if let Some(app_action) = app_ui_manager.hit_test_app_ui(adjusted_x, adjusted_y, modules_x, modules_y, modules_width, modules_height, 8.0, window_class) {
+                                                println!("[main] App action detected: {:?}", app_action);
+                                                println!("[main] Checking browser condition for window_class: {}", window_class);
+                                                if window_class_lc == "firefox" || window_class_lc == "chrome" || window_class_lc == "chromium" || window_class_lc == "brave" || window_class_lc == "brave-browser" || window_class_lc == "edge" || window_class_lc == "safari" || window_class_lc == "opera" || window_class_lc == "google-chrome" {
+                                                    println!("[main] Browser condition met, processing browser action");
+                                                    match app_action {
+                                                        AppAction::Browser(BrowserAction::Back) => {
+                                                            // Send browser back command
+                                                            println!("[main] Executing Browser Back");
+                                                            app_ui_manager.browser_screen.buttons[0].active = true;
+                                                            app_ui_manager.browser_screen.buttons[0].changed = true;
+                                                            if let Some(stream) = &mut browser_helper_stream {
+                                                                if let Err(e) = send_browser_command(stream, "back") {
+                                                                    eprintln!("[main] Failed to send back command to browser helper: {}", e);
+                                                                }
+                                                            } else {
+                                                                eprintln!("[main] Browser helper stream not available!");
+                                                            }
+                                                        }
+                                                        AppAction::Browser(BrowserAction::Forward) => {
+                                                            // Send browser forward command
+                                                            println!("[main] Executing Browser Forward");
+                                                            app_ui_manager.browser_screen.buttons[1].active = true;
+                                                            app_ui_manager.browser_screen.buttons[1].changed = true;
+                                                            if let Some(stream) = &mut browser_helper_stream {
+                                                                if let Err(e) = send_browser_command(stream, "forward") {
+                                                                    eprintln!("[main] Failed to send forward command to browser helper: {}", e);
+                                                                }
+                                                            } else {
+                                                                eprintln!("[main] Browser helper stream not available!");
+                                                            }
+                                                        }
+                                                        AppAction::Browser(BrowserAction::Refresh) => {
+                                                            // Send browser refresh command
+                                                            println!("[main] Executing Browser Refresh");
+                                                            app_ui_manager.browser_screen.buttons[2].active = true;
+                                                            app_ui_manager.browser_screen.buttons[2].changed = true;
+                                                            if let Some(stream) = &mut browser_helper_stream {
+                                                                if let Err(e) = send_browser_command(stream, "refresh") {
+                                                                    eprintln!("[main] Failed to send refresh command to browser helper: {}", e);
+                                                                }
+                                                            } else {
+                                                                eprintln!("[main] Browser helper stream not available!");
+                                                            }
+                                                        }
+                                                        AppAction::Browser(BrowserAction::Home) => {
+                                                            // Send browser home command
+                                                            println!("[main] Executing Browser Home");
+                                                            app_ui_manager.browser_screen.buttons[3].active = true;
+                                                            app_ui_manager.browser_screen.buttons[3].changed = true;
+                                                            if let Some(stream) = &mut browser_helper_stream {
+                                                                if let Err(e) = send_browser_command(stream, "home") {
+                                                                    eprintln!("[main] Failed to send home command to browser helper: {}", e);
+                                                                }
+                                                            } else {
+                                                                eprintln!("[main] Browser helper stream not available!");
+                                                            }
+                                                        }
+                                                        AppAction::Browser(BrowserAction::AddBookmark) => {
+                                                            // Send browser add bookmark command
+                                                            println!("[main] Executing Browser Add Bookmark");
+                                                            app_ui_manager.browser_screen.buttons[4].active = true;
+                                                            app_ui_manager.browser_screen.buttons[4].changed = true;
+                                                            if let Some(stream) = &mut browser_helper_stream {
+                                                                if let Err(e) = send_browser_command(stream, "add_bookmark") {
+                                                                    eprintln!("[main] Failed to send add_bookmark command to browser helper: {}", e);
+                                                                }
+                                                            } else {
+                                                                eprintln!("[main] Browser helper stream not available!");
+                                                            }
+                                                        }
+                                                        AppAction::Browser(BrowserAction::NewTab) => {
+                                                            // Send browser new tab command
+                                                            println!("[main] Executing Browser New Tab");
+                                                            app_ui_manager.browser_screen.buttons[5].active = true;
+                                                            app_ui_manager.browser_screen.buttons[5].changed = true;
+                                                            if let Some(stream) = &mut browser_helper_stream {
+                                                                if let Err(e) = send_browser_command(stream, "new_tab") {
+                                                                    eprintln!("[main] Failed to send new_tab command to browser helper: {}", e);
+                                                                }
+                                                            } else {
+                                                                eprintln!("[main] Browser helper stream not available!");
+                                                            }
+                                                        }
+                                                        AppAction::Browser(BrowserAction::AddressBar) => {
+                                                            // Focus on address bar
+                                                            println!("[main] Executing Browser Address Bar Focus");
+                                                            app_ui_manager.browser_screen.focus_address_bar();
+                                                            if let Some(stream) = &mut browser_helper_stream {
+                                                                if let Err(e) = send_browser_command(stream, "focus_address_bar") {
+                                                                    eprintln!("[main] Failed to send focus_address_bar command to browser helper: {}", e);
+                                                                }
+                                                            } else {
+                                                                eprintln!("[main] Browser helper stream not available!");
+                                                            }
+                                                        }
+                                                        _ => {
+                                                            // Ignore non-browser actions
+                                                            println!("[main] Ignoring non-browser action: {:?}", app_action);
+                                                        }
+                                                    }
+                                                } else if window_class_lc == "vlc" && vlc_helper_stream.is_some() && vlc_window_focused {
                                                     // Only process VLC actions if VLC helper stream is available AND VLC window is focused
-                                                    if vlc_helper_stream.is_some() && vlc_window_focused {
                                                         match app_action {
                                                         AppAction::Vlc(VlcAction::TogglePlayPause) => {
                                                             // Send play/pause command to VLC helper
@@ -1623,6 +1939,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                                                 }
                                                             }
                                                         }
+                                                        
                                                         _ => {
                                                             // Ignore non-VLC actions
                                                             println!("[main] Ignoring non-VLC action: {:?}", app_action);
@@ -1636,7 +1953,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                                 }
                                         }
                                     }
-                                }
+                                
                                     "media" => {
                                         if let Some(split) = &mut layers.get_mut(&active_layer).unwrap().split {
                                             let button = &mut split.media[idx];
@@ -1658,6 +1975,8 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                     _ => {}
                                 }
                             }
+                            
+                        
                         },
                         TouchEvent::Motion(mtn) => {
                             println!("[main] Motion event received for slot: {}", mtn.seat_slot());
@@ -1671,10 +1990,11 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                             println!("[main] Motion event: group={}, idx={}, coords=({}, {})", group, idx, _x, _y);
                             match *group {
                                 "modules" => {
-                                    // Check for VLC touch interaction during motion
+                                    // Check for app-specific touch interaction during motion
                                     if let Some(window_class) = &current_window_class {
-                                        println!("[main] Motion - window_class: {}, vlc_touch_active: {}", window_class, vlc_touch_active);
-                                        if window_class == "vlc" && vlc_touch_active {
+                                        let any_browser_button_active = app_ui_manager.browser_screen.buttons.iter().any(|b| b.active);
+                                        println!("[main] Motion - window_class: {}, vlc_touch_active: {}, browser_button_active: {}", window_class, vlc_touch_active, any_browser_button_active);
+                                        
                                             // Calculate modules area coordinates
                                             let pixel_shift_width = if cfg.enable_pixel_shift { PIXEL_SHIFT_WIDTH_PX } else { 0 };
                                             let total_width = (width as i32 - pixel_shift_width as i32) as f64;
@@ -1690,9 +2010,16 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                             println!("[main] Motion - Adjusted touch coordinates: ({}, {}) relative to modules area", adjusted_x, adjusted_y);
                                             
                                             if let Some(app_action) = app_ui_manager.hit_test_app_ui(adjusted_x, adjusted_y, modules_x, modules_y, modules_width, modules_height, 8.0, window_class) {
-                                                println!("[main] Motion - VLC action detected: {:?}", app_action);
-                                                // Only process VLC seek during motion if VLC helper stream is available
-                                                if vlc_helper_stream.is_some() {
+                                            println!("[main] Motion - App action detected: {:?}", app_action);
+                                            
+                                            // Handle browser actions during motion
+                                            let any_browser_button_active = app_ui_manager.browser_screen.buttons.iter().any(|b| b.active);
+                                            if (window_class == "firefox" || window_class == "chrome" || window_class == "chromium" || window_class == "brave" || window_class == "brave-browser" || window_class == "edge" || window_class == "safari" || window_class == "opera" || window_class == "google-chrome") && any_browser_button_active {
+                                                // Browser buttons don't need motion handling - they're simple press/release
+                                                println!("[main] Motion - Browser button active, ignoring motion");
+                                            }
+                                            // Handle VLC actions during motion
+                                            else if window_class == "vlc" && vlc_touch_active && vlc_helper_stream.is_some() {
                                                     match app_action {
                                                         AppAction::Vlc(VlcAction::Seek(position)) => {
                                                             // Send seek command to VLC helper during motion
@@ -1723,8 +2050,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                                         }
                                                     }
                                                 } else {
-                                                    println!("[main] VLC helper stream not available during motion, ignoring seek");
-                                                }
+                                                println!("[main] No active touch interaction for motion");
                                             }
                                         }
                                     }
@@ -1748,7 +2074,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                 }
                                 _ => {}
                             }
-                        },
+                        }
                         TouchEvent::Up(up) => {
                             if !touches.contains_key(&up.seat_slot()) {
                                 continue;
@@ -1766,6 +2092,32 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                         app_ui_manager.vlc_screen.reset_drag_state();
                                         needs_complete_redraw = true; // Force redraw to reset visual feedback
                                         println!("[main] VLC touch interaction ended, keeping drag position for smooth transition");
+                                    }
+                                    // Reset browser button states when touch ends
+                                    // Only reset if we were actually handling a browser touch
+                                    if let Some(window_class) = &current_window_class {
+                                        let window_class_lc = window_class.to_lowercase();
+                                        if window_class_lc == "firefox" || window_class_lc == "chrome" || window_class_lc == "chromium" || window_class_lc == "brave" || window_class_lc == "brave-browser" || window_class_lc == "edge" || window_class_lc == "safari" || window_class_lc == "opera" || window_class_lc == "google-chrome" {
+                                            let any_browser_button_active = app_ui_manager.browser_screen.buttons.iter().any(|b| b.active);
+                                            if any_browser_button_active {
+                                                println!("[main] Browser touch interaction ended, resetting button states");
+                                                println!("[main] Before reset: Back(active={}, changed={}), Forward(active={}, changed={}), Refresh(active={}, changed={}), Home(active={}, changed={})", 
+                                                    app_ui_manager.browser_screen.buttons[0].active, app_ui_manager.browser_screen.buttons[0].changed,
+                                                    app_ui_manager.browser_screen.buttons[1].active, app_ui_manager.browser_screen.buttons[1].changed,
+                                                    app_ui_manager.browser_screen.buttons[2].active, app_ui_manager.browser_screen.buttons[2].changed,
+                                                    app_ui_manager.browser_screen.buttons[3].active, app_ui_manager.browser_screen.buttons[3].changed);
+                                                // Reset browser screen button states
+                                                for button in &mut app_ui_manager.browser_screen.buttons {
+                                                    button.active = false;
+                                                    button.changed = true;
+                                                }
+                                                println!("[main] After reset: Back(active={}, changed={}), Forward(active={}, changed={}), Refresh(active={}, changed={}), Home(active={}, changed={})", 
+                                                    app_ui_manager.browser_screen.buttons[0].active, app_ui_manager.browser_screen.buttons[0].changed,
+                                                    app_ui_manager.browser_screen.buttons[1].active, app_ui_manager.browser_screen.buttons[1].changed,
+                                                    app_ui_manager.browser_screen.buttons[2].active, app_ui_manager.browser_screen.buttons[2].changed,
+                                                    app_ui_manager.browser_screen.buttons[3].active, app_ui_manager.browser_screen.buttons[3].changed);
+                                            }
+                                        }
                                     }
                                     continue;
                                 }

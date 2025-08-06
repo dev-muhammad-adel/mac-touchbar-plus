@@ -47,3 +47,7 @@ path = "src/helper/main.rs"
 [[bin]]
 name = "tiny-dfr-vlc-helper"
 path = "src/helper/vlc_helper.rs"
+
+[[bin]]
+name = "tiny-dfr-browser-helper"
+path = "src/bin/browser_helper.rs"

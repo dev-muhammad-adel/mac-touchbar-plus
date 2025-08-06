@@ -1,8 +1,10 @@
 use cairo::Context;
 use crate::view::vlc_screen::{VlcScreen, VlcAction};
+use crate::view::browser_screen::{BrowserScreen, BrowserAction};
 
 pub struct AppUiManager {
     pub vlc_screen: VlcScreen,
+    pub browser_screen: BrowserScreen,
     current_app: Option<String>,
 }
 
@@ -10,6 +12,7 @@ impl AppUiManager {
     pub fn new() -> Self {
         AppUiManager {
             vlc_screen: VlcScreen::new(),
+            browser_screen: BrowserScreen::new(),
             current_app: None,
         }
     }
@@ -23,6 +26,9 @@ impl AppUiManager {
                 "vlc" | "vlc.exe" => {
                     println!("[AppUI] Detected VLC");
                 }
+                            "firefox" | "chrome" | "chromium" | "brave" | "brave-browser" | "edge" | "safari" | "opera" | "google-chrome" => {
+                println!("[AppUI] Detected Browser: {}", window_class);
+            }
                 _ => {
                     println!("[AppUI] Unknown app: {}", window_class);
                 }
@@ -41,10 +47,18 @@ impl AppUiManager {
         anim_progress: f64,
         window_class: &str,
         drag_position: Option<f64>, // Add drag position parameter
+        modified_regions: &mut Vec<drm::control::ClipRect>,
     ) {
         match window_class.to_lowercase().as_str() {
             "vlc" | "vlc.exe" => {
                 self.vlc_screen.draw(c, x, y, width, height, radius, anim_progress, drag_position);
+            }
+            "firefox" | "chrome" | "chromium" | "brave" | "brave-browser" | "edge" | "safari" | "opera" | "google-chrome" => {
+                println!("[app_ui_manager] Drawing browser screen with {} active buttons", self.browser_screen.buttons.iter().filter(|b| b.active).count());
+                // Check if any browser buttons have changed for partial redraw
+                let any_browser_button_changed = self.browser_screen.buttons.iter().any(|b| b.changed);
+                let complete_redraw = !any_browser_button_changed; // Use complete redraw if no buttons changed
+                self.browser_screen.draw(c, x, y, width, height, radius, anim_progress, complete_redraw, modified_regions);
             }
             _ => {
                 // Fall back to default module screen behavior
@@ -110,11 +124,22 @@ impl AppUiManager {
         radius: f64,
         window_class: &str,
     ) -> Option<AppAction> {
+        println!("[app_ui_manager] hit_test_app_ui called for window_class={}, touch_x={}, touch_y={}", window_class, touch_x, touch_y);
         match window_class.to_lowercase().as_str() {
             "vlc" | "vlc.exe" => {
                 if let Some(vlc_action) = self.vlc_screen.hit_test(touch_x, touch_y, x, y, width, height, radius) {
                     Some(AppAction::Vlc(vlc_action))
                 } else {
+                    None
+                }
+            }
+            "firefox" | "chrome" | "chromium" | "brave" | "brave-browser" | "edge" | "safari" | "opera" | "google-chrome" => {
+                println!("[app_ui_manager] Calling browser_screen.hit_test");
+                if let Some(browser_action) = self.browser_screen.hit_test(touch_x, touch_y, x, y, width, height, radius) {
+                    println!("[app_ui_manager] Browser action detected: {:?}", browser_action);
+                    Some(AppAction::Browser(browser_action))
+                } else {
+                    println!("[app_ui_manager] No browser action detected");
                     None
                 }
             }
@@ -126,4 +151,5 @@ impl AppUiManager {
 #[derive(Debug, Clone)]
 pub enum AppAction {
     Vlc(VlcAction),
+    Browser(BrowserAction),
 } 

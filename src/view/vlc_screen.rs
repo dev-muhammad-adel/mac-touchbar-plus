@@ -1,6 +1,5 @@
 use cairo::Context;
 use crate::helper::VlcStatus;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const BUTTON_COLOR_ACTIVE: f64 = 0.600;
 const BUTTON_COLOR_INACTIVE: f64 = 0.350;

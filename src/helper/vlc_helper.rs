@@ -23,7 +23,6 @@ use std::thread;
 use std::time::Duration;
 use std::process::Command;
 use serde_json::json;
-use tokio::runtime::Runtime;
 
 fn get_vlc_status() -> Option<serde_json::Value> {
     // Use dbus-send to get VLC status
