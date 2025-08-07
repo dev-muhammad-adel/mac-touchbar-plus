@@ -1814,6 +1814,32 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                                                 eprintln!("[main] Browser helper stream not available!");
                                                             }
                                                         }
+                                                        AppAction::Browser(BrowserAction::BookmarksManager) => {
+                                                            // Send browser bookmarks manager command
+                                                            println!("[main] Executing Browser Bookmarks Manager");
+                                                            app_ui_manager.browser_screen.buttons[4].active = true;
+                                                            app_ui_manager.browser_screen.buttons[4].changed = true;
+                                                            if let Some(stream) = &mut browser_helper_stream {
+                                                                if let Err(e) = send_browser_command(stream, "bookmarks_manager") {
+                                                                    eprintln!("[main] Failed to send bookmarks_manager command to browser helper: {}", e);
+                                                                }
+                                                            } else {
+                                                                eprintln!("[main] Browser helper stream not available!");
+                                                            }
+                                                        }
+                                                        AppAction::Browser(BrowserAction::CloseTab) => {
+                                                            // Send browser close tab command
+                                                            println!("[main] Executing Browser Close Tab");
+                                                            app_ui_manager.browser_screen.buttons[4].active = true;
+                                                            app_ui_manager.browser_screen.buttons[4].changed = true;
+                                                            if let Some(stream) = &mut browser_helper_stream {
+                                                                if let Err(e) = send_browser_command(stream, "close_tab") {
+                                                                    eprintln!("[main] Failed to send close_tab command to browser helper: {}", e);
+                                                                }
+                                                            } else {
+                                                                eprintln!("[main] Browser helper stream not available!");
+                                                            }
+                                                        }
                                                         AppAction::Browser(BrowserAction::NewTab) => {
                                                             // Send browser new tab command
                                                             println!("[main] Executing Browser New Tab");

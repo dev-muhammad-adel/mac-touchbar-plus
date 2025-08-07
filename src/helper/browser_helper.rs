@@ -329,24 +329,121 @@ fn handle_command(command: &str) {
     match command.trim() {
         "back" => {
             eprintln!("[browser-helper] Executing back command");
-            execute_browser_command("org.mozilla.firefox.GoBack", &[]);
+            // Try DBus for different browsers
+            let mut success = false;
+            
+            // Try Firefox first
+            if execute_browser_command("org.mozilla.firefox.GoBack", &[]) {
+                success = true;
+            }
+            // Try Chrome/Chromium
+            else if execute_browser_command("org.chromium.Chromium.GoBack", &[]) {
+                success = true;
+            }
+            // Try Brave
+            else if execute_browser_command("org.brave.Browser.GoBack", &[]) {
+                success = true;
+            }
+            // Try Edge
+            else if execute_browser_command("org.microsoft.Edge.GoBack", &[]) {
+                success = true;
+            }
+            
+            // If DBus fails, use xdotool
+            if !success {
+                let _ = Command::new("xdotool").arg("key").arg("alt+left").output();
+            }
         }
         "forward" => {
             eprintln!("[browser-helper] Executing forward command");
-            execute_browser_command("org.mozilla.firefox.GoForward", &[]);
+            // Try DBus for different browsers
+            let mut success = false;
+            
+            // Try Firefox first
+            if execute_browser_command("org.mozilla.firefox.GoForward", &[]) {
+                success = true;
+            }
+            // Try Chrome/Chromium
+            else if execute_browser_command("org.chromium.Chromium.GoForward", &[]) {
+                success = true;
+            }
+            // Try Brave
+            else if execute_browser_command("org.brave.Browser.GoForward", &[]) {
+                success = true;
+            }
+            // Try Edge
+            else if execute_browser_command("org.microsoft.Edge.GoForward", &[]) {
+                success = true;
+            }
+            
+            // If DBus fails, use xdotool
+            if !success {
+                let _ = Command::new("xdotool").arg("key").arg("alt+right").output();
+            }
         }
         "refresh" => {
             eprintln!("[browser-helper] Executing refresh command");
-            execute_browser_command("org.mozilla.firefox.Reload", &[]);
+            // Try DBus for different browsers
+            let mut success = false;
+            
+            // Try Firefox first
+            if execute_browser_command("org.mozilla.firefox.Reload", &[]) {
+                success = true;
+            }
+            // Try Chrome/Chromium
+            else if execute_browser_command("org.chromium.Chromium.Reload", &[]) {
+                success = true;
+            }
+            // Try Brave
+            else if execute_browser_command("org.brave.Browser.Reload", &[]) {
+                success = true;
+            }
+            // Try Edge
+            else if execute_browser_command("org.microsoft.Edge.Reload", &[]) {
+                success = true;
+            }
+            
+            // If DBus fails, use xdotool
+            if !success {
+                let _ = Command::new("xdotool").arg("key").arg("ctrl+r").output();
+            }
         }
         "home" => {
             eprintln!("[browser-helper] Executing home command");
-            execute_browser_command("org.mozilla.firefox.GoHome", &[]);
+            // Try DBus for different browsers
+            let mut success = false;
+            
+            // Try Firefox first
+            if execute_browser_command("org.mozilla.firefox.GoHome", &[]) {
+                success = true;
+            }
+            // Try Chrome/Chromium
+            else if execute_browser_command("org.chromium.Chromium.GoHome", &[]) {
+                success = true;
+            }
+            // Try Brave
+            else if execute_browser_command("org.brave.Browser.GoHome", &[]) {
+                success = true;
+            }
+            // Try Edge
+            else if execute_browser_command("org.microsoft.Edge.GoHome", &[]) {
+                success = true;
+            }
+            
+            // If DBus fails, use xdotool
+            if !success {
+                let _ = Command::new("xdotool").arg("key").arg("alt+home").output();
+            }
         }
         "add_bookmark" => {
             eprintln!("[browser-helper] Executing add bookmark command");
             // Use xdotool to simulate Ctrl+D (add bookmark)
             let _ = Command::new("xdotool").arg("key").arg("ctrl+d").output();
+        }
+        "close_tab" => {
+            eprintln!("[browser-helper] Executing close tab command");
+            // Use xdotool to simulate Ctrl+W (close tab)
+            let _ = Command::new("xdotool").arg("key").arg("ctrl+w").output();
         }
         "new_tab" => {
             eprintln!("[browser-helper] Executing new tab command");

@@ -23,14 +23,14 @@ pub struct BrowserScreen {
 
 impl BrowserScreen {
     pub fn new() -> Self {
-        // Fractions: Back/Forward/Refresh/Add Bookmark/New Tab = 0.8, Address Bar = 3.0
+        // Fractions: Back/Forward/Refresh/Close Tab/New Tab = 0.6, Address Bar = 3.0
         let buttons = vec![
-            Button::new_icon_with_fraction("go-previous-symbolic", input_linux::Key::Unknown, false, 0.7), // Back
-            Button::new_icon_with_fraction("go-next-symbolic", input_linux::Key::Unknown, false, 0.7),     // Forward
-            Button::new_icon_with_fraction("view-refresh-symbolic", input_linux::Key::Unknown, false, 0.7), // Refresh
+            Button::new_icon_with_fraction("go-previous-symbolic", input_linux::Key::Unknown, false, 0.6), // Back
+            Button::new_icon_with_fraction("go-next-symbolic", input_linux::Key::Unknown, false, 0.6),     // Forward
+            Button::new_icon_with_fraction("view-refresh-symbolic", input_linux::Key::Unknown, false, 0.6), // Refresh
             Button::new_icon_with_fraction("emblem-web-symbolic", input_linux::Key::Unknown, false, 3.0), // Address Bar (display only)
-            Button::new_icon_with_fraction("bookmark-new-symbolic", input_linux::Key::Unknown, false, 0.7), // Add Bookmark
-            Button::new_icon_with_fraction("tab-new-symbolic", input_linux::Key::Unknown, false, 0.7),      // New Tab
+            Button::new_icon_with_fraction("close-symbolic", input_linux::Key::Unknown, false, 0.6), // Close Tab
+            Button::new_icon_with_fraction("tab-new-symbolic", input_linux::Key::Unknown, false, 0.6),      // New Tab
         ];
         Self { 
             buttons,
@@ -177,40 +177,26 @@ impl BrowserScreen {
                 println!("[browser_screen] Successfully loaded icon: {}", icon_path);
                 let renderer = rsvg::CairoRenderer::new(&handle);
                 if is_address_bar {
-                    // Draw icon on the left side
-                    let icon_left = button_x + 12.0;
-                    let icon_center_y = button_y + (button_height - icon_size) / 2.0;
-                    renderer.render_document(c, &cairo::Rectangle::new(icon_left, icon_center_y, icon_size, icon_size)).unwrap();
-                    
-                    // Draw URL or placeholder text
-                    c.set_font_size(16.0);
+                    // Calculate total width of icon + text + spacing
+                    let display_text = "Search or enter website name".to_string();
+                    c.set_font_size(24.0);
                     c.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
+                    let text_ext = c.text_extents(&display_text).unwrap();
                     
-                    let display_text = if let Some(status) = &self.last_status {
-                        if !status.url.is_empty() {
-                            // Extract domain from URL for display
-                            if let Some(domain) = extract_domain(&status.url) {
-                                domain
-                            } else {
-                                "example.com".to_string()
-                            }
-                        } else {
-                            "example.com".to_string()
-                        }
-                    } else {
-                        "example.com".to_string()
-                    };
+                    let total_width = icon_size + 8.0 + text_ext.width(); // icon + spacing + text
+                    let start_x = button_x + (this_button_width - total_width) / 2.0; // Center the whole group
                     
-                    // Change color based on focus state
-                    if self.address_bar_focused {
-                        c.set_source_rgba(0.0, 1.0, 0.0, anim_progress); // Green when focused
-                    } else {
-                        c.set_source_rgba(1.0, 1.0, 1.0, anim_progress); // White when not focused
-                    }
+                    // Draw icon centered with text
+                    let icon_x = start_x;
+                    let icon_y = button_y + (button_height - icon_size) / 2.0;
+                    renderer.render_document(c, &cairo::Rectangle::new(icon_x, icon_y, icon_size, icon_size)).unwrap();
                     
-                    let ext = c.text_extents(&display_text).unwrap();
-                    let text_x = icon_left + icon_size + 16.0;
-                    let text_y = button_y + (button_height + ext.height()) / 2.0;
+                    // Always use white color
+                    c.set_source_rgba(1.0, 1.0, 1.0, anim_progress);
+                    
+                    // Draw text next to icon
+                    let text_x = icon_x + icon_size + 8.0;
+                    let text_y = button_y + (button_height + text_ext.height()) / 2.0;
                     c.move_to(text_x, text_y);
                     c.show_text(&display_text).unwrap();
                 } else {
@@ -306,7 +292,7 @@ impl BrowserScreen {
                     1 => Some(BrowserAction::Forward),
                     2 => Some(BrowserAction::Refresh),
                     3 => Some(BrowserAction::AddressBar), // Address Bar is interactive
-                    4 => Some(BrowserAction::AddBookmark),
+                    4 => Some(BrowserAction::CloseTab), // Changed from AddBookmark
                     5 => Some(BrowserAction::NewTab),
                     _ => None,
                 };
@@ -363,4 +349,6 @@ pub enum BrowserAction {
     AddBookmark,
     NewTab,
     AddressBar,
+    BookmarksManager,
+    CloseTab,
 } 
