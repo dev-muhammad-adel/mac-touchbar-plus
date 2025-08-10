@@ -1410,7 +1410,6 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                            if class.is_empty() {
                                                continue;
                                            }
-                                           current_window_class = Some(class.to_string());
                                            
                                            // Check if VLC window focus changed
                                            let new_vlc_focused = class == "vlc";
@@ -1448,21 +1447,10 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                            // Check if browser window focus changed
                                            let class_lower = class.to_lowercase();
                                            let new_browser_focused = class_lower == "firefox" || class_lower == "chrome" || class_lower == "chromium" || class_lower == "brave" || class_lower == "brave-browser" || class_lower == "edge" || class_lower == "safari" || class_lower == "opera" || class_lower == "google-chrome";
+                                           
                                            if new_browser_focused != browser_window_focused {
-                                               browser_window_focused = new_browser_focused;
-                                               if browser_window_focused {
-                                                   // Browser window gained focus - start browser helper
-                                                   println!("[main] Browser window focused, starting browser helper");
-                                                   if let Some(user) = &current_user {
-                                                       if let Some(fd) = browser_helper_manager.start(user) {
-                                                           let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
-                                                           epoll.add(listener_fd_obj.as_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 8)).unwrap();
-                                                           browser_helper_listener_fd = Some(listener_fd_obj.into_raw_fd());
-                                                       }
-                                                   } else {
-                                                       println!("[main] No current user available for browser helper");
-                                                   }
-                                               } else {
+                                               // Browser focus state changed
+                                               if browser_window_focused && !new_browser_focused {
                                                    // Browser window lost focus - stop browser helper
                                                    println!("[main] Browser window lost focus, stopping browser helper");
                                                    if let Some(stream) = browser_helper_stream.take() {
@@ -1474,8 +1462,55 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                                        epoll.delete(listener_fd_obj.as_fd()).unwrap();
                                                    }
                                                    browser_helper_manager.stop();
+                                               } else if !browser_window_focused && new_browser_focused {
+                                                   // Browser window gained focus - start browser helper
+                                                   println!("[main] Browser window focused: '{}', starting browser helper", class);
+                                                   if let Some(user) = &current_user {
+                                                       if let Some(fd) = browser_helper_manager.start(user) {
+                                                           let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
+                                                           epoll.add(listener_fd_obj.as_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 8)).unwrap();
+                                                           browser_helper_listener_fd = Some(listener_fd_obj.into_raw_fd());
+                                                       }
+                                                   } else {
+                                                       println!("[main] No current user available for browser helper");
+                                                   }
+                                               }
+                                               
+                                               // Update focus state
+                                               browser_window_focused = new_browser_focused;
+                                           } else if new_browser_focused && browser_window_focused {
+                                               // Browser focus state is the same, but browser type might have changed
+                                               if current_window_class.as_ref() != Some(&class.to_string()) {
+                                                   // Browser type changed - stop and restart helper for clean state
+                                                   println!("[main] Browser type changed from '{}' to '{}', restarting browser helper", 
+                                                       current_window_class.as_deref().unwrap_or("unknown"), class);
+                                                   
+                                                   // Stop existing helper
+                                                   if let Some(stream) = browser_helper_stream.take() {
+                                                       epoll.delete(&stream).unwrap();
+                                                   }
+                                                   browser_helper_reader = None;
+                                                   if let Some(fd) = browser_helper_listener_fd.take() {
+                                                       let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
+                                                       epoll.delete(listener_fd_obj.as_fd()).unwrap();
+                                                   }
+                                                   browser_helper_manager.stop();
+                                                   
+                                                   // Start new helper for the new browser type
+                                                   if let Some(user) = &current_user {
+                                                       if let Some(fd) = browser_helper_manager.start(user) {
+                                                           let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
+                                                           epoll.add(listener_fd_obj.as_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 8)).unwrap();
+                                                           browser_helper_listener_fd = Some(listener_fd_obj.into_raw_fd());
+                                                       }
+                                                   } else {
+                                                       println!("[main] No current user available for browser helper");
+                                                   }
                                                }
                                            }
+                                           
+                                           // Update current window class AFTER all the logic
+                                           current_window_class = Some(class.to_string());
                                            
                                            // Update app UI manager with new window class
                                            app_ui_manager.update_app(&class).await;
@@ -1591,9 +1626,21 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                     }
                 }
                 8 => { // Browser helper listener event
-                    if let Some(stream) = browser_helper_manager.accept_connection() {
+                    if let Some(mut stream) = browser_helper_manager.accept_connection() {
                         stream.set_nonblocking(true).expect("Failed to set browser stream non-blocking");
                         println!("[main] Browser helper connected to socket.");
+                        
+                        // Send browser type to the helper as the first message
+                        if let Some(window_class) = &current_window_class {
+                            // Send the EXACT window class that triggered the browser focus
+                            let browser_type_msg = format!("browser_type:{}\n", window_class);
+                            if let Err(e) = stream.write_all(browser_type_msg.as_bytes()) {
+                                eprintln!("[main] Failed to send browser type to helper: {}", e);
+                            } else {
+                                println!("[main] Sent exact browser type '{}' to browser helper", window_class);
+                            }
+                        }
+                        
                         epoll.add(&stream, EpollEvent::new(EpollFlags::EPOLLIN, 9)).unwrap();
                         browser_helper_reader = Some(BufReader::new(stream.try_clone().unwrap()));
                         browser_helper_stream = Some(stream);

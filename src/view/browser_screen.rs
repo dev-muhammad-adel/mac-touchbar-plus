@@ -29,7 +29,7 @@ impl BrowserScreen {
             Button::new_icon_with_fraction("go-next-symbolic", input_linux::Key::Unknown, false, 0.6),     // Forward
             Button::new_icon_with_fraction("view-refresh-symbolic", input_linux::Key::Unknown, false, 0.6), // Refresh
             Button::new_icon_with_fraction("emblem-web-symbolic", input_linux::Key::Unknown, false, 3.0), // Address Bar (display only)
-            Button::new_icon_with_fraction("close-symbolic", input_linux::Key::Unknown, false, 0.6), // Close Tab
+            // Button::new_icon_with_fraction("close-symbolic", input_linux::Key::Unknown, false, 0.6), // Close Tab
             Button::new_icon_with_fraction("tab-new-symbolic", input_linux::Key::Unknown, false, 0.6),      // New Tab
         ];
         Self { 
