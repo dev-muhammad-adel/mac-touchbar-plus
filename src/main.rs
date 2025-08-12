@@ -104,21 +104,85 @@ fn get_env_from_pid(pid: u32) -> HashMap<String, String> {
 
 fn find_user_session_pid(user: &str) -> Option<u32> {
     // Look for common graphical session processes
-    let session_procs = ["i3", "gnome-session", "plasmashell", "startplasma-x11", "ksmserver", "xfce4-session", "openbox", "sway"]; // add more as needed
+    // Prioritize actual window managers/compositors over session launchers
+    let primary_procs = [
+        // X11 window managers
+        "i3", "openbox", "fluxbox", "awesome", "dwm", "bspwm", "herbstluftwm", "xmonad", "qtile", "spectrwm",
+        // Wayland compositors
+        "sway", "river", "hyprland", "wayfire", "labwc", "hikari", "cage", "orbment", "velox",
+        // Desktop environments (both X11 and Wayland)
+        "gnome-session", "plasmashell", "xfce4-session", "mate-session", "cinnamon-session", "budgie-daemon",
+        // KDE Plasma (both X11 and Wayland)
+        "kwin_x11", "kwin_wayland", "kwin", "kdeinit5",
+        // Other common compositors
+        "weston", "mutter", "kwin", "compiz", "marco", "xfwm4", "metacity"
+    ];
+    let secondary_procs = [
+        // Session launchers (fallback)
+        "gdm-x-session", "startplasma-x11", "startplasma-wayland", "ksmserver",
+        "lightdm", "sddm", "gdm", "xdm", "lxdm", "slim"
+    ];
+    
     let output = Command::new("pgrep").arg("-u").arg(user).output().ok()?;
     let pids: Vec<u32> = String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter_map(|line| line.trim().parse().ok())
         .collect();
-    for pid in pids {
+    println!("[main] Found {} processes for user {}", pids.len(), user);
+    
+    // First, look for primary processes (actual window managers/compositors)
+    for pid in &pids {
         if let Ok(cmdline) = fs::read_to_string(format!("/proc/{}/cmdline", pid)) {
-            for proc in &session_procs {
-                if cmdline.contains(proc) {
-                    return Some(pid);
+            println!("[main] Process {} cmdline: {:?}", pid, cmdline);
+            for proc in &primary_procs {
+                let cmdline_trimmed = cmdline.trim();
+                
+                // Check for exact match first (most reliable)
+                if cmdline_trimmed == *proc {
+                    println!("[main] Found primary session process (exact match): {} (PID: {})", proc, pid);
+                    return Some(*pid);
+                }
+                
+                // Check for starts with proc name, but avoid session launchers
+                if cmdline_trimmed.starts_with(proc) {
+                    // Avoid session launchers and script runners
+                    let session_launcher_indicators = [
+                        "gdm-x-session", "--run-script", "startplasma", "ksmserver",
+                        "lightdm", "sddm", "gdm", "xdm", "lxdm", "slim"
+                    ];
+                    
+                    let is_session_launcher = session_launcher_indicators.iter()
+                        .any(|indicator| cmdline_trimmed.contains(indicator));
+                    
+                    if !is_session_launcher {
+                        println!("[main] Found primary session process (starts with): {} (PID: {})", proc, pid);
+                        return Some(*pid);
+                    }
                 }
             }
         }
     }
+    
+    // If no primary process found, look for secondary processes (session launchers)
+    // But only if they have the DISPLAY variable
+    for pid in &pids {
+        if let Ok(cmdline) = fs::read_to_string(format!("/proc/{}/cmdline", pid)) {
+            for proc in &secondary_procs {
+                if cmdline.contains(proc) {
+                    // Check if this session launcher has DISPLAY variable
+                    if let Ok(env_data) = fs::read(format!("/proc/{}/environ", pid)) {
+                        let env_str = String::from_utf8_lossy(&env_data);
+                        if env_str.contains("DISPLAY=") {
+                            println!("[main] Found secondary session process with DISPLAY: {} (PID: {})", proc, pid);
+                            return Some(*pid);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    println!("[main] No session process found for user {}", user);
     None
 }
 
@@ -168,10 +232,14 @@ impl HelperManager {
         // Find the user's session process and extract its environment
         let mut env_vars = HashMap::new();
         if let Some(pid) = find_user_session_pid(user) {
+            println!("[main] Found user session process with PID: {}", pid);
             env_vars = get_env_from_pid(pid);
+            println!("[main] Extracted environment variables: {:?}", env_vars);
+        } else {
+            println!("[main] No user session process found for user: {}", user);
         }
 
-        let helper_path = "tiny-dfr-helper";
+        let helper_path = "/usr/bin/tiny-dfr-helper";
         let mut cmd = Command::new("sudo");
         cmd.arg("-u").arg(user)
            .arg("env");
@@ -182,8 +250,8 @@ impl HelperManager {
             }
         }
         cmd.arg(helper_path);
-        // (Optional) Print for debugging:
-        // println!("[main] Spawning: sudo -u {} env ... {} with env {:?}", user, helper_path, env_vars);
+        // Print for debugging:
+        println!("[main] Spawning: sudo -u {} env ... {} with env {:?}", user, helper_path, env_vars);
         let child = cmd.spawn().expect("Failed to start helper");
         self.process = Some(child);
         Some(fd)
