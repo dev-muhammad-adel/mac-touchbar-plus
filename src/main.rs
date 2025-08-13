@@ -90,91 +90,74 @@ enum LayerKey {
 fn get_env_from_pid(pid: u32) -> HashMap<String, String> {
     let mut env = HashMap::new();
     let path = format!("/proc/{}/environ", pid);
-    if let Ok(data) = fs::read(path) {
+    
+    println!("[get_env_from_pid] Reading environment from /proc/{}/environ", pid);
+    println!("[get_env_from_pid] Path: {}", path);
+    
+    if let Ok(data) = fs::read(&path) {
+        println!("[get_env_from_pid] Successfully read {} bytes from /proc/{}/environ", data.len(), pid);
+        
+        let mut entry_count = 0;
         for entry in data.split(|&b| b == 0) {
+            if entry.is_empty() {
+                continue;
+            }
+            
             if let Some(eq) = entry.iter().position(|&b| b == b'=') {
                 let key = String::from_utf8_lossy(&entry[..eq]).to_string();
                 let value = String::from_utf8_lossy(&entry[eq+1..]).to_string();
+                
+                // Log all environment variables for debugging
+                println!("[get_env_from_pid] Entry {}: {}={}", entry_count, key, value);
+                
                 env.insert(key, value);
+                entry_count += 1;
+            } else {
+                println!("[get_env_from_pid] Skipping malformed entry: {:?}", entry);
             }
         }
+        println!("[get_env_from_pid] Total environment variables found: {}", env.len());
+    } else {
+        println!("[get_env_from_pid] ERROR: Failed to read environment from /proc/{}/environ", pid);
+        // Try to get more details about why it failed
+        match fs::metadata(&path) {
+            Ok(metadata) => println!("[get_env_from_pid] File exists, size: {} bytes, permissions: {:?}", metadata.len(), metadata.permissions()),
+            Err(e) => println!("[get_env_from_pid] File metadata error: {}", e),
+        }
     }
+    
     env
 }
 
 fn find_user_session_pid(user: &str) -> Option<u32> {
-    // Look for common graphical session processes
-    // Prioritize actual window managers/compositors over session launchers
-    let primary_procs = [
-        // X11 window managers
-        "i3", "openbox", "fluxbox", "awesome", "dwm", "bspwm", "herbstluftwm", "xmonad", "qtile", "spectrwm",
-        // Wayland compositors
-        "sway", "river", "hyprland", "wayfire", "labwc", "hikari", "cage", "orbment", "velox",
-        // Desktop environments (both X11 and Wayland)
-        "gnome-session", "plasmashell", "xfce4-session", "mate-session", "cinnamon-session", "budgie-daemon",
-        // KDE Plasma (both X11 and Wayland)
-        "kwin_x11", "kwin_wayland", "kwin", "kdeinit5",
-        // Other common compositors
-        "weston", "mutter", "kwin", "compiz", "marco", "xfwm4", "metacity"
-    ];
-    let secondary_procs = [
-        // Session launchers (fallback)
-        "gdm-x-session", "startplasma-x11", "startplasma-wayland", "ksmserver",
-        "lightdm", "sddm", "gdm", "xdm", "lxdm", "slim"
-    ];
+    println!("[main] Searching for graphical session for user: {}", user);
     
-    let output = Command::new("pgrep").arg("-u").arg(user).output().ok()?;
-    let pids: Vec<u32> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.trim().parse().ok())
-        .collect();
-    println!("[main] Found {} processes for user {}", pids.len(), user);
-    
-    // First, look for primary processes (actual window managers/compositors)
-    for pid in &pids {
-        if let Ok(cmdline) = fs::read_to_string(format!("/proc/{}/cmdline", pid)) {
-            println!("[main] Process {} cmdline: {:?}", pid, cmdline);
-            for proc in &primary_procs {
-                let cmdline_trimmed = cmdline.trim();
+    // Method 1: Try to find the user's active display session
+    if let Ok(output) = Command::new("loginctl").arg("list-sessions").arg("--no-legend").output() {
+        let sessions = String::from_utf8_lossy(&output.stdout);
+        for line in sessions.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 3 && parts[2] == user {
+                let session_id = parts[0];
+                println!("[main] Found loginctl session: {} for user {}", session_id, user);
                 
-                // Check for exact match first (most reliable)
-                if cmdline_trimmed == *proc {
-                    println!("[main] Found primary session process (exact match): {} (PID: {})", proc, pid);
-                    return Some(*pid);
-                }
-                
-                // Check for starts with proc name, but avoid session launchers
-                if cmdline_trimmed.starts_with(proc) {
-                    // Avoid session launchers and script runners
-                    let session_launcher_indicators = [
-                        "gdm-x-session", "--run-script", "startplasma", "ksmserver",
-                        "lightdm", "sddm", "gdm", "xdm", "lxdm", "slim"
-                    ];
-                    
-                    let is_session_launcher = session_launcher_indicators.iter()
-                        .any(|indicator| cmdline_trimmed.contains(indicator));
-                    
-                    if !is_session_launcher {
-                        println!("[main] Found primary session process (starts with): {} (PID: {})", proc, pid);
-                        return Some(*pid);
-                    }
-                }
-            }
-        }
-    }
-    
-    // If no primary process found, look for secondary processes (session launchers)
-    // But only if they have the DISPLAY variable
-    for pid in &pids {
-        if let Ok(cmdline) = fs::read_to_string(format!("/proc/{}/cmdline", pid)) {
-            for proc in &secondary_procs {
-                if cmdline.contains(proc) {
-                    // Check if this session launcher has DISPLAY variable
-                    if let Ok(env_data) = fs::read(format!("/proc/{}/environ", pid)) {
-                        let env_str = String::from_utf8_lossy(&env_data);
-                        if env_str.contains("DISPLAY=") {
-                            println!("[main] Found secondary session process with DISPLAY: {} (PID: {})", proc, pid);
-                            return Some(*pid);
+                // Check if this session has a display
+                if let Ok(display_output) = Command::new("loginctl").arg("show-session").arg(session_id).arg("--property=Display").output() {
+                    let display_prop = String::from_utf8_lossy(&display_output.stdout);
+                    if display_prop.contains("Display=") && !display_prop.contains("Display=") {
+                        println!("[main] Session {} has display", session_id);
+                        
+                        // Get the leader PID of this session
+                        if let Ok(leader_output) = Command::new("loginctl").arg("show-session").arg(session_id).arg("--property=Leader").output() {
+                            let leader_prop = String::from_utf8_lossy(&leader_output.stdout);
+                            if let Some(leader_line) = leader_prop.lines().next() {
+                                if let Some(pid_str) = leader_line.strip_prefix("Leader=") {
+                                    if let Ok(pid) = pid_str.trim().parse::<u32>() {
+                                        println!("[main] Found session leader PID: {}", pid);
+                                        return Some(pid);
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -182,13 +165,82 @@ fn find_user_session_pid(user: &str) -> Option<u32> {
         }
     }
     
-    println!("[main] No session process found for user {}", user);
+    // Method 2: Look for processes with DISPLAY variable
+    if let Ok(output) = Command::new("pgrep").arg("-u").arg(user).output() {
+        let pids: Vec<u32> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.trim().parse().ok())
+            .collect();
+        
+        println!("[main] Found {} processes for user {}", pids.len(), user);
+        
+        // Look for processes with DISPLAY variable
+        for pid in &pids {
+            if let Ok(env_data) = fs::read(format!("/proc/{}/environ", pid)) {
+                let env_str = String::from_utf8_lossy(&env_data);
+                if env_str.contains("DISPLAY=") || env_str.contains("WAYLAND_DISPLAY=") {
+                    println!("[main] Found process {} with display environment", pid);
+                    
+                    // Get the command line to identify what type of process
+                    if let Ok(cmdline) = fs::read_to_string(format!("/proc/{}/cmdline", pid)) {
+                        let cmdline_clean = cmdline.trim_matches('\0');
+                        println!("[main] Process {} cmdline: {:?}", pid, cmdline_clean);
+                        
+                        // Check if it's a graphical session process
+                        let graphical_procs = [
+                            "hyprland", "sway", "river", "wayfire", "labwc", "hikari", "cage", "orbment", "velox",
+                            "i3", "openbox", "fluxbox", "awesome", "dwm", "bspwm", "herbstluftwm", "xmonad", "qtile", "spectrwm",
+                            "gnome-session", "plasmashell", "xfce4-session", "mate-session", "cinnamon-session", "budgie-daemon",
+                            "kwin_x11", "kwin_wayland", "kwin", "kdeinit5", "weston", "mutter", "compiz", "marco", "xfwm4", "metacity"
+                        ];
+                        
+                        for proc in &graphical_procs {
+                            if cmdline_clean.contains(proc) {
+                                println!("[main] Found graphical session process: {} (PID: {})", proc, pid);
+                                return Some(*pid);
+                            }
+                        }
+                    }
+                    
+                    // If we found a process with display but can't identify the type, still use it
+                    println!("[main] Using process {} with display environment (unidentified type)", pid);
+                    return Some(*pid);
+                }
+            }
+        }
+    }
+    
+    // Method 3: Try to get environment from user's login shell
+    if let Ok(output) = Command::new("su").arg("-").arg(user).arg("-c").arg("env | grep -E '(DISPLAY|WAYLAND_DISPLAY)'").output() {
+        let env_output = String::from_utf8_lossy(&output.stdout);
+        if !env_output.is_empty() {
+            println!("[main] Found display environment in user's login shell");
+            
+            // Find a process that might be the login shell
+            if let Ok(output) = Command::new("pgrep").arg("-u").arg(user).arg("-f").arg("login").output() {
+                let pids: Vec<u32> = String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .filter_map(|line| line.trim().parse().ok())
+                    .collect();
+                
+                if let Some(&pid) = pids.first() {
+                    println!("[main] Using login shell PID: {}", pid);
+                    return Some(pid);
+                }
+            }
+        }
+    }
+    
+    println!("[main] No graphical session found for user {}", user);
     None
 }
 
 struct HelperManager {
     process: Option<Child>,
     listener: Option<UnixListener>,
+    session_ready: bool,
+    last_session_check: Option<std::time::Instant>,
+    session_check_interval: std::time::Duration,
 }
 
 struct VlcHelperManager {
@@ -203,43 +255,120 @@ struct BrowserHelperManager {
 
 impl HelperManager {
     fn new() -> Self {
+        println!("[HelperManager::new] Creating new HelperManager instance");
         HelperManager {
             process: None,
             listener: None,
+            session_ready: false,
+            last_session_check: None,
+            session_check_interval: std::time::Duration::from_secs(2), // Check every 2 seconds
         }
     }
 
     fn start(&mut self, user: &str) -> Option<i32> {
+        println!("[HelperManager::start] Starting helper for user: {}", user);
+        
         if self.process.is_some() {
+            println!("[HelperManager::start] Helper process already exists, returning None");
             return None;
         }
 
         let socket_path = "/tmp/touchbar.sock";
+        println!("[HelperManager::start] Using socket path: {}", socket_path);
+        
         // Clean up old socket file if it exists
-        let _ = fs::remove_file(&socket_path);
+        match fs::remove_file(&socket_path) {
+            Ok(_) => println!("[HelperManager::start] Removed old socket file"),
+            Err(e) => println!("[HelperManager::start] No old socket file to remove: {}", e),
+        }
 
+        println!("[HelperManager::start] Binding Unix listener to socket");
         let listener = UnixListener::bind(socket_path).expect("Failed to bind socket");
+        println!("[HelperManager::start] Successfully bound socket");
+        
         listener.set_nonblocking(true).expect("Failed to set socket non-blocking");
+        println!("[HelperManager::start] Set socket to non-blocking mode");
 
         // Change ownership of the socket to the logged-in user
+        println!("[HelperManager::start] Looking up user info for: {}", user);
         if let Some(userinfo) = User::from_name(user).unwrap() {
-            chown(socket_path, Some(userinfo.uid), Some(userinfo.gid)).expect("Failed to chown socket");
+            println!("[HelperManager::start] Found user info - UID: {}, GID: {}", userinfo.uid, userinfo.gid);
+            match chown(socket_path, Some(userinfo.uid), Some(userinfo.gid)) {
+                Ok(_) => println!("[HelperManager::start] Successfully changed socket ownership"),
+                Err(e) => println!("[HelperManager::start] Failed to change socket ownership: {}", e),
+            }
+        } else {
+            println!("[HelperManager::start] WARNING: Could not find user info for: {}", user);
         }
 
         let fd = listener.as_raw_fd();
+        println!("[HelperManager::start] Got listener file descriptor: {}", fd);
         self.listener = Some(listener);
 
-        // No need to manually extract environment variables since su aura -c will inherit them
+        // Get environment variables from user's session
+        println!("[HelperManager::start] Finding user session PID for: {}", user);
+        let env_vars = if let Some(pid) = find_user_session_pid(user) {
+            println!("[HelperManager::start] Found user session PID: {}", pid);
+            let mut vars = get_env_from_pid(pid);
+            println!("[HelperManager::start] Retrieved {} environment variables from PID {}", vars.len(), pid);
+            vars
+        } else {
+            println!("[HelperManager::start] ERROR: No user session PID found for user: {}", user);
+            println!("[HelperManager::start] Cannot start helper without session PID");
+            return None;
+        };
+        
+        // Debug: print all environment variables being passed
+        println!("[HelperManager::start] All environment variables found:");
+        for (key, value) in &env_vars {
+            println!("[HelperManager::start]   {}={}", key, value);
+        }
 
         let helper_path = "/usr/bin/tiny-dfr-helper";
-        let mut cmd = Command::new("su");
-        cmd.arg(user)
-           .arg("-c")
-           .arg(helper_path);
-        // Print for debugging:
-        println!("[main] Spawning: su {} -c {}", user, helper_path);
-        let child = cmd.spawn().expect("Failed to start helper");
+        println!("[HelperManager::start] Helper path: {}", helper_path);
+        
+        // Check if helper binary exists
+        match fs::metadata(helper_path) {
+            Ok(metadata) => println!("[HelperManager::start] Helper binary exists, size: {} bytes", metadata.len()),
+            Err(e) => println!("[HelperManager::start] WARNING: Helper binary not found or not accessible: {}", e),
+        }
+
+        println!("[HelperManager::start] Building command: sudo -u {} env ...", user);
+        let mut cmd = Command::new("sudo");
+        cmd.arg("-u").arg(user)
+           .arg("env");
+        
+        // Pass relevant environment variables if found
+        let relevant_keys = ["DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XAUTHORITY", "SWAYSOCK", "XDG_RUNTIME_DIR", "HOME", "HYPRLAND_INSTANCE_SIGNATURE"];
+        println!("[HelperManager::start] Checking for relevant environment variables:");
+        for key in &relevant_keys {
+            if let Some(val) = env_vars.get(*key) {
+                println!("[HelperManager::start]   Found {}={}", key, val);
+                cmd.arg(format!("{}={}", key, val));
+            } else {
+                println!("[HelperManager::start]   Missing: {}", key);
+            }
+        }
+        
+        cmd.arg(helper_path);
+        
+        // Debug: print the final command being executed
+        println!("[HelperManager::start] Final command: {:?}", cmd);
+        
+        println!("[HelperManager::start] Spawning helper process");
+        let child = match cmd.spawn() {
+            Ok(child) => {
+                println!("[HelperManager::start] Successfully spawned helper process with PID: {}", child.id());
+                child
+            },
+            Err(e) => {
+                println!("[HelperManager::start] ERROR: Failed to spawn helper process: {}", e);
+                panic!("Failed to start helper");
+            }
+        };
+        
         self.process = Some(child);
+        println!("[HelperManager::start] Helper process stored, returning fd: {}", fd);
         Some(fd)
     }
 
@@ -248,16 +377,74 @@ impl HelperManager {
             child.kill().expect("Failed to kill helper");
         }
         self.listener.take();
+        
+        // Reset session state when stopping
+        self.session_ready = false;
+        self.last_session_check = None;
+        println!("[HelperManager::stop] Helper stopped, session state reset");
     }
 
     fn accept_connection(&mut self) -> Option<UnixStream> {
+        println!("[HelperManager::accept_connection] Attempting to accept connection");
         if let Some(listener) = &self.listener {
-            if let Ok((stream, _)) = listener.accept() {
-                stream.set_nonblocking(true).expect("Failed to set stream non-blocking");
-                return Some(stream);
+            println!("[HelperManager::accept_connection] Listener exists, trying to accept");
+            match listener.accept() {
+                Ok((stream, addr)) => {
+                    println!("[HelperManager::accept_connection] Connection accepted from {:?}", addr);
+                    if let Err(e) = stream.set_nonblocking(true) {
+                        println!("[HelperManager::accept_connection] WARNING: Failed to set stream non-blocking: {}", e);
+                    } else {
+                        println!("[HelperManager::accept_connection] Stream set to non-blocking mode");
+                    }
+                    Some(stream)
+                },
+                Err(e) => {
+                    println!("[HelperManager::accept_connection] Failed to accept connection: {}", e);
+                    None
+                }
+            }
+        } else {
+            println!("[HelperManager::accept_connection] No listener available");
+            None
+        }
+    }
+
+    fn check_session_ready(&mut self, user: &str) -> bool {
+        // Only check if enough time has passed since last check
+        if let Some(last_check) = self.last_session_check {
+            if last_check.elapsed() < self.session_check_interval {
+                return self.session_ready; // Return cached result
             }
         }
-        None
+
+        println!("[HelperManager::check_session_ready] Checking if session is ready for user: {}", user);
+        self.last_session_check = Some(std::time::Instant::now());
+
+        // Try to find user session PID
+        if let Some(pid) = find_user_session_pid(user) {
+            println!("[HelperManager::check_session_ready] Session found! PID: {}", pid);
+            
+            // Verify we can actually read the environment
+            let env_vars = get_env_from_pid(pid);
+            let has_display = env_vars.contains_key("DISPLAY") || env_vars.contains_key("WAYLAND_DISPLAY");
+            let has_runtime_dir = env_vars.contains_key("XDG_RUNTIME_DIR");
+            
+            if has_display && has_runtime_dir {
+                println!("[HelperManager::check_session_ready] Session is fully ready! Found DISPLAY: {}, XDG_RUNTIME_DIR: {}", 
+                    has_display, has_runtime_dir);
+                self.session_ready = true;
+                return true;
+            } else {
+                println!("[HelperManager::check_session_ready] Session found but not fully ready. DISPLAY: {}, XDG_RUNTIME_DIR: {}", 
+                    has_display, has_runtime_dir);
+                self.session_ready = false;
+                return false;
+            }
+        } else {
+            println!("[HelperManager::check_session_ready] Session not found yet, waiting...");
+            self.session_ready = false;
+            return false;
+        }
     }
 }
 
@@ -289,14 +476,34 @@ impl VlcHelperManager {
         let fd = listener.as_raw_fd();
         self.listener = Some(listener);
 
-        // No need to manually extract environment variables since su aura -c will inherit them
+        // Get environment variables from user's session
+        let env_vars = if let Some(pid) = find_user_session_pid(user) {
+            let mut vars = get_env_from_pid(pid);
+            println!("[main] Found {} environment variables from user session PID {}", vars.len(), pid);
+            vars
+        } else {
+            println!("[main] No user session PID found, cannot start VLC helper");
+            return None;
+        };
+        
+        // Debug: print all environment variables being passed
+        println!("[main] Environment variables for VLC helper:");
+        for (key, value) in &env_vars {
+            println!("[main]   {}={}", key, value);
+        }
 
         let helper_path = "tiny-dfr-vlc-helper";
-        let mut cmd = Command::new("su");
-        cmd.arg(user)
-           .arg("-c")
-           .arg(helper_path);
-        println!("[main] Spawning VLC helper: su {} -c {}", user, helper_path);
+        let mut cmd = Command::new("sudo");
+        cmd.arg("-u").arg(user)
+           .arg("env");
+        // Pass relevant environment variables if found
+        for key in &["DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XAUTHORITY", "SWAYSOCK", "XDG_RUNTIME_DIR", "HOME", "HYPRLAND_INSTANCE_SIGNATURE"] {
+            if let Some(val) = env_vars.get(*key) {
+                cmd.arg(format!("{}={}", key, val));
+            }
+        }
+        cmd.arg(helper_path);
+        println!("[main] Spawning VLC helper: sudo -u {} env ... {}", user, helper_path);
         let child = cmd.spawn().expect("Failed to start VLC helper");
         self.process = Some(child);
         Some(fd)
@@ -348,14 +555,34 @@ impl BrowserHelperManager {
         let fd = listener.as_raw_fd();
         self.listener = Some(listener);
 
-        // No need to manually extract environment variables since su aura -c will inherit them
+        // Get environment variables from user's session
+        let env_vars = if let Some(pid) = find_user_session_pid(user) {
+            let mut vars = get_env_from_pid(pid);
+            println!("[main] Found {} environment variables from user session PID {}", vars.len(), pid);
+            vars
+        } else {
+            println!("[main] No user session PID found, cannot start browser helper");
+            return None;
+        };
+        
+        // Debug: print all environment variables being passed
+        println!("[main] Environment variables for browser helper:");
+        for (key, value) in &env_vars {
+            println!("[main]   {}={}", key, value);
+        }
 
         let helper_path = "tiny-dfr-browser-helper";
-        let mut cmd = Command::new("su");
-        cmd.arg(user)
-           .arg("-c")
-           .arg(helper_path);
-        println!("[main] Spawning browser helper: su {} -c {}", user, helper_path);
+        let mut cmd = Command::new("sudo");
+        cmd.arg("-u").arg(user)
+           .arg("env");
+        // Pass relevant environment variables if found
+        for key in &["DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XAUTHORITY", "SWAYSOCK", "XDG_RUNTIME_DIR", "HOME", "HYPRLAND_INSTANCE_SIGNATURE"] {
+            if let Some(val) = env_vars.get(*key) {
+                cmd.arg(format!("{}={}", key, val));
+            }
+        }
+        cmd.arg(helper_path);
+        println!("[main] Spawning browser helper: sudo -u {} env ... {}", user, helper_path);
         let child = cmd.spawn().expect("Failed to start browser helper");
         self.process = Some(child);
         Some(fd)
@@ -1360,32 +1587,42 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                     // eventfd triggered: read and process session event
                     let mut buf = [0u8; 8];
                     let _ = nix::unistd::read(event_fd.as_raw_fd(), &mut buf);
-                    if let Ok(new_state) = event_rx.try_recv() {
-                        let session_changed = match &current_session {
-                            Some(current) => current != &new_state,
-                            None => true,
-                        };
-                        if session_changed {
+                                    if let Ok(new_state) = event_rx.try_recv() {
+                    println!("[main] Received session event: {:?}", new_state);
+                    let session_changed = match &current_session {
+                        Some(current) => current != &new_state,
+                        None => true,
+                    };
+                    println!("[main] Session changed: {} (current: {:?}, new: {:?})", session_changed, current_session, new_state);
+                    
+                                            if session_changed {
                             if new_state.is_logged_in {
+                                println!("[main] User logged in: {}", new_state.user);
                                 current_user = Some(new_state.user.clone());
-                                if let Some(fd) = helper_manager.start(&new_state.user) {
-                                    let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
-                                    epoll.add(listener_fd_obj.as_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 4)).unwrap();
-                                    helper_listener_fd = Some(listener_fd_obj.into_raw_fd()); // Store the raw fd
-                                }
+                                
+                                // Don't start helper immediately - wait for session to be ready
+                                println!("[main] User logged in, waiting for session to be fully ready before starting helper");
                                 
                                 // VLC helper will be started when VLC window gains focus
-                            } else {
+                                                        } else {
+                                println!("[main] User logged out: {:?}", current_session);
                                 if let Some(fd) = helper_listener_fd.take() {
+                                    println!("[main] Removing helper listener fd: {}", fd);
                                     let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
                                     epoll.delete(listener_fd_obj.as_fd()).unwrap();
                                 }
                                 if let Some(stream) = helper_stream.take() {
+                                    println!("[main] Removing helper stream from epoll");
                                     epoll.delete(&stream).unwrap();
                                     helper_reader = None;
                                 }
                                 // VLC helper will be stopped when VLC window loses focus
+                                println!("[main] Stopping main helper");
                                 helper_manager.stop();
+                                
+                                // Reset session ready state for next login
+                                helper_manager.session_ready = false;
+                                helper_manager.last_session_check = None;
                             }
                             // Step 2: Trigger animation when login screen or desktop-logged becomes visible
                             if (new_state.session_type == "login-screen" || new_state.session_type == "desktop-logged") && !animation.is_animating_in() {
@@ -1410,27 +1647,35 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                     }
                 }
                 4 => { // Helper listener event
+                    println!("[main] Helper listener event triggered");
                     if let Some(stream) = helper_manager.accept_connection() {
-                        println!("[main] Helper connected to socket.");
+                        println!("[main] Helper connected to socket successfully");
                         epoll.add(&stream, EpollEvent::new(EpollFlags::EPOLLIN, 5)).unwrap();
                         helper_reader = Some(BufReader::new(stream.try_clone().unwrap()));
                         helper_stream = Some(stream);
+                        println!("[main] Helper stream added to epoll and stored");
+                        
                         // Stop listening for new connections
                         if let Some(fd) = helper_listener_fd.take() {
+                            println!("[main] Removing helper listener fd: {} from epoll", fd);
                             let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
                             epoll.delete(listener_fd_obj.as_fd()).unwrap();
                         }
+                    } else {
+                        println!("[main] No helper connection available to accept");
                     }
                 }
                 5 => { // Helper stream event
+                    println!("[main] Helper stream event triggered");
                     if let Some(reader) = &mut helper_reader {
-                        eprintln!("[main] DEBUG: Reading from helper socket...");
+                        println!("[main] Reading from helper socket...");
                         loop {
                            let mut buf = vec![0; 1024];
                            match reader.get_mut().read(&mut buf) {
                                Ok(0) => { // EOF
-                                   println!("[main] Helper disconnected.");
+                                   println!("[main] Helper disconnected (EOF)");
                                    if let Some(stream) = helper_stream.take() {
+                                       println!("[main] Removing helper stream from epoll");
                                        epoll.delete(&stream).unwrap();
                                    }
                                    helper_reader = None;
@@ -1438,7 +1683,9 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                },
                                Ok(n) => {
                                    let data = &buf[..n];
+                                   println!("[main] Received {} bytes from helper: {:?}", n, data);
                                    if let Ok(text) = std::str::from_utf8(data) {
+                                       println!("[main] Helper data as text: {}", text);
                                        for part in text.split('\n') {
                                            let class = part.trim();
                                            if class.is_empty() {
@@ -2259,6 +2506,22 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
         // Step 3: Increment animation in main loop (time-based)
         if animation.update() {
             needs_complete_redraw = true;
+        }
+        
+        // Check if we can start the helper now that session might be ready
+        if let Some(user) = &current_user {
+            if helper_manager.process.is_none() && helper_manager.check_session_ready(user) {
+                println!("[main] Session is now ready, starting main helper for user: {}", user);
+                if let Some(fd) = helper_manager.start(user) {
+                    println!("[main] Main helper started successfully, fd: {}", fd);
+                    let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
+                    epoll.add(listener_fd_obj.as_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 4)).unwrap();
+                    helper_listener_fd = Some(listener_fd_obj.into_raw_fd()); // Store the raw fd
+                    println!("[main] Added helper listener to epoll with fd: {}", fd);
+                } else {
+                    println!("[main] ERROR: Failed to start main helper for user: {}", user);
+                }
+            }
         }
         
         // Process session events (event-driven)
