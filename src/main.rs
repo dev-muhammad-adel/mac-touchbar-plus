@@ -229,29 +229,15 @@ impl HelperManager {
         let fd = listener.as_raw_fd();
         self.listener = Some(listener);
 
-        // Find the user's session process and extract its environment
-        let mut env_vars = HashMap::new();
-        if let Some(pid) = find_user_session_pid(user) {
-            println!("[main] Found user session process with PID: {}", pid);
-            env_vars = get_env_from_pid(pid);
-            println!("[main] Extracted environment variables: {:?}", env_vars);
-        } else {
-            println!("[main] No user session process found for user: {}", user);
-        }
+        // No need to manually extract environment variables since su aura -c will inherit them
 
         let helper_path = "/usr/bin/tiny-dfr-helper";
-        let mut cmd = Command::new("sudo");
-        cmd.arg("-u").arg(user)
-           .arg("env");
-        // Pass relevant environment variables if found
-        for key in &["DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XAUTHORITY"] {
-            if let Some(val) = env_vars.get(*key) {
-                cmd.arg(format!("{}={}", key, val));
-            }
-        }
-        cmd.arg(helper_path);
+        let mut cmd = Command::new("su");
+        cmd.arg(user)
+           .arg("-c")
+           .arg(helper_path);
         // Print for debugging:
-        println!("[main] Spawning: sudo -u {} env ... {} with env {:?}", user, helper_path, env_vars);
+        println!("[main] Spawning: su {} -c {}", user, helper_path);
         let child = cmd.spawn().expect("Failed to start helper");
         self.process = Some(child);
         Some(fd)
@@ -303,24 +289,14 @@ impl VlcHelperManager {
         let fd = listener.as_raw_fd();
         self.listener = Some(listener);
 
-        // Find the user's session process and extract its environment
-        let mut env_vars = HashMap::new();
-        if let Some(pid) = find_user_session_pid(user) {
-            env_vars = get_env_from_pid(pid);
-        }
+        // No need to manually extract environment variables since su aura -c will inherit them
 
         let helper_path = "tiny-dfr-vlc-helper";
-        let mut cmd = Command::new("sudo");
-        cmd.arg("-u").arg(user)
-           .arg("env");
-        // Pass relevant environment variables if found
-        for key in &["DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XAUTHORITY"] {
-            if let Some(val) = env_vars.get(*key) {
-                cmd.arg(format!("{}={}", key, val));
-            }
-        }
-        cmd.arg(helper_path);
-        println!("[main] Spawning VLC helper: sudo -u {} env ... {}", user, helper_path);
+        let mut cmd = Command::new("su");
+        cmd.arg(user)
+           .arg("-c")
+           .arg(helper_path);
+        println!("[main] Spawning VLC helper: su {} -c {}", user, helper_path);
         let child = cmd.spawn().expect("Failed to start VLC helper");
         self.process = Some(child);
         Some(fd)
@@ -372,24 +348,14 @@ impl BrowserHelperManager {
         let fd = listener.as_raw_fd();
         self.listener = Some(listener);
 
-        // Find the user's session process and extract its environment
-        let mut env_vars = HashMap::new();
-        if let Some(pid) = find_user_session_pid(user) {
-            env_vars = get_env_from_pid(pid);
-        }
+        // No need to manually extract environment variables since su aura -c will inherit them
 
         let helper_path = "tiny-dfr-browser-helper";
-        let mut cmd = Command::new("sudo");
-        cmd.arg("-u").arg(user)
-           .arg("env");
-        // Pass relevant environment variables if found
-        for key in &["DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XAUTHORITY"] {
-            if let Some(val) = env_vars.get(*key) {
-                cmd.arg(format!("{}={}", key, val));
-            }
-        }
-        cmd.arg(helper_path);
-        println!("[main] Spawning browser helper: sudo -u {} env ... {}", user, helper_path);
+        let mut cmd = Command::new("su");
+        cmd.arg(user)
+           .arg("-c")
+           .arg(helper_path);
+        println!("[main] Spawning browser helper: su {} -c {}", user, helper_path);
         let child = cmd.spawn().expect("Failed to start browser helper");
         self.process = Some(child);
         Some(fd)

@@ -35,6 +35,7 @@ futures = "0.3"
 async-stream = "0.3"
 x11rb = "0.13"
 swayipc = "2.0"
+hyprland = "0.3"
 ctrlc = "3.4"
 
 [build-dependencies]

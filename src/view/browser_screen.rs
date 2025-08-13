@@ -164,7 +164,7 @@ impl BrowserScreen {
 
             // Draw SVG icon (and text for Address Bar)
             c.save().unwrap();
-            let icon_path = format!("/usr/share/tiny-dfr/icons/tiny-dfr-icons/browser/{}.svg", button.text);
+            let icon_path = format!("/usr/share/tiny-dfr/icons/tiny-dfr-icons/symbolic/browser/{}.svg", button.text);
             let is_address_bar = i == 3; // Address Bar is the 4th button
             let icon_size = (this_button_width.min(button_height) * 0.6).min(48.0);
             let icon_x = button_x + (this_button_width - icon_size) / 2.0;
