@@ -2624,6 +2624,7 @@ dependencies = [
  "input",
  "input-linux",
  "input-linux-sys",
+ "lazy_static",
  "libc",
  "librsvg",
  "nix 0.27.1",

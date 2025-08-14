@@ -42,20 +42,31 @@ fn get_sway_active_window_class() -> Option<String> {
     let output = Command::new("sh")
         .arg("-c")
         .arg("swaymsg -t get_tree | jq -r '.. | objects | select(.focused==true) | .window_properties.class // .app_id // .name // empty'")
-        .output()
-        .ok()?;
+        .output();
     
-    let output_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if !output_str.is_empty() && output_str != "null" {
-        // Check if the result looks like a workspace number (just digits)
-        if output_str.chars().all(|c| c.is_ascii_digit()) {
-            // This is likely a workspace number, not a window - return Desktop
-            return Some("Desktop".to_string());
+    match output {
+        Ok(output) => {
+            let output_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            eprintln!("[helper] Sway JSON output: '{}'", output_str);
+            
+            if !output_str.is_empty() && output_str != "null" {
+                // Check if the result looks like a workspace number (just digits)
+                if output_str.chars().all(|c| c.is_ascii_digit()) {
+                    // This is likely a workspace number, not a window - return Desktop
+                    eprintln!("[helper] Result looks like workspace number, returning Desktop");
+                    return Some("Desktop".to_string());
+                }
+                eprintln!("[helper] Returning Sway class: {}", output_str);
+                return Some(output_str);
+            }
         }
-        return Some(output_str);
+        Err(e) => {
+            eprintln!("[helper] Sway jq command failed: {}", e);
+        }
     }
     
     // Fallback: try using swayipc
+    eprintln!("[helper] Trying swayipc fallback");
     if let Ok(mut connection) = swayipc::Connection::new() {
         if let Ok(tree) = connection.get_tree() {
             if let Some(focused) = tree.find_focused(|n| n.focused) {
@@ -63,6 +74,7 @@ fn get_sway_active_window_class() -> Option<String> {
                 if let Some(window_properties) = &focused.window_properties {
                     if let Some(class) = &window_properties.class {
                         if !class.is_empty() && class != "null" {
+                            eprintln!("[helper] Found class via swayipc: {}", class);
                             return Some(class.clone());
                         }
                     }
@@ -70,6 +82,7 @@ fn get_sway_active_window_class() -> Option<String> {
                 // Fallback to window name if class is not available
                 if let Some(name) = &focused.name {
                     if !name.is_empty() && name != "null" {
+                        eprintln!("[helper] Found name via swayipc: {}", name);
                         return Some(name.clone());
                     }
                 }
@@ -77,6 +90,7 @@ fn get_sway_active_window_class() -> Option<String> {
                 if let Some(window_properties) = &focused.window_properties {
                     if let Some(instance) = &window_properties.instance {
                         if !instance.is_empty() && instance != "null" {
+                            eprintln!("[helper] Found instance via swayipc: {}", instance);
                             return Some(instance.clone());
                         }
                     }
@@ -85,7 +99,8 @@ fn get_sway_active_window_class() -> Option<String> {
         }
     }
     
-    None
+    eprintln!("[helper] No Sway window found, returning Desktop");
+    Some("Desktop".to_string())
 }
 
 fn get_hyprland_active_window_class() -> Option<String> {
@@ -126,9 +141,11 @@ fn get_hyprland_active_window_class() -> Option<String> {
         .ok()?;
     
     let output_str = String::from_utf8_lossy(&output.stdout);
+    eprintln!("[helper] Hyprland text output: '{}'", output_str);
     
     // Check if there's no active window
     if output_str.trim().is_empty() || output_str.contains("Invalid") {
+        eprintln!("[helper] No active window or invalid output, returning Desktop");
         return Some("Desktop".to_string());
     }
     
@@ -137,6 +154,7 @@ fn get_hyprland_active_window_class() -> Option<String> {
         if line.trim().starts_with("class:") {
             let class_trimmed = line.split("class:").nth(1)?.trim();
             if !class_trimmed.is_empty() && class_trimmed != "null" {
+                eprintln!("[helper] Found class in text output: {}", class_trimmed);
                 return Some(class_trimmed.to_string());
             }
         }
@@ -147,12 +165,14 @@ fn get_hyprland_active_window_class() -> Option<String> {
         if line.trim().starts_with("title:") {
             let title_trimmed = line.split("title:").nth(1)?.trim();
             if !title_trimmed.is_empty() && title_trimmed != "null" {
+                eprintln!("[helper] Found title in text output: {}", title_trimmed);
                 return Some(title_trimmed.to_string());
             }
         }
     }
     
     // If nothing found, return Desktop
+    eprintln!("[helper] No class or title found, returning Desktop");
     Some("Desktop".to_string())
 }
 
@@ -199,22 +219,32 @@ fn get_generic_wayland_active_window() -> Option<String> {
 }
 
 fn detect_and_get_active_window_class() -> Option<String> {
-    // Check for Hyprland first (since it's more specific)
-    // Check if hyprctl is available to confirm we're on Hyprland
-    if Command::new("hyprctl").arg("version").output().is_ok() {
-        eprintln!("[helper] Hyprland detected via hyprctl");
-        if let Some(class) = get_hyprland_active_window_class() {
-            return Some(class);
-        }
-    }
-    
-    // Check for Wayland
+    // Check for Wayland first
     if std::env::var("WAYLAND_DISPLAY").is_ok() {
         eprintln!("[helper] Wayland detected via WAYLAND_DISPLAY");
         
-        // Fallback to Sway logic
-        if let Some(class) = get_sway_active_window_class() {
-            return Some(class);
+        // Check for Sway first (more specific detection)
+        if std::env::var("SWAYSOCK").is_ok() || Command::new("swaymsg").arg("version").output().is_ok() {
+            eprintln!("[helper] Sway detected via SWAYSOCK or swaymsg");
+            if let Some(class) = get_sway_active_window_class() {
+                return Some(class);
+            }
+        }
+        
+        // Check for Hyprland (more specific detection)
+        if std::env::var("HYPRLAND_INSTANCE_SIGNATURE").is_ok() {
+            eprintln!("[helper] Hyprland detected via HYPRLAND_INSTANCE_SIGNATURE");
+            if let Some(class) = get_hyprland_active_window_class() {
+                return Some(class);
+            }
+        }
+        
+        // Fallback: try hyprctl if available (but be more careful)
+        if Command::new("hyprctl").arg("version").output().is_ok() {
+            eprintln!("[helper] Hyprland detected via hyprctl");
+            if let Some(class) = get_hyprland_active_window_class() {
+                return Some(class);
+            }
         }
         
         // Try generic Wayland detection
@@ -223,6 +253,7 @@ fn detect_and_get_active_window_class() -> Option<String> {
         }
         
         eprintln!("[helper] No Wayland compositor detected or no focused window");
+        return Some("Desktop".to_string());
     }
     
     // Check for X11
@@ -241,13 +272,21 @@ fn detect_and_get_active_window_class() -> Option<String> {
 
 fn main() -> std::io::Result<()> {
     let socket_path = "/tmp/touchbar.sock";
+    
+    // Debug environment variables
+    eprintln!("[helper] Environment variables:");
+    eprintln!("[helper] DISPLAY={:?}", std::env::var("DISPLAY"));
+    eprintln!("[helper] WAYLAND_DISPLAY={:?}", std::env::var("WAYLAND_DISPLAY"));
+    eprintln!("[helper] SWAYSOCK={:?}", std::env::var("SWAYSOCK"));
+    eprintln!("[helper] HYPRLAND_INSTANCE_SIGNATURE={:?}", std::env::var("HYPRLAND_INSTANCE_SIGNATURE"));
+    eprintln!("[helper] XDG_RUNTIME_DIR={:?}", std::env::var("XDG_RUNTIME_DIR"));
+    
     if let Ok(addr) = std::env::var("DBUS_SESSION_BUS_ADDRESS") {
         eprintln!("[helper] DBUS_SESSION_BUS_ADDRESS={}", addr);
     } else {
         eprintln!("[helper] DBUS_SESSION_BUS_ADDRESS is not set");
     }
-    eprintln!("[helper] DISPLAY={:?}", std::env::var("DISPLAY"));
-    eprintln!("[helper] WAYLAND_DISPLAY={:?}", std::env::var("WAYLAND_DISPLAY"));
+    
     let mut stream = loop {
         match UnixStream::connect(socket_path) {
             Ok(stream) => break stream,

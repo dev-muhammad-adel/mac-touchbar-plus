@@ -19,4 +19,5 @@ pub struct BrowserStatus {
     pub is_loading: bool,
 }
 
-pub mod browser_helper; 
+pub mod browser_helper;
+pub mod manager; 

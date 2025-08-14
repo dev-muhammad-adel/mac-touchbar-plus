@@ -164,55 +164,140 @@ impl BrowserScreen {
 
             // Draw SVG icon (and text for Address Bar)
             c.save().unwrap();
-            let icon_path = format!("/usr/share/tiny-dfr/icons/tiny-dfr-icons/symbolic/browser/{}.svg", button.text);
+            let icon_name = &button.text;
+            let icon_path = format!("/usr/share/tiny-dfr/icons/tiny-dfr-icons/symbolic/browser/{}.svg", icon_name);
             let is_address_bar = i == 3; // Address Bar is the 4th button
-            let icon_size = (this_button_width.min(button_height) * 0.6).min(48.0);
+            let icon_size = (this_button_width.min(button_height) * 0.6).min(crate::utils::button_images::BROWSER_ICON_SIZE as f64);
             let icon_x = button_x + (this_button_width - icon_size) / 2.0;
             let icon_y = button_y + (button_height - icon_size) / 2.0;
             
             // Debug which button we're processing
             println!("[browser_screen] Processing button {}: '{}' with icon path: {}", i, button.text, icon_path);
             
-            if let Ok(handle) = rsvg::Loader::new().read_path(&icon_path) {
-                println!("[browser_screen] Successfully loaded icon: {}", icon_path);
-                let renderer = rsvg::CairoRenderer::new(&handle);
-                if is_address_bar {
-                    // Calculate total width of icon + text + spacing
-                    let display_text = "Search or enter website name".to_string();
-                    c.set_font_size(24.0);
-                    c.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
-                    let text_ext = c.text_extents(&display_text).unwrap();
-                    
-                    let total_width = icon_size + 8.0 + text_ext.width(); // icon + spacing + text
-                    let start_x = button_x + (this_button_width - total_width) / 2.0; // Center the whole group
-                    
-                    // Draw icon centered with text
-                    let icon_x = start_x;
-                    let icon_y = button_y + (button_height - icon_size) / 2.0;
-                    renderer.render_document(c, &cairo::Rectangle::new(icon_x, icon_y, icon_size, icon_size)).unwrap();
-                    
-                    // Always use white color
-                    c.set_source_rgba(1.0, 1.0, 1.0, anim_progress);
-                    
-                    // Draw text next to icon
-                    let text_x = icon_x + icon_size + 8.0;
-                    let text_y = button_y + (button_height + text_ext.height()) / 2.0;
-                    c.move_to(text_x, text_y);
-                    c.show_text(&display_text).unwrap();
-                } else {
-                    renderer.render_document(c, &cairo::Rectangle::new(icon_x, icon_y, icon_size, icon_size)).unwrap();
+            // Try to load icon using the browser-specific function first
+            let icon_result = crate::utils::button_images::load_browser_icon(icon_name);
+            
+            if let Ok(icon_image) = icon_result {
+                // Use cached icon
+                match icon_image {
+                    crate::utils::button_images::ButtonImage::Svg(handle) => {
+                        println!("[browser_screen] Successfully loaded cached icon: {}", button.text);
+                        let renderer = rsvg::CairoRenderer::new(&handle);
+                        if is_address_bar {
+                            // Calculate total width of icon + text + spacing
+                            let display_text = "Search or enter website name".to_string();
+                            c.set_font_size(24.0);
+                            c.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
+                            let text_ext = c.text_extents(&display_text).unwrap();
+                            
+                            let total_width = icon_size + 8.0 + text_ext.width(); // icon + spacing + text
+                            let start_x = button_x + (this_button_width - total_width) / 2.0; // Center the whole group
+                            
+                            // Draw icon centered with text
+                            let icon_x = start_x;
+                            let icon_y = button_y + (button_height - icon_size) / 2.0;
+                            renderer.render_document(c, &cairo::Rectangle::new(icon_x, icon_y, icon_size, icon_size)).unwrap();
+                            
+                            // Always use white color
+                            c.set_source_rgba(1.0, 1.0, 1.0, anim_progress);
+                            
+                            // Draw text next to icon
+                            let text_x = icon_x + icon_size + 8.0;
+                            let text_y = button_y + (button_height + text_ext.height()) / 2.0;
+                            c.move_to(text_x, text_y);
+                            c.show_text(&display_text).unwrap();
+                        } else {
+                            renderer.render_document(c, &cairo::Rectangle::new(icon_x, icon_y, icon_size, icon_size)).unwrap();
+                        }
+                    }
+                    _ => {
+                        // Fallback to direct loading if not SVG
+                        if let Ok(handle) = rsvg::Loader::new().read_path(&icon_path) {
+                            println!("[browser_screen] Fallback: directly loaded icon: {}", icon_path);
+                            let renderer = rsvg::CairoRenderer::new(&handle);
+                            if is_address_bar {
+                                // Calculate total width of icon + text + spacing
+                                let display_text = "Search or enter website name".to_string();
+                                c.set_font_size(24.0);
+                                c.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
+                                let text_ext = c.text_extents(&display_text).unwrap();
+                                
+                                let total_width = icon_size + 8.0 + text_ext.width(); // icon + spacing + text
+                                let start_x = button_x + (this_button_width - total_width) / 2.0; // Center the whole group
+                                
+                                // Draw icon centered with text
+                                let icon_x = start_x;
+                                let icon_y = button_y + (button_height - icon_size) / 2.0;
+                                renderer.render_document(c, &cairo::Rectangle::new(icon_x, icon_y, icon_size, icon_size)).unwrap();
+                                
+                                // Always use white color
+                                c.set_source_rgba(1.0, 1.0, 1.0, anim_progress);
+                                
+                                // Draw text next to icon
+                                let text_x = icon_x + icon_size + 8.0;
+                                let text_y = button_y + (button_height + text_ext.height()) / 2.0;
+                                c.move_to(text_x, text_y);
+                                c.show_text(&display_text).unwrap();
+                            } else {
+                                renderer.render_document(c, &cairo::Rectangle::new(icon_x, icon_y, icon_size, icon_size)).unwrap();
+                            }
+                        } else {
+                            println!("[browser_screen] Failed to load icon: {} (button {}: {})", icon_path, i, button.text);
+                            // fallback: draw icon name as text
+                            c.set_font_size(14.0);
+                            c.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
+                            c.set_source_rgba(1.0, 1.0, 1.0, anim_progress);
+                            let ext = c.text_extents(&button.text).unwrap();
+                            let text_x = button_x + (this_button_width - ext.width()) / 2.0;
+                            let text_y = button_y + (button_height + ext.height()) / 2.0;
+                            c.move_to(text_x, text_y);
+                            c.show_text(&button.text).unwrap();
+                        }
+                    }
                 }
             } else {
-                println!("[browser_screen] Failed to load icon: {} (button {}: {})", icon_path, i, button.text);
-                // fallback: draw icon name as text
-                c.set_font_size(14.0);
-                c.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
-                c.set_source_rgba(1.0, 1.0, 1.0, anim_progress);
-                let ext = c.text_extents(&button.text).unwrap();
-                let text_x = button_x + (this_button_width - ext.width()) / 2.0;
-                let text_y = button_y + (button_height + ext.height()) / 2.0;
-                c.move_to(text_x, text_y);
-                c.show_text(&button.text).unwrap();
+                // Fallback to direct loading if caching system fails
+                if let Ok(handle) = rsvg::Loader::new().read_path(&icon_path) {
+                    println!("[browser_screen] Fallback: directly loaded icon: {}", icon_path);
+                    let renderer = rsvg::CairoRenderer::new(&handle);
+                    if is_address_bar {
+                        // Calculate total width of icon + text + spacing
+                        let display_text = "Search or enter website name".to_string();
+                        c.set_font_size(24.0);
+                        c.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
+                        let text_ext = c.text_extents(&display_text).unwrap();
+                        
+                        let total_width = icon_size + 8.0 + text_ext.width(); // icon + spacing + text
+                        let start_x = button_x + (this_button_width - total_width) / 2.0; // Center the whole group
+                        
+                        // Draw icon centered with text
+                        let icon_x = start_x;
+                        let icon_y = button_y + (button_height - icon_size) / 2.0;
+                        renderer.render_document(c, &cairo::Rectangle::new(icon_x, icon_y, icon_size, icon_size)).unwrap();
+                        
+                        // Always use white color
+                        c.set_source_rgba(1.0, 1.0, 1.0, anim_progress);
+                        
+                        // Draw text next to icon
+                        let text_x = icon_x + icon_size + 8.0;
+                        let text_y = button_y + (button_height + text_ext.height()) / 2.0;
+                        c.move_to(text_x, text_y);
+                        c.show_text(&display_text).unwrap();
+                    } else {
+                        renderer.render_document(c, &cairo::Rectangle::new(icon_x, icon_y, icon_size, icon_size)).unwrap();
+                    }
+                } else {
+                    println!("[browser_screen] Failed to load icon: {} (button {}: {})", icon_path, i, button.text);
+                    // fallback: draw icon name as text
+                    c.set_font_size(14.0);
+                    c.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
+                    c.set_source_rgba(1.0, 1.0, 1.0, anim_progress);
+                    let ext = c.text_extents(&button.text).unwrap();
+                    let text_x = button_x + (this_button_width - ext.width()) / 2.0;
+                    let text_y = button_y + (button_height + ext.height()) / 2.0;
+                    c.move_to(text_x, text_y);
+                    c.show_text(&button.text).unwrap();
+                }
             }
             c.restore().unwrap();
 

@@ -37,13 +37,14 @@ x11rb = "0.13"
 swayipc = "2.0"
 hyprland = "0.3"
 ctrlc = "3.4"
+lazy_static = "1.4"
 
 [build-dependencies]
 pkg-config = "0.3"
 
 [[bin]]
-name = "tiny-dfr-helper"
-path = "src/helper/main.rs"
+name = "tiny-dfr-focus-window-helper"
+path = "src/helper/focus_window_helper.rs"
 
 [[bin]]
 name = "tiny-dfr-vlc-helper"

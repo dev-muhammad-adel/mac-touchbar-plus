@@ -35,7 +35,7 @@ use nix::{
     sys::eventfd::{eventfd, EfdFlags},
     unistd::{chown, User},
 };
-use icon_loader::{IconFileType, IconLoader};
+
 use chrono::{Local, Timelike};
 use crate::services::sessionmanager::{SessionState, monitor_sessions};
 use tokio::sync::{watch, mpsc};
@@ -45,6 +45,10 @@ use view::module_screen::draw_module_screen;
 use view::app_ui_manager::{AppUiManager, AppAction};
 use view::vlc_screen::VlcAction;
 use view::browser_screen::BrowserAction;
+
+// Import the utils module
+mod utils;
+use utils::button_images::*;
 
 // Add log level control at the top
 // Set to true to enable verbose debug logging, false for production (much less resource usage)
@@ -91,615 +95,29 @@ enum LayerKey {
     Custom3,
 }
 
-fn get_env_from_pid(pid: u32) -> HashMap<String, String> {
-    let mut env = HashMap::new();
-    let path = format!("/proc/{}/environ", pid);
-    
-    if DEBUG_LOGGING {
-        println!("[get_env_from_pid] Reading environment from /proc/{}/environ", pid);
-    }
-    
-    if let Ok(data) = fs::read(&path) {
-        if DEBUG_LOGGING {
-            println!("[get_env_from_pid] Successfully read {} bytes from /proc/{}/environ", data.len(), pid);
-        }
-        
-        let mut entry_count = 0;
-        for entry in data.split(|&b| b == 0) {
-            if entry.is_empty() {
-                continue;
-            }
-            
-            if let Some(eq) = entry.iter().position(|&b| b == b'=') {
-                let key = String::from_utf8_lossy(&entry[..eq]).to_string();
-                let value = String::from_utf8_lossy(&entry[eq+1..]).to_string();
-                
-                // Only log important environment variables, not all 48+
-                if DEBUG_LOGGING && (key == "DISPLAY" || key == "WAYLAND_DISPLAY" || key == "DBUS_SESSION_BUS_ADDRESS" || key == "XDG_RUNTIME_DIR") {
-                    println!("[get_env_from_pid] Found key var: {}={}", key, value);
-                }
-                
-                env.insert(key, value);
-                entry_count += 1;
-            } else if DEBUG_LOGGING {
-                println!("[get_env_from_pid] Skipping malformed entry: {:?}", entry);
-            }
-        }
-        if DEBUG_LOGGING {
-            println!("[get_env_from_pid] Total environment variables found: {}", env.len());
-        }
-    } else {
-        println!("[get_env_from_pid] ERROR: Failed to read environment from /proc/{}/environ", pid);
-        // Try to get more details about why it failed
-        match fs::metadata(&path) {
-            Ok(metadata) => println!("[get_env_from_pid] File exists, size: {} bytes, permissions: {:?}", metadata.len(), metadata.permissions()),
-            Err(e) => println!("[get_env_from_pid] File metadata error: {}", e),
-        }
-    }
-    
-    env
-}
 
-fn find_user_session_pid(user: &str) -> Option<u32> {
-    if DEBUG_LOGGING {
-        println!("[main] Searching for graphical session for user: {}", user);
-    }
-    
-    // Method 1: Try to find the user's active display session
-    if let Ok(output) = Command::new("loginctl").arg("list-sessions").arg("--no-legend").output() {
-        let sessions = String::from_utf8_lossy(&output.stdout);
-        for line in sessions.lines() {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 3 && parts[2] == user {
-                let session_id = parts[0];
-                if DEBUG_LOGGING {
-                    println!("[main] Found loginctl session: {} for user {}", session_id, user);
-                }
-                
-                // Check if this session has a display
-                if let Ok(display_output) = Command::new("loginctl").arg("show-session").arg(session_id).arg("--property=Display").output() {
-                    let display_prop = String::from_utf8_lossy(&display_output.stdout);
-                    if display_prop.contains("Display=") && !display_prop.contains("Display=") {
-                        if DEBUG_LOGGING {
-                            println!("[main] Session {} has display", session_id);
-                        }
-                        
-                        // Get the leader PID of this session
-                        if let Ok(leader_output) = Command::new("loginctl").arg("show-session").arg(session_id).arg("--property=Leader").output() {
-                            let leader_prop = String::from_utf8_lossy(&leader_output.stdout);
-                            if let Some(leader_line) = leader_prop.lines().next() {
-                                if let Some(pid_str) = leader_line.strip_prefix("Leader=") {
-                                    if let Ok(pid) = pid_str.trim().parse::<u32>() {
-                                        if DEBUG_LOGGING {
-                                            println!("[main] Found session leader PID: {}", pid);
-                                        }
-                                        return Some(pid);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    // Method 2: Look for processes with DISPLAY variable
-    if let Ok(output) = Command::new("pgrep").arg("-u").arg(user).output() {
-        let pids: Vec<u32> = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter_map(|line| line.trim().parse().ok())
-            .collect();
-        
-        if DEBUG_LOGGING {
-            println!("[main] Found {} processes for user {}", pids.len(), user);
-        }
-        
-        // Look for processes with DISPLAY variable
-        for pid in &pids {
-            if let Ok(env_data) = fs::read(format!("/proc/{}/environ", pid)) {
-                let env_str = String::from_utf8_lossy(&env_data);
-                if env_str.contains("DISPLAY=") || env_str.contains("WAYLAND_DISPLAY=") {
-                    if DEBUG_LOGGING {
-                        println!("[main] Found process {} with display environment", pid);
-                    }
-                    
-                    // Get the command line to identify what type of process
-                    if let Ok(cmdline) = fs::read_to_string(format!("/proc/{}/cmdline", pid)) {
-                        let cmdline_clean = cmdline.trim_matches('\0');
-                        if DEBUG_LOGGING {
-                            println!("[main] Process {} cmdline: {:?}", pid, cmdline_clean);
-                        }
-                        
-                        // Check if it's a graphical session process
-                        let graphical_procs = [
-                            "hyprland", "sway", "river", "wayfire", "labwc", "hikari", "cage", "orbment", "velox",
-                            "i3", "openbox", "fluxbox", "awesome", "dwm", "bspwm", "herbstluftwm", "xmonad", "qtile", "spectrwm",
-                            "gnome-session", "plasmashell", "xfce4-session", "mate-session", "cinnamon-session", "budgie-daemon",
-                            "kwin_x11", "kwin_wayland", "kwin", "kdeinit5", "weston", "mutter", "compiz", "marco", "xfwm4", "metacity"
-                        ];
-                        
-                        for proc in &graphical_procs {
-                            if cmdline_clean.contains(proc) {
-                                if DEBUG_LOGGING {
-                                    println!("[main] Found graphical session process: {} (PID: {})", proc, pid);
-                                }
-                                return Some(*pid);
-                            }
-                        }
-                    }
-                    
-                    // If we found a process with display but can't identify the type, still use it
-                    if DEBUG_LOGGING {
-                        println!("[main] Using process {} with display environment (unidentified type)", pid);
-                    }
-                    return Some(*pid);
-                }
-            }
-        }
-    }
-    
-    // Method 3: Try to get environment from user's login shell
-    if let Ok(output) = Command::new("su").arg("-").arg(user).arg("-c").arg("env | grep -E '(DISPLAY|WAYLAND_DISPLAY)'").output() {
-        let env_output = String::from_utf8_lossy(&output.stdout);
-        if !env_output.is_empty() {
-            if DEBUG_LOGGING {
-                println!("[main] Found display environment in user's login shell");
-            }
-            
-            // Find a process that might be the login shell
-            if let Ok(output) = Command::new("pgrep").arg("-u").arg(user).arg("-f").arg("login").output() {
-                let pids: Vec<u32> = String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .filter_map(|line| line.trim().parse().ok())
-                    .collect();
-                
-                if let Some(&pid) = pids.first() {
-                    if DEBUG_LOGGING {
-                        println!("[main] Using login shell PID: {}", pid);
-                    }
-                    return Some(pid);
-                }
-            }
-        }
-    }
-    
-    if DEBUG_LOGGING {
-        println!("[main] No graphical session found for user {}", user);
-    }
-    None
-}
 
-struct HelperManager {
-    process: Option<Child>,
-    listener: Option<UnixListener>,
-    login_time: Option<std::time::Instant>, // Track when user logged in
-}
 
-struct VlcHelperManager {
-    process: Option<Child>,
-    listener: Option<UnixListener>,
-}
 
-struct BrowserHelperManager {
-    process: Option<Child>,
-    listener: Option<UnixListener>,
-}
+use crate::helper::manager::{HelperManager, VlcHelperManager, BrowserHelperManager};
 
-impl HelperManager {
-    fn new() -> Self {
-        if DEBUG_LOGGING {
-            println!("[HelperManager::new] Creating new HelperManager instance");
-        }
-        HelperManager {
-            process: None,
-            listener: None,
-            login_time: None, // Track when user logged in
-        }
-    }
 
-    fn start(&mut self, user: &str) -> Option<i32> {
-        if DEBUG_LOGGING {
-            println!("[HelperManager::start] Starting helper for user: {}", user);
-        }
-        
-        if self.process.is_some() {
-            if DEBUG_LOGGING {
-                println!("[HelperManager::start] Helper process already exists, returning None");
-            }
-            return None;
-        }
 
-        let socket_path = "/tmp/touchbar.sock";
-        if DEBUG_LOGGING {
-            println!("[HelperManager::start] Using socket path: {}", socket_path);
-        }
-        
-        // Clean up old socket file if it exists
-        match fs::remove_file(&socket_path) {
-            Ok(_) => if DEBUG_LOGGING { println!("[HelperManager::start] Removed old socket file") },
-            Err(e) => if DEBUG_LOGGING { println!("[HelperManager::start] No old socket file to remove: {}", e) },
-        }
 
-        if DEBUG_LOGGING {
-            println!("[HelperManager::start] Binding Unix listener to socket");
-        }
-        let listener = UnixListener::bind(socket_path).expect("Failed to bind socket");
-        if DEBUG_LOGGING {
-            println!("[HelperManager::start] Successfully bound socket");
-        }
-        
-        listener.set_nonblocking(true).expect("Failed to set socket non-blocking");
-        if DEBUG_LOGGING {
-            println!("[HelperManager::start] Set socket to non-blocking mode");
-        }
 
-        // Change ownership of the socket to the logged-in user
-        if DEBUG_LOGGING {
-            println!("[HelperManager::start] Looking up user info for: {}", user);
-        }
-        if let Some(userinfo) = User::from_name(user).unwrap() {
-            if DEBUG_LOGGING {
-                println!("[HelperManager::start] Found user info - UID: {}, GID: {}", userinfo.uid, userinfo.gid);
-            }
-            match chown(socket_path, Some(userinfo.uid), Some(userinfo.gid)) {
-                Ok(_) => if DEBUG_LOGGING { println!("[HelperManager::start] Successfully changed socket ownership") },
-                Err(e) => if DEBUG_LOGGING { println!("[HelperManager::start] Failed to change socket ownership: {}", e) },
-            }
-        } else {
-            println!("[HelperManager::start] WARNING: Could not find user info for: {}", user);
-        }
 
-        let fd = listener.as_raw_fd();
-        if DEBUG_LOGGING {
-            println!("[HelperManager::start] Got listener file descriptor: {}", fd);
-        }
-        self.listener = Some(listener);
-
-        // Get environment variables from user's session
-        if DEBUG_LOGGING {
-            println!("[HelperManager::start] Finding user session PID for: {}", user);
-        }
-        let env_vars = if let Some(pid) = find_user_session_pid(user) {
-            if DEBUG_LOGGING {
-                println!("[HelperManager::start] Found user session PID: {}", pid);
-            }
-            let mut vars = get_env_from_pid(pid);
-            if DEBUG_LOGGING {
-                println!("[HelperManager::start] Retrieved {} environment variables from PID {}", vars.len(), pid);
-            }
-            vars
-        } else {
-            println!("[HelperManager::start] ERROR: No user session PID found for user: {}", user);
-            println!("[HelperManager::start] Cannot start helper without session PID");
-            return None;
-        };
-        
-        // Debug: print only important environment variables
-        if DEBUG_LOGGING {
-            println!("[HelperManager::start] Important environment variables found:");
-            for key in &["DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"] {
-                if let Some(val) = env_vars.get(*key) {
-                    println!("[HelperManager::start]   {}={}", key, val);
-                } else {
-                    println!("[HelperManager::start]   Missing: {}", key);
-                }
-            }
-        }
-
-        let helper_path = "/usr/bin/tiny-dfr-helper";
-        if DEBUG_LOGGING {
-            println!("[HelperManager::start] Helper path: {}", helper_path);
-        }
-        
-        // Check if helper binary exists
-        match fs::metadata(helper_path) {
-            Ok(metadata) => if DEBUG_LOGGING { println!("[HelperManager::start] Helper binary exists, size: {} bytes", metadata.len()) },
-            Err(e) => if DEBUG_LOGGING { println!("[HelperManager::start] WARNING: Helper binary not found or not accessible: {}", e) },
-        }
-
-        if DEBUG_LOGGING {
-            println!("[HelperManager::start] Building command: sudo -u {} env ...", user);
-        }
-        let mut cmd = Command::new("sudo");
-        cmd.arg("-u").arg(user)
-           .arg("env");
-        
-        // Pass relevant environment variables if found
-        let relevant_keys = ["DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XAUTHORITY", "SWAYSOCK", "XDG_RUNTIME_DIR", "HOME", "HYPRLAND_INSTANCE_SIGNATURE"];
-        if DEBUG_LOGGING {
-            println!("[HelperManager::start] Checking for relevant environment variables:");
-            for key in &relevant_keys {
-                if let Some(val) = env_vars.get(*key) {
-                    println!("[HelperManager::start]   Found {}={}", key, val);
-                } else {
-                    println!("[HelperManager::start]   Missing: {}", key);
-                }
-            }
-        }
-        
-        for key in &relevant_keys {
-            if let Some(val) = env_vars.get(*key) {
-                cmd.arg(format!("{}={}", key, val));
-            }
-        }
-        
-        cmd.arg(helper_path);
-        
-        // Debug: print the final command being executed
-        if DEBUG_LOGGING {
-            println!("[HelperManager::start] Final command: {:?}", cmd);
-        }
-        
-        if DEBUG_LOGGING {
-            println!("[HelperManager::start] Spawning helper process");
-        }
-        let child = match cmd.spawn() {
-            Ok(child) => {
-                if DEBUG_LOGGING {
-                    println!("[HelperManager::start] Successfully spawned helper process with PID: {}", child.id());
-                }
-                child
-            },
-            Err(e) => {
-                println!("[HelperManager::start] ERROR: Failed to spawn helper process: {}", e);
-                panic!("Failed to start helper");
-            }
-        };
-        
-        self.process = Some(child);
-        if DEBUG_LOGGING {
-            println!("[HelperManager::start] Helper process stored, returning fd: {}", fd);
-        }
-        Some(fd)
-    }
-
-    fn stop(&mut self) {
-        if let Some(mut child) = self.process.take() {
-            child.kill().expect("Failed to kill helper");
-        }
-        self.listener.take();
-        
-        // Reset session state when stopping
-        self.login_time = None; // Reset login time
-        if DEBUG_LOGGING {
-            println!("[HelperManager::stop] Helper stopped, session state reset");
-        }
-    }
-
-    fn check_session_ready(&mut self) -> bool {
-        // Simple approach: wait 10 seconds after login, then start helper
-        if let Some(login_time) = self.login_time {
-            let elapsed = login_time.elapsed();
-            if elapsed >= std::time::Duration::from_secs(10) {
-                if DEBUG_LOGGING {
-                    println!("[HelperManager::check_session_ready] 10 seconds passed since login, session should be ready");
-                }
-                return true;
-            } else {
-                if DEBUG_LOGGING {
-                    println!("[HelperManager::check_session_ready] Waiting for session to be ready... {}s remaining", 10 - elapsed.as_secs());
-                }
-                return false;
-            }
-        }
-        
-        // No login time set yet
-        false
-    }
-
-    fn accept_connection(&mut self) -> Option<UnixStream> {
-        if DEBUG_LOGGING {
-            println!("[HelperManager::accept_connection] Attempting to accept connection");
-        }
-        if let Some(listener) = &self.listener {
-            if DEBUG_LOGGING {
-                println!("[HelperManager::accept_connection] Listener exists, trying to accept");
-            }
-            match listener.accept() {
-                Ok((stream, addr)) => {
-                    if DEBUG_LOGGING {
-                        println!("[HelperManager::accept_connection] Connection accepted from {:?}", addr);
-                    }
-                    if let Err(e) = stream.set_nonblocking(true) {
-                        if DEBUG_LOGGING {
-                            println!("[HelperManager::accept_connection] WARNING: Failed to set stream non-blocking: {}", e);
-                        }
-                    } else if DEBUG_LOGGING {
-                        println!("[HelperManager::accept_connection] Stream set to non-blocking mode");
-                    }
-                    Some(stream)
-                },
-                Err(e) => {
-                    if DEBUG_LOGGING {
-                        println!("[HelperManager::accept_connection] Failed to accept connection: {}", e);
-                    }
-                    None
-                }
-            }
-        } else {
-            if DEBUG_LOGGING {
-                println!("[HelperManager::accept_connection] No listener available");
-            }
-            None
-        }
-    }
-}
-
-impl VlcHelperManager {
-    fn new() -> Self {
-        VlcHelperManager {
-            process: None,
-            listener: None,
-        }
-    }
-
-    fn start(&mut self, user: &str) -> Option<i32> {
-        if self.process.is_some() {
-            return None;
-        }
-
-        let socket_path = "/tmp/touchbar-vlc.sock";
-        // Clean up old socket file if it exists
-        let _ = fs::remove_file(&socket_path);
-
-        let listener = UnixListener::bind(socket_path).expect("Failed to bind VLC socket");
-        listener.set_nonblocking(true).expect("Failed to set VLC socket non-blocking");
-
-        // Change ownership of the socket to the logged-in user
-        if let Some(userinfo) = User::from_name(user).unwrap() {
-            chown(socket_path, Some(userinfo.uid), Some(userinfo.gid)).expect("Failed to chown VLC socket");
-        }
-
-        let fd = listener.as_raw_fd();
-        self.listener = Some(listener);
-
-        // Get environment variables from user's session
-        let env_vars = if let Some(pid) = find_user_session_pid(user) {
-            let mut vars = get_env_from_pid(pid);
-            println!("[main] Found {} environment variables from user session PID {}", vars.len(), pid);
-            vars
-        } else {
-            println!("[main] No user session PID found, cannot start VLC helper");
-            return None;
-        };
-        
-        // Debug: print all environment variables being passed
-        println!("[main] Environment variables for VLC helper:");
-        for (key, value) in &env_vars {
-            println!("[main]   {}={}", key, value);
-        }
-
-        let helper_path = "tiny-dfr-vlc-helper";
-        let mut cmd = Command::new("sudo");
-        cmd.arg("-u").arg(user)
-           .arg("env");
-        // Pass relevant environment variables if found
-        for key in &["DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XAUTHORITY", "SWAYSOCK", "XDG_RUNTIME_DIR", "HOME", "HYPRLAND_INSTANCE_SIGNATURE"] {
-            if let Some(val) = env_vars.get(*key) {
-                cmd.arg(format!("{}={}", key, val));
-            }
-        }
-        cmd.arg(helper_path);
-        println!("[main] Spawning VLC helper: sudo -u {} env ... {}", user, helper_path);
-        let child = cmd.spawn().expect("Failed to start VLC helper");
-        self.process = Some(child);
-        Some(fd)
-    }
-
-    fn stop(&mut self) {
-        if let Some(mut child) = self.process.take() {
-            child.kill().expect("Failed to kill VLC helper");
-        }
-        self.listener.take();
-    }
-
-    fn accept_connection(&mut self) -> Option<UnixStream> {
-        if let Some(listener) = &self.listener {
-            if let Ok((stream, _)) = listener.accept() {
-                stream.set_nonblocking(true).expect("Failed to set VLC stream non-blocking");
-                return Some(stream);
-            }
-        }
-        None
-    }
-}
-
-impl BrowserHelperManager {
-    fn new() -> Self {
-        BrowserHelperManager {
-            process: None,
-            listener: None,
-        }
-    }
-
-    fn start(&mut self, user: &str) -> Option<i32> {
-        if self.process.is_some() {
-            return None;
-        }
-
-        let socket_path = "/tmp/touchbar-browser.sock";
-        // Clean up old socket file if it exists
-        let _ = fs::remove_file(&socket_path);
-
-        let listener = UnixListener::bind(socket_path).expect("Failed to bind browser socket");
-        listener.set_nonblocking(true).expect("Failed to set browser socket non-blocking");
-
-        // Change ownership of the socket to the logged-in user
-        if let Some(userinfo) = User::from_name(user).unwrap() {
-            chown(socket_path, Some(userinfo.uid), Some(userinfo.gid)).expect("Failed to chown browser socket");
-        }
-
-        let fd = listener.as_raw_fd();
-        self.listener = Some(listener);
-
-        // Get environment variables from user's session
-        let env_vars = if let Some(pid) = find_user_session_pid(user) {
-            let mut vars = get_env_from_pid(pid);
-            println!("[main] Found {} environment variables from user session PID {}", vars.len(), pid);
-            vars
-        } else {
-            println!("[main] No user session PID found, cannot start browser helper");
-            return None;
-        };
-        
-        // Debug: print all environment variables being passed
-        println!("[main] Environment variables for browser helper:");
-        for (key, value) in &env_vars {
-            println!("[main]   {}={}", key, value);
-        }
-
-        let helper_path = "tiny-dfr-browser-helper";
-        let mut cmd = Command::new("sudo");
-        cmd.arg("-u").arg(user)
-           .arg("env");
-        // Pass relevant environment variables if found
-        for key in &["DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XAUTHORITY", "SWAYSOCK", "XDG_RUNTIME_DIR", "HOME", "HYPRLAND_INSTANCE_SIGNATURE"] {
-            if let Some(val) = env_vars.get(*key) {
-                cmd.arg(format!("{}={}", key, val));
-            }
-        }
-        cmd.arg(helper_path);
-        println!("[main] Spawning browser helper: sudo -u {} env ... {}", user, helper_path);
-        let child = cmd.spawn().expect("Failed to start browser helper");
-        self.process = Some(child);
-        Some(fd)
-    }
-
-    fn stop(&mut self) {
-        if let Some(mut child) = self.process.take() {
-            child.kill().expect("Failed to kill browser helper");
-        }
-        self.listener.take();
-    }
-
-    fn accept_connection(&mut self) -> Option<UnixStream> {
-        if let Some(listener) = &self.listener {
-            if let Ok((stream, _)) = listener.accept() {
-                stream.set_nonblocking(true).expect("Failed to set browser stream non-blocking");
-                return Some(stream);
-            }
-        }
-        None
-    }
-}
 
 const BUTTON_SPACING_PX: i32 = 16;
 const APP_LAYER_KEYS3_GAP_PX: f64 = 4.0; // Custom gap for AppLayerKeys3
 const BUTTON_COLOR_INACTIVE: f64 = 0.172;
 const BUTTON_COLOR_ACTIVE: f64 = 0.350;
-const ICON_SIZE: i32 = 48;
+use crate::utils::button_images::ICON_SIZE;
 const TIMEOUT_MS: i32 = 10 * 1000;
 
-enum ButtonImage {
-    Text(String),
-    Svg(SvgHandle),
-    Bitmap(ImageSurface),
-    Blank
-}
+
 
 struct Button {
-    image: ButtonImage,
+    image: utils::button_images::ButtonImage,
     changed: bool,
     active: bool,
     action: Key,
@@ -707,101 +125,13 @@ struct Button {
     fraction: Option<f32>,
 }
 
-fn load_image(icon_name: &str, mode: Option<String>, path: &str) -> Result<ButtonImage> {
-    if path != "use_default" {
-        return Err(anyhow!("Custom path defined, using that"));
-    }
-    let theme = ConfigManager::new().load_theme();
-    let icon_theme = match mode {
-        Some(mode_val) => {
-            if mode_val == "App" {theme.app_icon_theme} else {theme.media_icon_theme}
-        }
-        None => {
-            panic!("No mode specified")
-        }
-    };
-    let mut search_paths: Vec<PathBuf> = vec![
-        PathBuf::from("/etc/tiny-dfr/icons"),
-        PathBuf::from("/usr/share/tiny-dfr/icons/"),
-        PathBuf::from("/usr/share/icons/"),
-    ];
-    let mut loader = IconLoader::new();
-    search_paths.extend(loader.search_paths().into_owned());
-    loader.set_search_paths(search_paths);
-    loader.set_theme_name_provider(icon_theme);
-    loader.update_theme_name().unwrap();
-    let icon_loader;
-    match loader.load_icon(icon_name) {
-        Some(icon) => {
-            icon_loader = icon;
-        }
-        None => {
-            match loader.load_icon(format!("{}.svg", icon_name)) {
-                Some(icon) => {
-                    icon_loader = icon;
-                }
-                None => {
-                    match loader.load_icon(format!("{}.png", icon_name)) {
-                        Some(icon) => {
-                            icon_loader = icon;
-                        }
-                        None => {
-                            return Err(anyhow!("Icon not found: {}, trying /usr/share/pixmaps", icon_name));
-                        }
-                    }
-                }
-            }
-        }
-    };
-    let icon = icon_loader.file_for_size(256);
-    match icon.icon_type() {
-        IconFileType::SVG => {
-            let handle = Loader::new().read_path(icon.path())?;
-            Ok(ButtonImage::Svg(handle))
-        }
-        IconFileType::PNG => {
-            let mut file = File::open(icon.path())?;
-            let surf = ImageSurface::create_from_png(&mut file)?;
-            if surf.height() == ICON_SIZE && surf.width() == ICON_SIZE {
-                return Ok(ButtonImage::Bitmap(surf));
-            }
-            let resized = ImageSurface::create(Format::ARgb32, ICON_SIZE, ICON_SIZE).unwrap();
-            let c = Context::new(&resized).unwrap();
-            c.scale(ICON_SIZE as f64 / surf.width() as f64, ICON_SIZE as f64 / surf.height() as f64);
-            c.set_source_surface(surf, 0.0, 0.0).unwrap();
-            c.set_antialias(Antialias::Best);
-            c.paint().unwrap();
-            return Ok(ButtonImage::Bitmap(resized));
-        }
-        IconFileType::XPM => {
-            panic!("Legacy XPM icons are not supported")
-        }
-    }
-}
 
-fn try_load_svg_path(icon_name: &str, path: &str) -> Result<ButtonImage> {
-    let handle = Loader::new().read_path(format!("{}", path)).or_else(|_| {
-        Loader::new().read_path(format!("/usr/share/pixmaps/{}.svg", icon_name))
-    })?;
-    Ok(ButtonImage::Svg(handle))
-}
 
-fn try_load_png_path(icon_name: &str, path: &str) -> Result<ButtonImage> {
-    let mut file = File::open(format!("{}", path)).or_else(|_| {
-        File::open(format!("/usr/share/pixmaps/{}.png", icon_name))
-    })?;
-    let surf = ImageSurface::create_from_png(&mut file)?;
-    if surf.height() == ICON_SIZE && surf.width() == ICON_SIZE {
-        return Ok(ButtonImage::Bitmap(surf));
-    }
-    let resized = ImageSurface::create(Format::ARgb32, ICON_SIZE, ICON_SIZE).unwrap();
-    let c = Context::new(&resized).unwrap();
-    c.scale(ICON_SIZE as f64 / surf.width() as f64, ICON_SIZE as f64 / surf.height() as f64);
-    c.set_source_surface(surf, 0.0, 0.0).unwrap();
-    c.set_antialias(Antialias::Best);
-    c.paint().unwrap();
-    return Ok(ButtonImage::Bitmap(resized));
-}
+
+
+
+
+
 
 impl Button {
     fn with_config(cfg: ButtonConfig) -> Button {
@@ -856,16 +186,26 @@ impl Button {
             action,
             active: false,
             changed: false,
-            image: ButtonImage::Text(text),
+            image: utils::button_images::ButtonImage::Text(text),
             background,
             fraction: None,
         }
     }
     fn new_icon(icon_name: &str, action: Key, mode: Option<String>, path: &str, background: bool) -> Button {
-        let image = load_image(icon_name, mode, path)
-            .or_else(|_| try_load_svg_path(icon_name, path))
-            .or_else(|_| try_load_png_path(icon_name, path))
-            .unwrap_or_else(|_| ButtonImage::Text(icon_name.to_string()));
+        let theme = ConfigManager::new().load_theme();
+        let icon_theme = match &mode {
+            Some(mode_val) => {
+                if mode_val == "App" {theme.app_icon_theme} else {theme.media_icon_theme}
+            }
+            None => {
+                panic!("No mode specified")
+            }
+        };
+        
+        let image = utils::button_images::load_image(icon_name, mode, path, &icon_theme)
+            .or_else(|_| utils::button_images::try_load_svg_path(icon_name, path))
+            .or_else(|_| utils::button_images::try_load_png_path(icon_name, path))
+            .unwrap_or_else(|_| utils::button_images::ButtonImage::Text(icon_name.to_string()));
         Button {
             action, image,
             active: false,
@@ -879,14 +219,14 @@ impl Button {
             action,
             active: false,
             changed: false,
-            image: ButtonImage::Blank,
+            image: utils::button_images::ButtonImage::Blank,
             background,
             fraction: None,
         }
     }
     fn render(&self, c: &Context, height: i32, button_left_edge: f64, button_width: u64, y_shift: f64) {
         match &self.image {
-            ButtonImage::Text(text) => {
+            utils::button_images::ButtonImage::Text(text) => {
                 let extents = c.text_extents(text).unwrap();
                 c.move_to(
                     button_left_edge + (button_width as f64 / 2.0 - extents.width() / 2.0).round(),
@@ -894,7 +234,7 @@ impl Button {
                 );
                 c.show_text(text).unwrap();
             },
-            ButtonImage::Svg(svg) => {
+            utils::button_images::ButtonImage::Svg(svg) => {
                 let renderer = CairoRenderer::new(&svg);
                 let x = button_left_edge + (button_width as f64 / 2.0 - (ICON_SIZE / 2) as f64).round();
                 let y = y_shift + ((height as f64 - ICON_SIZE as f64) / 2.0).round();
@@ -903,7 +243,7 @@ impl Button {
                     &Rectangle::new(x, y, ICON_SIZE as f64, ICON_SIZE as f64)
                 ).unwrap();
             }
-            ButtonImage::Bitmap(surf) => {
+            utils::button_images::ButtonImage::Bitmap(surf) => {
                 let x = button_left_edge + (button_width as f64 / 2.0 - (ICON_SIZE / 2) as f64).round();
                 let y = y_shift + ((height as f64 - ICON_SIZE as f64) / 2.0).round();
                 c.set_source_surface(surf, x, y).unwrap();
@@ -1622,6 +962,9 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
         
         // Handle different types of redraws
         if needs_complete_redraw || any_changed || browser_buttons_changed {
+            // Manage image cache before redraw
+            utils::button_images::manage_image_cache();
+            
             println!("[main] REDRAW TRIGGERED: needs_complete_redraw={}, any_changed={}, browser_buttons_changed={}", needs_complete_redraw, any_changed, browser_buttons_changed);
             let shift = if cfg.enable_pixel_shift {
                 pixel_shift.get()
@@ -1651,6 +994,18 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
             needs_complete_redraw = false;
         }
         
+        // Check cache memory pressure periodically
+        static mut CACHE_CHECK_COUNTER: u64 = 0;
+        unsafe {
+            CACHE_CHECK_COUNTER += 1;
+            if CACHE_CHECK_COUNTER % 1000 == 0 { // Check every 1000 frames
+                utils::button_images::clear_image_cache_if_needed();
+            }
+        }
+        
+        // Display cache performance statistics
+        utils::button_images::display_cache_stats();
+        
         // --- epoll wait and event handling ---
         let mut events = [EpollEvent::empty(); 5];
         let n = epoll.wait(&mut events, next_timeout_ms as isize).unwrap();
@@ -1679,7 +1034,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                 current_user = Some(new_state.user.clone());
                                 
                                 // Set login time for 10-second delay
-                                helper_manager.login_time = Some(std::time::Instant::now());
+                                helper_manager.set_login_time();
                                 
                                 // Don't start helper immediately - wait for session to be ready
                                 println!("[main] User logged in, waiting 10 seconds for session to be fully ready before starting helper");
@@ -1702,7 +1057,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                 helper_manager.stop();
                                 
                                 // Reset session ready state for next login
-                                helper_manager.login_time = None; // Reset login time
+                                // Reset login time is handled in stop() method
                             }
                             // Step 2: Trigger animation when login screen or desktop-logged becomes visible
                             if (new_state.session_type == "login-screen" || new_state.session_type == "desktop-logged") && !animation.is_animating_in() {
@@ -2116,6 +1471,26 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                     } else if key.key() == Key::Macro3 as u32 && key.key_state() == KeyState::Pressed {
                         active_layer = LayerKey::Custom3;
                         needs_complete_redraw = true;
+                    }
+                    // Cache management commands (Ctrl+Shift+C for cache debug, Ctrl+Shift+X for cache cleanup)
+                    else if key.key() == Key::C as u32 && key.key_state() == KeyState::Pressed {
+                        // Check if cache debug keys are enabled
+                        let config = utils::button_images::get_cache_config();
+                        if config.debug_keys_enabled {
+                            utils::button_images::debug_cache_state();
+                        }
+                    } else if key.key() == Key::X as u32 && key.key_state() == KeyState::Pressed {
+                        // Check if cache debug keys are enabled
+                        let config = utils::button_images::get_cache_config();
+                        if config.debug_keys_enabled {
+                            utils::button_images::force_cache_cleanup();
+                        }
+                    } else if key.key() == Key::V as u32 && key.key_state() == KeyState::Pressed {
+                        // Check if cache debug keys are enabled
+                        let config = utils::button_images::get_cache_config();
+                        if config.debug_keys_enabled {
+                            utils::button_images::display_detailed_cache_info();
+                        }
                     }
                 },
                 Event::Touch(te) => {
@@ -2590,7 +1965,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
         
         // Check if we can start the helper now that session might be ready
         if let Some(user) = &current_user {
-            if helper_manager.process.is_none() && helper_manager.check_session_ready() {
+                            if helper_manager.is_process_none() && helper_manager.check_session_ready() {
                 if DEBUG_LOGGING {
                     println!("[main] Session is now ready, starting main helper for user: {}", user);
                 }
@@ -2613,3 +1988,5 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
         // Process session events (event-driven)
     }
 }
+
+
