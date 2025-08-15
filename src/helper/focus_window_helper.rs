@@ -3,276 +3,492 @@ use std::os::unix::net::UnixStream;
 use std::io::Write;
 use std::thread;
 use std::time::Duration;
-use std::process::Command;
+use x11rb::connection::Connection;
+use x11rb::protocol::xproto::{self, ConnectionExt, Window};
+use x11rb::rust_connection::RustConnection;
+use std::collections::HashMap;
+use std::sync::mpsc;
 
-fn get_active_window_class() -> Option<String> {
-    // Get the active window ID
-    let output = Command::new("xdotool")
-        .arg("getactivewindow")
-        .output()
-        .ok()?;
-    let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if id.is_empty() || id == "0" {
-        return Some("Desktop".to_string());
+struct X11WindowMonitor {
+    conn: RustConnection,
+    root: Window,
+    active_window: Option<Window>,
+    window_classes: HashMap<Window, String>,
+    net_active_window_atom: xproto::Atom,
+}
+
+impl X11WindowMonitor {
+    fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        let (conn, screen_num) = x11rb::connect(None)?;
+        let screen = &conn.setup().roots[screen_num];
+        let root = screen.root;
+        
+        // Get the _NET_ACTIVE_WINDOW atom
+        let net_active_window_atom = conn.intern_atom(false, b"_NET_ACTIVE_WINDOW")?.reply()?.atom;
+        
+        Ok(Self {
+            conn,
+            root,
+            active_window: None,
+            window_classes: HashMap::new(),
+            net_active_window_atom,
+        })
     }
-    // Get the WM_CLASS property
-    let output = Command::new("xprop")
-        .arg("-id")
-        .arg(&id)
-        .arg("WM_CLASS")
-        .output();
-    match output {
-        Ok(output) => {
-            let out = String::from_utf8_lossy(&output.stdout);
-            if out.contains("not found") || out.trim().is_empty() {
-                return Some("Desktop".to_string());
-            }
-            // Example output: WM_CLASS(STRING) = "org.gnome.Nautilus", "org.gnome.Nautilus"
-            let class = out.split('=').nth(1)?.trim();
-            // Split by comma, take the second part, and strip quotes
-            let class_name = class.split(',').last()?.trim().trim_matches('"');
-            Some(class_name.to_string())
+    
+    fn get_window_class(&mut self, window: Window) -> Option<String> {
+        // Check cache first
+        if let Some(class) = self.window_classes.get(&window) {
+            return Some(class.clone());
         }
-        Err(_) => Some("Desktop".to_string()),
+        
+        // Get WM_CLASS property
+        let cookie = self.conn.get_property(
+            false,
+            window,
+            xproto::AtomEnum::WM_CLASS,
+            xproto::AtomEnum::STRING,
+            0,
+            1024,
+        );
+        
+        match cookie.ok()?.reply() {
+            Ok(reply) => {
+                if let Ok(class_name) = String::from_utf8(reply.value) {
+                    // WM_CLASS format: "instance\0class\0"
+                    if let Some(class) = class_name.split('\0').nth(1) {
+                        if !class.is_empty() {
+                            let class_str = class.to_string();
+                            self.window_classes.insert(window, class_str.clone());
+                            return Some(class_str);
+                        }
+                    }
+                }
+            }
+            Err(_) => {}
+        }
+        
+        None
+    }
+    
+    fn get_active_window(&mut self) -> Option<Window> {
+        let cookie = self.conn.get_property(
+            false,
+            self.root,
+            self.net_active_window_atom,
+            xproto::AtomEnum::WINDOW,
+            0,
+            1,
+        );
+        
+        match cookie.ok()?.reply() {
+            Ok(reply) => {
+                if reply.value.len() >= 4 {
+                    let window_id = u32::from_ne_bytes([
+                        reply.value[0],
+                        reply.value[1],
+                        reply.value[2],
+                        reply.value[3],
+                    ]);
+                    if window_id != 0 {
+                        return Some(window_id);
+                    }
+                }
+            }
+            Err(_) => {}
+        }
+        
+        None
+    }
+    
+    fn get_active_window_class(&mut self) -> Option<String> {
+        let active_window = self.get_active_window()?;
+        
+        // Update active window
+        if self.active_window != Some(active_window) {
+            self.active_window = Some(active_window);
+        }
+        
+        self.get_window_class(active_window)
+    }
+    
+    fn setup_event_listening(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // Select for property change events on root window
+        self.conn.change_window_attributes(
+            self.root,
+            &xproto::ChangeWindowAttributesAux::new().event_mask(
+                xproto::EventMask::PROPERTY_CHANGE
+            ),
+        )?;
+        
+        // Also listen for window focus events
+        self.conn.change_window_attributes(
+            self.root,
+            &xproto::ChangeWindowAttributesAux::new().event_mask(
+                xproto::EventMask::SUBSTRUCTURE_NOTIFY
+            ),
+        )?;
+        
+        Ok(())
+    }
+    
+    fn wait_for_focus_change(&mut self) -> Result<Option<String>, Box<dyn std::error::Error>> {
+        // Wait for events
+        let event = self.conn.wait_for_event()?;
+        
+        match event {
+            x11rb::protocol::Event::PropertyNotify(ev) => {
+                // Check if it's the active window property that changed
+                if ev.atom == self.net_active_window_atom {
+                    eprintln!("[helper] Active window property changed");
+                    return Ok(self.get_active_window_class());
+                }
+            }
+            x11rb::protocol::Event::ConfigureNotify(_ev) => {
+                // Window configuration changed, might indicate focus change
+                eprintln!("[helper] Window configuration changed");
+                return Ok(self.get_active_window_class());
+            }
+            x11rb::protocol::Event::FocusIn(ev) => {
+                // Focus changed
+                eprintln!("[helper] Focus changed to window {}", ev.event);
+                return Ok(self.get_window_class(ev.event));
+            }
+            _ => {
+                // Other events, ignore
+            }
+        }
+        
+        Ok(None)
     }
 }
 
-fn get_sway_active_window_class() -> Option<String> {
-    // Try using swaymsg with jq first (prioritize class over app_id)
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg("swaymsg -t get_tree | jq -r '.. | objects | select(.focused==true) | .window_properties.class // .app_id // .name // empty'")
+struct SwayWindowMonitor;
+
+impl SwayWindowMonitor {
+    fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        Ok(Self)
+    }
+    
+    fn get_active_window_class() -> Option<String> {
+        if let Ok(mut connection) = swayipc::Connection::new() {
+            if let Ok(tree) = connection.get_tree() {
+                if let Some(focused) = tree.find_focused(|n| n.focused) {
+                    // Check if this is actually a window (not a workspace)
+                    if focused.node_type == swayipc::reply::NodeType::Con {
+                        // First try to get window_properties.class (for XWayland windows)
+                        if let Some(window_properties) = &focused.window_properties {
+                            if let Some(class) = &window_properties.class {
+                                if !class.is_empty() && class != "null" {
+                                    return Some(class.clone());
+                                }
+                            }
+                            // Try instance as fallback
+                            if let Some(instance) = &window_properties.instance {
+                                if !instance.is_empty() && instance != "null" {
+                                    return Some(instance.clone());
+                                }
+                            }
+                        }
+                        
+                        // For Wayland native windows, use app_id
+                        if let Some(app_id) = &focused.app_id {
+                            if !app_id.is_empty() && app_id != "null" {
+                                return Some(app_id.clone());
+                            }
+                        }
+                        
+                        // Fallback to window name if nothing else is available
+                        if let Some(name) = &focused.name {
+                            if !name.is_empty() && name != "null" {
+                                return Some(name.clone());
+                            }
+                        }
+                    } else {
+                        // This is a workspace, not a window - return Desktop
+                        return Some("Desktop".to_string());
+                    }
+                }
+            }
+        }
+        // If no focused window or error, return Desktop
+        Some("Desktop".to_string())
+    }
+    
+    fn run_event_monitor(tx: mpsc::Sender<String>) -> Result<(), Box<dyn std::error::Error>> {
+        // Create a new connection for event subscription
+        let connection = swayipc::Connection::new()?;
+        
+        // Subscribe to workspace and window events
+        let events = connection.subscribe(&[swayipc::EventType::Workspace, swayipc::EventType::Window])?;
+        
+        // Get initial active window
+        if let Some(class) = Self::get_active_window_class() {
+            let _ = tx.send(class);
+        }
+        
+        // Event loop
+        for event in events {
+            match event? {
+                swayipc::reply::Event::Workspace(_) | swayipc::reply::Event::Window(_) => {
+                    // Window or workspace changed, check active window
+                    if let Some(class) = Self::get_active_window_class() {
+                        let _ = tx.send(class);
+                    }
+                }
+                _ => {}
+            }
+        }
+        
+        Ok(())
+    }
+}
+
+struct HyprlandWindowMonitor;
+
+impl HyprlandWindowMonitor {
+    fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        Ok(Self)
+    }
+    
+    fn get_active_window_class() -> Option<String> {
+        // Use hyprctl to get active window info
+        let output = std::process::Command::new("hyprctl")
+            .arg("activewindow")
+            .arg("-j")
         .output();
     
     match output {
         Ok(output) => {
-            let output_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            eprintln!("[helper] Sway JSON output: '{}'", output_str);
-            
-            if !output_str.is_empty() && output_str != "null" {
-                // Check if the result looks like a workspace number (just digits)
-                if output_str.chars().all(|c| c.is_ascii_digit()) {
-                    // This is likely a workspace number, not a window - return Desktop
-                    eprintln!("[helper] Result looks like workspace number, returning Desktop");
-                    return Some("Desktop".to_string());
-                }
-                eprintln!("[helper] Returning Sway class: {}", output_str);
-                return Some(output_str);
-            }
-        }
-        Err(e) => {
-            eprintln!("[helper] Sway jq command failed: {}", e);
-        }
-    }
-    
-    // Fallback: try using swayipc
-    eprintln!("[helper] Trying swayipc fallback");
-    if let Ok(mut connection) = swayipc::Connection::new() {
-        if let Ok(tree) = connection.get_tree() {
-            if let Some(focused) = tree.find_focused(|n| n.focused) {
-                // Try to get the window class from the focused node
-                if let Some(window_properties) = &focused.window_properties {
-                    if let Some(class) = &window_properties.class {
+                if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
+                    // Check if there's actually an active window
+                    if json.is_null() || json.as_object().map_or(true, |obj| obj.is_empty()) {
+                        // No active window, return Desktop
+                        return Some("Desktop".to_string());
+                    }
+                    
+                    if let Some(class) = json["class"].as_str() {
                         if !class.is_empty() && class != "null" {
-                            eprintln!("[helper] Found class via swayipc: {}", class);
-                            return Some(class.clone());
+                            return Some(class.to_string());
                         }
                     }
-                }
-                // Fallback to window name if class is not available
-                if let Some(name) = &focused.name {
-                    if !name.is_empty() && name != "null" {
-                        eprintln!("[helper] Found name via swayipc: {}", name);
-                        return Some(name.clone());
-                    }
-                }
-                // Try to get instance as another fallback
-                if let Some(window_properties) = &focused.window_properties {
-                    if let Some(instance) = &window_properties.instance {
-                        if !instance.is_empty() && instance != "null" {
-                            eprintln!("[helper] Found instance via swayipc: {}", instance);
-                            return Some(instance.clone());
+                    if let Some(title) = json["title"].as_str() {
+                        if !title.is_empty() && title != "null" {
+                            return Some(title.to_string());
                         }
                     }
                 }
             }
+            Err(_) => {}
         }
+        
+        // If we can't get window info or no valid window, return Desktop
+        Some("Desktop".to_string())
     }
     
-    eprintln!("[helper] No Sway window found, returning Desktop");
-    Some("Desktop".to_string())
+    fn run_event_monitor(tx: mpsc::Sender<String>) -> Result<(), Box<dyn std::error::Error>> {
+        // Get initial active window
+        if let Some(class) = Self::get_active_window_class() {
+            let _ = tx.send(class);
+        }
+        
+        // Hyprland doesn't have a direct event subscription API in the Rust crate,
+        // so we'll use a more efficient polling approach with shorter intervals
+        // and monitor for changes
+        let mut last_class = String::new();
+        
+        loop {
+            if let Some(class) = Self::get_active_window_class() {
+                if class != last_class {
+                    let _ = tx.send(class.clone());
+                    last_class = class;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100)); // Much shorter than the old 500ms
+        }
+    }
 }
 
-fn get_hyprland_active_window_class() -> Option<String> {
-    // Use hyprctl activewindow with JSON output and jq
-    // Environment variables should be passed from the main process
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg("hyprctl activewindow -j | jq -r '.class // .title // empty'")
-        .output();
-    
-    match output {
-        Ok(output) => {
-            let output_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            eprintln!("[helper] Hyprland JSON output: '{}'", output_str);
-            
-            // If we got a valid class/title, return it
-            if !output_str.is_empty() && output_str != "null" {
-                eprintln!("[helper] Returning class: {}", output_str);
-                return Some(output_str);
-            }
-            
-            // Empty string means no active window, return Desktop
-            if output_str.is_empty() {
-                eprintln!("[helper] Empty output, returning Desktop");
-                return Some("Desktop".to_string());
-            }
-        }
-        Err(e) => {
-            eprintln!("[helper] jq command failed: {}", e);
-            // If jq command failed, fall back to text parsing
-        }
-    }
-    
-    // Fallback: parse text output
-    let output = Command::new("hyprctl")
-        .arg("activewindow")
-        .output()
-        .ok()?;
-    
-    let output_str = String::from_utf8_lossy(&output.stdout);
-    eprintln!("[helper] Hyprland text output: '{}'", output_str);
-    
-    // Check if there's no active window
-    if output_str.trim().is_empty() || output_str.contains("Invalid") {
-        eprintln!("[helper] No active window or invalid output, returning Desktop");
-        return Some("Desktop".to_string());
-    }
-    
-    // Parse class from text output
-    for line in output_str.lines() {
-        if line.trim().starts_with("class:") {
-            let class_trimmed = line.split("class:").nth(1)?.trim();
-            if !class_trimmed.is_empty() && class_trimmed != "null" {
-                eprintln!("[helper] Found class in text output: {}", class_trimmed);
-                return Some(class_trimmed.to_string());
-            }
-        }
-    }
-    
-    // Parse title as fallback
-    for line in output_str.lines() {
-        if line.trim().starts_with("title:") {
-            let title_trimmed = line.split("title:").nth(1)?.trim();
-            if !title_trimmed.is_empty() && title_trimmed != "null" {
-                eprintln!("[helper] Found title in text output: {}", title_trimmed);
-                return Some(title_trimmed.to_string());
-            }
-        }
-    }
-    
-    // If nothing found, return Desktop
-    eprintln!("[helper] No class or title found, returning Desktop");
-    Some("Desktop".to_string())
-}
 
-fn get_generic_wayland_active_window() -> Option<String> {
-    // Try using wlr-foreign-toplevel-management if available
-    // This is a generic approach that might work with various Wayland compositors
+
+
+
+
+
+
+
+
+
+fn run_sway_event_driven() -> Result<(), Box<dyn std::error::Error>> {
+    let socket_path = "/tmp/touchbar.sock";
     
-    // Try to get active window using wlrctl if available
-    let output = Command::new("wlrctl")
-        .arg("toplevel")
-        .arg("list")
-        .output();
+    // Connect to the socket
+    let mut stream = loop {
+        match UnixStream::connect(socket_path) {
+            Ok(stream) => break stream,
+            Err(_) => {
+                thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+        }
+    };
     
-    if let Ok(output) = output {
-        let output_str = String::from_utf8_lossy(&output.stdout);
-        // Parse wlrctl output to find active window
-        for line in output_str.lines() {
-            if line.contains("active") || line.contains("focused") {
-                // Extract app_id or title from the line
-                if let Some(app_id) = line.split_whitespace().next() {
-                    if !app_id.is_empty() && app_id != "null" {
-                        return Some(app_id.to_string());
+    // Create channel for communication between event monitor and main thread
+    let (tx, rx) = mpsc::channel();
+    
+    // Initialize Sway monitor
+    let _monitor = SwayWindowMonitor::new()?;
+    eprintln!("[helper] Sway event-driven monitor initialized");
+    
+    // Spawn event monitor in separate thread
+    let monitor_thread = std::thread::spawn(move || {
+        if let Err(e) = SwayWindowMonitor::run_event_monitor(tx) {
+            eprintln!("[helper] Sway event monitor error: {}", e);
+        }
+    });
+    
+    // Main thread: receive events and send to socket
+    let mut last_class = String::new();
+    
+    loop {
+        match rx.recv() {
+            Ok(class) => {
+                if class != last_class {
+                    eprintln!("[helper] Sway window focus changed from '{}' to '{}'", last_class, class);
+                    if stream.write_all(class.as_bytes()).is_ok() && stream.write_all(b"\n").is_ok() {
+                        last_class = class;
+                    } else {
+                        eprintln!("[helper] Failed to write to socket, breaking");
+                        break;
                     }
                 }
             }
+            Err(e) => {
+                eprintln!("[helper] Error receiving from Sway event monitor: {}", e);
+                break;
+            }
         }
     }
     
-    // Try using wtype to get window info (if available)
-    let output = Command::new("wtype")
-        .arg("-M")
-        .arg("ctrl")
-        .arg("-k")
-        .arg("f1")
-        .output();
-    
-    // This is just a test to see if wtype is available
-    if output.is_ok() {
-        // wtype is available, but we can't easily get window info with it
-        // This is just a placeholder for future implementation
-    }
-    
-    None
+    // Wait for monitor thread to finish
+    let _ = monitor_thread.join();
+    Ok(())
 }
 
-fn detect_and_get_active_window_class() -> Option<String> {
-    // Check for Wayland first
-    if std::env::var("WAYLAND_DISPLAY").is_ok() {
-        eprintln!("[helper] Wayland detected via WAYLAND_DISPLAY");
-        
-        // Check for Sway first (more specific detection)
-        if std::env::var("SWAYSOCK").is_ok() || Command::new("swaymsg").arg("version").output().is_ok() {
-            eprintln!("[helper] Sway detected via SWAYSOCK or swaymsg");
-            if let Some(class) = get_sway_active_window_class() {
-                return Some(class);
+fn run_hyprland_event_driven() -> Result<(), Box<dyn std::error::Error>> {
+    let socket_path = "/tmp/touchbar.sock";
+    
+    // Connect to the socket
+    let mut stream = loop {
+        match UnixStream::connect(socket_path) {
+            Ok(stream) => break stream,
+            Err(_) => {
+                thread::sleep(Duration::from_millis(100));
+                continue;
             }
         }
-        
-        // Check for Hyprland (more specific detection)
-        if std::env::var("HYPRLAND_INSTANCE_SIGNATURE").is_ok() {
-            eprintln!("[helper] Hyprland detected via HYPRLAND_INSTANCE_SIGNATURE");
-            if let Some(class) = get_hyprland_active_window_class() {
-                return Some(class);
+    };
+    
+    // Create channel for communication between event monitor and main thread
+    let (tx, rx) = mpsc::channel();
+    
+    // Initialize Hyprland monitor
+    let _monitor = HyprlandWindowMonitor::new()?;
+    eprintln!("[helper] Hyprland event-driven monitor initialized");
+    
+    // Spawn event monitor in separate thread
+    let monitor_thread = std::thread::spawn(move || {
+        if let Err(e) = HyprlandWindowMonitor::run_event_monitor(tx) {
+            eprintln!("[helper] Hyprland event monitor error: {}", e);
+        }
+    });
+    
+    // Main thread: receive events and send to socket
+    let mut last_class = String::new();
+    
+    loop {
+        match rx.recv() {
+            Ok(class) => {
+                if class != last_class {
+                    eprintln!("[helper] Hyprland window focus changed from '{}' to '{}'", last_class, class);
+                    if stream.write_all(class.as_bytes()).is_ok() && stream.write_all(b"\n").is_ok() {
+                        last_class = class;
+                    } else {
+                        eprintln!("[helper] Failed to write to socket, breaking");
+                        break;
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("[helper] Error receiving from Hyprland event monitor: {}", e);
+                break;
             }
         }
-        
-        // Fallback: try hyprctl if available (but be more careful)
-        if Command::new("hyprctl").arg("version").output().is_ok() {
-            eprintln!("[helper] Hyprland detected via hyprctl");
-            if let Some(class) = get_hyprland_active_window_class() {
-                return Some(class);
-            }
-        }
-        
-        // Try generic Wayland detection
-        if let Some(class) = get_generic_wayland_active_window() {
-            return Some(class);
-        }
-        
-        eprintln!("[helper] No Wayland compositor detected or no focused window");
-        return Some("Desktop".to_string());
     }
     
-    // Check for X11
-    if std::env::var("DISPLAY").is_ok() {
-        eprintln!("[helper] X11 detected via DISPLAY");
-        if let Some(class) = get_active_window_class() {
-            return Some(class);
-        } else {
-            eprintln!("[helper] xprop: Could not get active window class");
+    // Wait for monitor thread to finish
+    let _ = monitor_thread.join();
+    Ok(())
+}
+
+fn run_x11_event_driven() -> Result<(), Box<dyn std::error::Error>> {
+    let socket_path = "/tmp/touchbar.sock";
+    
+    // Connect to the socket
+    let mut stream = loop {
+        match UnixStream::connect(socket_path) {
+            Ok(stream) => break stream,
+            Err(_) => {
+                thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+        }
+    };
+    
+    // Initialize X11 monitor
+    let mut monitor = X11WindowMonitor::new()?;
+    eprintln!("[helper] X11 event-driven monitor initialized");
+    
+    // Setup event listening
+    monitor.setup_event_listening()?;
+    eprintln!("[helper] X11 event listening setup complete");
+    
+    // Get initial active window class
+    let mut last_class = monitor.get_active_window_class().unwrap_or_else(|| "Desktop".to_string());
+    eprintln!("[helper] Initial active window class: {}", last_class);
+    
+    // Send initial class
+    if stream.write_all(last_class.as_bytes()).is_ok() && stream.write_all(b"\n").is_ok() {
+        eprintln!("[helper] Sent initial window class: {}", last_class);
+    }
+    
+    // Event loop
+    loop {
+        match monitor.wait_for_focus_change() {
+            Ok(Some(new_class)) => {
+                if new_class != last_class {
+                    eprintln!("[helper] Window focus changed from '{}' to '{}'", last_class, new_class);
+                    if stream.write_all(new_class.as_bytes()).is_ok() && stream.write_all(b"\n").is_ok() {
+                        last_class = new_class;
+                    } else {
+                        eprintln!("[helper] Failed to write to socket, breaking");
+                        break;
+                    }
+                }
+            }
+            Ok(None) => {
+                // No focus change, continue waiting
+            }
+            Err(e) => {
+                eprintln!("[helper] Error waiting for X11 events: {}", e);
+                break;
+            }
         }
     }
     
-    eprintln!("[helper] No supported compositor detected (not X11, Sway, Hyprland, or generic Wayland)");
-    None
+    Ok(())
 }
 
 fn main() -> std::io::Result<()> {
-    let socket_path = "/tmp/touchbar.sock";
-    
     // Debug environment variables
     eprintln!("[helper] Environment variables:");
     eprintln!("[helper] DISPLAY={:?}", std::env::var("DISPLAY"));
@@ -287,31 +503,57 @@ fn main() -> std::io::Result<()> {
         eprintln!("[helper] DBUS_SESSION_BUS_ADDRESS is not set");
     }
     
-    let mut stream = loop {
-        match UnixStream::connect(socket_path) {
-            Ok(stream) => break stream,
-            Err(_) => {
-                thread::sleep(Duration::from_millis(100));
-                continue;
+    // Check for Wayland first (prioritize over X11 when both are present)
+    if std::env::var("WAYLAND_DISPLAY").is_ok() {
+        eprintln!("[helper] Wayland detected, checking for specific compositor");
+        
+        // Check for Hyprland first (more specific detection)
+        if std::env::var("HYPRLAND_INSTANCE_SIGNATURE").is_ok() {
+            eprintln!("[helper] Hyprland detected, using event-driven approach");
+            if let Err(e) = run_hyprland_event_driven() {
+                eprintln!("[helper] Hyprland event-driven approach failed: {}", e);
+                return Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
             }
+            return Ok(());
         }
-    };
-    let mut last_class = String::new();
-    loop {
-        if let Some(class) = detect_and_get_active_window_class() {
-            if class != last_class {
-                if stream.write_all(class.as_bytes()).is_ok() {
-                    if stream.write_all(b"\n").is_ok() {
-                        last_class = class;
-                    } else {
-                        break;
-                    }
-                } else {
-                    break;
-                }
+        
+        // Check for Sway (more specific detection)
+        if std::env::var("SWAYSOCK").is_ok() {
+            eprintln!("[helper] Sway detected, using event-driven approach");
+            if let Err(e) = run_sway_event_driven() {
+                eprintln!("[helper] Sway event-driven approach failed: {}", e);
+                return Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
             }
+            return Ok(());
         }
-        thread::sleep(Duration::from_millis(500));
+        
+        // Fallback: try hyprctl if available (but be more careful)
+        if std::process::Command::new("hyprctl").arg("version").output().is_ok() {
+            eprintln!("[helper] Hyprland detected via hyprctl, using event-driven approach");
+            if let Err(e) = run_hyprland_event_driven() {
+                eprintln!("[helper] Hyprland event-driven approach failed: {}", e);
+                return Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
+            }
+            return Ok(());
+        }
+        
+        eprintln!("[helper] Generic Wayland detected, but no event-driven support available");
+        return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "No event-driven support for generic Wayland"));
     }
-    Ok(())
-} 
+    
+    // Check for X11 (only if DISPLAY is set but no WAYLAND_DISPLAY)
+    if std::env::var("DISPLAY").is_ok() && std::env::var("WAYLAND_DISPLAY").is_err() {
+        eprintln!("[helper] X11 detected (no Wayland), using event-driven approach");
+        if let Err(e) = run_x11_event_driven() {
+            eprintln!("[helper] X11 event-driven approach failed: {}", e);
+            return Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
+        }
+        return Ok(());
+    }
+    
+    // No supported compositor detected
+    eprintln!("[helper] No supported compositor detected (not X11, Sway, Hyprland, or generic Wayland)");
+    return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "No supported compositor detected"));
+}
+
+ 

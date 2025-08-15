@@ -206,12 +206,10 @@ pub fn manage_image_cache() {
 /// Display cache performance statistics
 pub fn display_cache_stats() {
     let (entry_count, memory_usage) = get_cache_stats();
-    println!("[CacheStats] Cache: {} entries, {:.2} KB memory usage", entry_count, memory_usage as f64 / 1024.0);
 }
 
 /// Test cache performance
 pub fn test_cache_performance() {
-    println!("[CacheTest] Testing cache performance...");
     
     // Clear cache first
     clear_cache();
@@ -233,13 +231,9 @@ pub fn test_cache_performance() {
     let _result2 = get_cached_image(test_key);
     let hit_time = start.elapsed();
     
-    println!("[CacheTest] Cache miss time: {:?}", miss_time);
-    println!("[CacheTest] Cache hit time: {:?}", hit_time);
-    println!("[CacheTest] Performance improvement: {:.1}x faster", miss_time.as_nanos() as f64 / hit_time.as_nanos() as f64);
     
     // Show cache stats
     let (entry_count, memory_usage) = get_cache_stats();
-    println!("[CacheTest] Final cache state: {} entries, {:.2} KB", entry_count, memory_usage as f64 / 1024.0);
 }
 
 /// Load browser-specific icons from the custom directory structure
