@@ -322,7 +322,7 @@ impl HelperManager {
            .arg("env");
         
         // Pass relevant environment variables if found
-        let relevant_keys = ["DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XAUTHORITY", "SWAYSOCK", "XDG_RUNTIME_DIR", "HOME", "HYPRLAND_INSTANCE_SIGNATURE"];
+        let relevant_keys = ["DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XAUTHORITY", "SWAYSOCK", "XDG_RUNTIME_DIR", "HOME", "HYPRLAND_INSTANCE_SIGNATURE", "XDG_CURRENT_DESKTOP", "GNOME_DESKTOP_SESSION_ID"];
         if DEBUG_LOGGING {
             println!("[HelperManager::start] Checking for relevant environment variables:");
             for key in &relevant_keys {
@@ -384,17 +384,17 @@ impl HelperManager {
     }
 
     pub fn check_session_ready(&mut self) -> bool {
-        // Simple approach: wait 10 seconds after login, then start helper
+        // Simple approach: wait 20 seconds after login, then start helper
         if let Some(login_time) = self.login_time {
             let elapsed = login_time.elapsed();
-            if elapsed >= std::time::Duration::from_secs(10) {
+            if elapsed >= std::time::Duration::from_secs(20) {
                 if DEBUG_LOGGING {
-                    println!("[HelperManager::check_session_ready] 10 seconds passed since login, session should be ready");
+                    println!("[HelperManager::check_session_ready] 20 seconds passed since login, session should be ready");
                 }
                 return true;
             } else {
                 if DEBUG_LOGGING {
-                    println!("[HelperManager::check_session_ready] Waiting for session to be ready... {}s remaining", 10 - elapsed.as_secs());
+                    println!("[HelperManager::check_session_ready] Waiting for session to be ready... {}s remaining", 20 - elapsed.as_secs());
                 }
                 return false;
             }

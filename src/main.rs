@@ -1033,11 +1033,11 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                 println!("[main] User logged in: {}", new_state.user);
                                 current_user = Some(new_state.user.clone());
                                 
-                                // Set login time for 10-second delay
+                                // Set login time for 20-second delay
                                 helper_manager.set_login_time();
                                 
                                 // Don't start helper immediately - wait for session to be ready
-                                println!("[main] User logged in, waiting 10 seconds for session to be fully ready before starting helper");
+                                println!("[main] User logged in, waiting 20 seconds for session to be fully ready before starting helper");
                                 
                                 // VLC helper will be started when VLC window gains focus
                                                         } else {

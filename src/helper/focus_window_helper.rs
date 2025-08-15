@@ -8,6 +8,9 @@ use x11rb::protocol::xproto::{self, ConnectionExt, Window};
 use x11rb::rust_connection::RustConnection;
 use std::collections::HashMap;
 use std::sync::mpsc;
+use zbus::{Connection as ZbusConnection, MessageType, MessageStream, MatchRule};
+use zbus::fdo::DBusProxy;
+use futures_lite::stream::StreamExt;
 
 struct X11WindowMonitor {
     conn: RustConnection,
@@ -243,6 +246,179 @@ impl SwayWindowMonitor {
     }
 }
 
+struct GnomeWindowMonitor;
+
+impl GnomeWindowMonitor {
+    fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        Ok(Self)
+    }
+    
+    fn get_initial_focused_class() -> Option<String> {
+        // Get initial focused window class using WindowMonitorPro's FocusClass method
+        let output = std::process::Command::new("gdbus")
+            .arg("call")
+            .arg("--session")
+            .arg("--dest")
+            .arg("org.gnome.Shell")
+            .arg("--object-path")
+            .arg("/org/gnome/Shell/Extensions/WindowMonitorPro")
+            .arg("--method")
+            .arg("org.gnome.Shell.Extensions.WindowMonitorPro.FocusClass")
+            .output();
+        
+        match output {
+            Ok(output) => {
+                if output.status.success() {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    // Parse the output: ('Cursor',) -> Cursor or ('') -> Desktop
+                    if let Some(start) = stdout.find("('") {
+                        if let Some(end) = stdout[start..].find("',") {
+                            let class = &stdout[start + 2..start + end];
+                            if class.is_empty() {
+                                // Empty string means no window focused (desktop)
+                                return Some("Desktop".to_string());
+                            } else if class != "null" {
+                                return Some(class.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            Err(_) => {}
+        }
+        
+        // Fallback to Desktop if we can't get window info
+        Some("Desktop".to_string())
+    }
+    
+    fn extract_window_class_from_signal(signal_body: &str) -> Option<String> {
+        // Parse signal body format: (window_id, window_title, window_class, window_pid)
+        // Example: ('2882485532', 'kitty', 'kitty', '47887')
+        
+        // Find the third parameter (window_class) which is the 3rd quoted string
+        let mut quote_count = 0;
+        let mut start_pos = None;
+        let mut end_pos = None;
+        
+        for (i, ch) in signal_body.chars().enumerate() {
+            if ch == '\'' {
+                quote_count += 1;
+                if quote_count == 5 { // Start of 3rd parameter (window_class)
+                    start_pos = Some(i + 1);
+                } else if quote_count == 6 { // End of 3rd parameter
+                    end_pos = Some(i);
+                    break;
+                }
+            }
+        }
+        
+        if let (Some(start), Some(end)) = (start_pos, end_pos) {
+            if start < end {
+                let window_class = &signal_body[start..end];
+                if window_class.is_empty() {
+                    // Empty window class means desktop
+                    return Some("Desktop".to_string());
+                } else if window_class != "null" {
+                    return Some(window_class.to_string());
+                }
+            }
+        }
+        
+        None
+    }
+    
+    fn run_event_monitor(tx: mpsc::Sender<String>) -> Result<(), Box<dyn std::error::Error>> {
+        // Get initial focused window class
+        if let Some(initial_class) = Self::get_initial_focused_class() {
+            eprintln!("[helper] Initial focused window class: {}", initial_class);
+            let _ = tx.send(initial_class);
+        }
+        
+        // Use D-Bus signal subscription for true event-driven monitoring
+        let rt = tokio::runtime::Runtime::new()?;
+        rt.block_on(async {
+            Self::run_dbus_event_monitor(tx).await
+        })
+    }
+    
+    async fn run_dbus_event_monitor(tx: mpsc::Sender<String>) -> Result<(), Box<dyn std::error::Error>> {
+        let connection = ZbusConnection::session().await?;
+        let mut stream = MessageStream::from(&connection);
+        
+        // Subscribe to GNOME Shell window manager signals
+        let dbus_proxy = DBusProxy::new(&connection).await?;
+        
+        // Subscribe to the WindowMonitorPro extension signals for true event-driven window monitoring
+        let rule = MatchRule::builder()
+            .msg_type(MessageType::Signal)
+            .interface("org.gnome.Shell.Extensions.WindowMonitorPro")?
+            .member("WindowFocusChanged")?
+            .build();
+        dbus_proxy.add_match_rule(rule).await?;
+        
+        eprintln!("[helper] GNOME D-Bus signal subscription added for WindowMonitorPro.WindowFocusChanged");
+        
+        let mut last_class = String::new();
+        
+        // Event loop for D-Bus signals
+        while let Some(msg) = stream.next().await {
+            if let Ok(msg) = msg {
+                // Check if this is the WindowFocusChanged signal from WindowMonitorPro
+                if let Some(interface) = msg.interface() {
+                    let interface_str = interface.as_str();
+                    if interface_str == "org.gnome.Shell.Extensions.WindowMonitorPro" {
+                        // WindowFocusChanged signal received, extract window class directly from signal
+                        eprintln!("[helper] GNOME WindowFocusChanged signal received");
+                        
+                        // WindowFocusChanged signal received - extract window class from signal
+                        eprintln!("[helper] GNOME WindowFocusChanged signal received - extracting window class");
+                        
+                        // Try to parse the signal body to get window class
+                        // Signal format: (window_id, window_title, window_class, window_pid)
+                        eprintln!("[helper] Attempting to parse signal body...");
+                        
+                        // The signal body contains the window information in this format:
+                        // ('window_id', 'window_title', 'window_class', 'window_pid')
+                        // Example: ('2882485533', 'aura@systemos:~', 'Alacritty', '48572')
+                        
+                        // Try to get the signal body as a tuple of strings
+                        if let Ok((_window_id, _window_title, window_class, _window_pid)) = msg.body::<(String, String, String, String)>() {
+                            eprintln!("[helper] Signal body parsed successfully: window_class = {}", window_class);
+                            
+                            // Handle empty window class (desktop)
+                            let display_class = if window_class.is_empty() {
+                                "Desktop".to_string()
+                            } else {
+                                window_class
+                            };
+                            
+                            if display_class != last_class {
+                                eprintln!("[helper] GNOME window focus changed via WindowMonitorPro signal: {}", display_class);
+                                let _ = tx.send(display_class.clone());
+                                last_class = display_class;
+                            }
+                        } else {
+                            eprintln!("[helper] Failed to parse signal body as tuple, trying alternative approach");
+                            // Fallback: try to get as individual parameters
+                            if let Ok(window_class) = msg.body::<String>() {
+                                eprintln!("[helper] Got window class as single string: {}", window_class);
+                                if window_class != last_class {
+                                    let _ = tx.send(window_class.clone());
+                                    last_class = window_class;
+                                }
+                            } else {
+                                eprintln!("[helper] All parsing methods failed, signal body format not supported");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        Ok(())
+    }
+}
+
 struct HyprlandWindowMonitor;
 
 impl HyprlandWindowMonitor {
@@ -308,16 +484,6 @@ impl HyprlandWindowMonitor {
     }
 }
 
-
-
-
-
-
-
-
-
-
-
 fn run_sway_event_driven() -> Result<(), Box<dyn std::error::Error>> {
     let socket_path = "/tmp/touchbar.sock";
     
@@ -364,6 +530,62 @@ fn run_sway_event_driven() -> Result<(), Box<dyn std::error::Error>> {
             }
             Err(e) => {
                 eprintln!("[helper] Error receiving from Sway event monitor: {}", e);
+                break;
+            }
+        }
+    }
+    
+    // Wait for monitor thread to finish
+    let _ = monitor_thread.join();
+    Ok(())
+}
+
+fn run_gnome_event_driven() -> Result<(), Box<dyn std::error::Error>> {
+    let socket_path = "/tmp/touchbar.sock";
+    
+    // Connect to the socket
+    let mut stream = loop {
+        match UnixStream::connect(socket_path) {
+            Ok(stream) => break stream,
+            Err(_) => {
+                thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+        }
+    };
+    
+    // Create channel for communication between event monitor and main thread
+    let (tx, rx) = mpsc::channel();
+    
+    // Initialize GNOME monitor
+    let _monitor = GnomeWindowMonitor::new()?;
+    eprintln!("[helper] GNOME event-driven monitor initialized");
+    
+    // Spawn event monitor in separate thread
+    let monitor_thread = std::thread::spawn(move || {
+        if let Err(e) = GnomeWindowMonitor::run_event_monitor(tx) {
+            eprintln!("[helper] GNOME event monitor error: {}", e);
+        }
+    });
+    
+    // Main thread: receive events and send to socket
+    let mut last_class = String::new();
+    
+    loop {
+        match rx.recv() {
+            Ok(class) => {
+                if class != last_class {
+                    eprintln!("[helper] GNOME window focus changed from '{}' to '{}'", last_class, class);
+                    if stream.write_all(class.as_bytes()).is_ok() && stream.write_all(b"\n").is_ok() {
+                        last_class = class;
+                    } else {
+                        eprintln!("[helper] Failed to write to socket, breaking");
+                        break;
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("[helper] Error receiving from GNOME event monitor: {}", e);
                 break;
             }
         }
@@ -495,6 +717,8 @@ fn main() -> std::io::Result<()> {
     eprintln!("[helper] WAYLAND_DISPLAY={:?}", std::env::var("WAYLAND_DISPLAY"));
     eprintln!("[helper] SWAYSOCK={:?}", std::env::var("SWAYSOCK"));
     eprintln!("[helper] HYPRLAND_INSTANCE_SIGNATURE={:?}", std::env::var("HYPRLAND_INSTANCE_SIGNATURE"));
+    eprintln!("[helper] GNOME_DESKTOP_SESSION_ID={:?}", std::env::var("GNOME_DESKTOP_SESSION_ID"));
+    eprintln!("[helper] XDG_CURRENT_DESKTOP={:?}", std::env::var("XDG_CURRENT_DESKTOP"));
     eprintln!("[helper] XDG_RUNTIME_DIR={:?}", std::env::var("XDG_RUNTIME_DIR"));
     
     if let Ok(addr) = std::env::var("DBUS_SESSION_BUS_ADDRESS") {
@@ -527,11 +751,12 @@ fn main() -> std::io::Result<()> {
             return Ok(());
         }
         
-        // Fallback: try hyprctl if available (but be more careful)
-        if std::process::Command::new("hyprctl").arg("version").output().is_ok() {
-            eprintln!("[helper] Hyprland detected via hyprctl, using event-driven approach");
-            if let Err(e) = run_hyprland_event_driven() {
-                eprintln!("[helper] Hyprland event-driven approach failed: {}", e);
+        // Check for GNOME Wayland
+        if std::env::var("GNOME_DESKTOP_SESSION_ID").is_ok() || 
+           std::env::var("XDG_CURRENT_DESKTOP").map_or(false, |desktop| desktop.to_lowercase().contains("gnome")) {
+            eprintln!("[helper] GNOME Wayland detected, using event-driven approach with WindowMonitorPro extension");
+            if let Err(e) = run_gnome_event_driven() {
+                eprintln!("[helper] GNOME event-driven approach failed: {}", e);
                 return Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
             }
             return Ok(());
