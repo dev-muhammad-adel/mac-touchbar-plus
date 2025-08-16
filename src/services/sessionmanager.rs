@@ -5,24 +5,24 @@ use zbus::zvariant::OwnedObjectPath;
 use zbus::fdo::DBusProxy;
 use futures_lite::stream::StreamExt;
 use tokio::sync::watch;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
 pub struct SessionState {
-    pub session_type: String,
-    pub is_logged_in: bool,
-    pub user: String,
+    pub session_type: String,  // "x11", "wayland", or empty string
+    pub is_logged_in: bool,    // true only for active X11/Wayland sessions
+    pub user: String,          // username or empty string
+    pub leader: Option<u32>,   // Session leader PID, if available
 }
 
+// Configuration for session monitoring
+const DEBUG_LOGGING: bool = false;
+const SESSION_CHECK_THROTTLE_MS: u64 = 1000; // Throttle session checks to avoid spam
+
 async fn check_session_state(connection: &Connection, tx: &watch::Sender<SessionState>) -> zbus::Result<()> {
-    println!("[session_monitor] check_session_state: Starting session state check...");
-    
-    // Debug: Show relevant environment variables
-    println!("[session_monitor] Environment check:");
-    println!("  XDG_CURRENT_DESKTOP: {:?}", std::env::var("XDG_CURRENT_DESKTOP"));
-    println!("  WAYLAND_DISPLAY: {:?}", std::env::var("WAYLAND_DISPLAY"));
-    println!("  DISPLAY: {:?}", std::env::var("DISPLAY"));
-    println!("  USER: {:?}", std::env::var("USER"));
-    println!("  XDG_SESSION_TYPE: {:?}", std::env::var("XDG_SESSION_TYPE"));
+    if DEBUG_LOGGING {
+        println!("[session_monitor] check_session_state: Starting session state check...");
+    }
     
     let manager_proxy: zbus::Proxy<'_> = zbus::ProxyBuilder::new_bare(connection)
         .destination("org.freedesktop.login1")?
@@ -36,10 +36,14 @@ async fn check_session_state(connection: &Connection, tx: &watch::Sender<Session
         .await?;
     let sessions: Vec<(String, u32, String, String, OwnedObjectPath)> = reply.body()?;
 
-    let mut found_graphical_user: Option<SessionState> = None;
-    let mut found_greeter: bool = false;
+    let mut found_graphical_session: Option<(String, String, Option<u32>)> = None; // (session_type, user, leader_pid)
 
     for (_session_id, _uid, username, seat, path) in &sessions {
+        // Only consider sessions with a seat
+        if seat.is_empty() {
+            continue;
+        }
+
         let session_proxy: zbus::Proxy<'_> = zbus::ProxyBuilder::new_bare(connection)
             .destination("org.freedesktop.login1")?
             .path(path.as_str())?
@@ -51,155 +55,145 @@ async fn check_session_state(connection: &Connection, tx: &watch::Sender<Session
         let state: String = session_proxy.get_property("State").await.unwrap_or_else(|_| "unknown".into());
         let session_type: String = session_proxy.get_property("Type").await.unwrap_or_else(|_| "unknown".into());
         let user: String = session_proxy.get_property("User").await.unwrap_or_else(|_| username.clone());
+        let leader: Option<u32> = session_proxy.get_property("Leader").await.ok().and_then(|l: zbus::zvariant::Value| {
+            match l {
+                zbus::zvariant::Value::U32(pid) => Some(pid),
+                zbus::zvariant::Value::U64(pid) => Some(pid as u32),
+                _ => None,
+            }
+        });
 
-        println!("[session_monitor] Session: class={}, state={}, type={}, user={}, seat={}", 
-                class, state, session_type, user, seat);
-
-        // Only consider sessions with a seat
-        if seat.is_empty() {
-            continue;
+        if DEBUG_LOGGING {
+            println!("[session_monitor] Session: class={}, state={}, type={}, user={}, seat={}, leader={:?}", 
+                    class, state, session_type, user, seat, leader);
         }
 
-        // Check for graphical user session - be more flexible for KDE
-        let is_graphical_session = class == "user" && 
-            (state == "active" || state == "online") && 
-            (session_type == "x11" || session_type == "wayland" || 
-             session_type == "tty" || session_type == "unspecified");
-        
-        if is_graphical_session {
-            found_graphical_user = Some(SessionState {
-                session_type: "desktop-logged".into(),
-                is_logged_in: true,
-                user: user.clone(),
-            });
-            println!("[session_monitor] Found graphical user session: user={}, type={}", user, session_type);
-            break;
-        }
-
-        // Special handling for TTY-started KDE sessions
-        if class == "user" && (state == "active" || state == "online") && session_type == "tty" {
-            // Check if this is likely a KDE session started from TTY
-            if let Ok(xdg_desktop) = std::env::var("XDG_CURRENT_DESKTOP") {
-                if xdg_desktop == "KDE" {
-                    found_graphical_user = Some(SessionState {
-                        session_type: "desktop-logged".into(),
-                        is_logged_in: true,
-                        user: user.clone(),
-                    });
-                    println!("[session_monitor] Found TTY-started KDE session: user={}", user);
+        // Check for active graphical user session (X11 or Wayland)
+        if class == "user" && (state == "active" || state == "online") {
+            match session_type.as_str() {
+                "x11" | "wayland" => {
+                    found_graphical_session = Some((session_type.clone(), user.clone(), leader));
+                    if DEBUG_LOGGING {
+                        println!("[session_monitor] Found active graphical session: type={}, user={}, leader={:?}", session_type, user, leader);
+                    }
                     break;
                 }
+                _ => {
+                    // Any other session type (tty, unspecified, etc.) is not considered graphical
+                    if DEBUG_LOGGING {
+                        println!("[session_monitor] Session not graphical: class={}, type={}, user={}", class, session_type, user);
+                    }
+                }
+            }
+        } else {
+            // Not a user session, or not active/online, or no seat - not logged into graphical session
+            if DEBUG_LOGGING {
+                println!("[session_monitor] Session not logged into graphical: class={}, state={}, type={}, user={}, seat={}", 
+                        class, state, session_type, user, seat);
             }
         }
 
-        // Check for greeter (login screen) - also be more flexible
-        let is_greeter_session = class == "greeter" && 
-            (session_type == "x11" || session_type == "wayland" || 
-             session_type == "tty" || session_type == "unspecified");
-        
-        if is_greeter_session {
-            found_greeter = true;
-            println!("[session_monitor] Found greeter session: type={}", session_type);
-        }
+        // Note: We don't need to track greeter separately anymore since any non-graphical session
+        // (including greeter) will result in is_logged_in: false
     }
 
-    // If no session found through login1, try environment-based detection for KDE
-    if found_graphical_user.is_none() && found_greeter == false {
-        println!("[session_monitor] No session found via login1, trying environment-based detection");
+    // Fallback: Environment-based detection for cases where login1 doesn't report correctly
+    if found_graphical_session.is_none() {
+        if DEBUG_LOGGING {
+            println!("[session_monitor] No session found via login1, trying environment-based detection");
+        }
         
-        // Check if we're in a KDE session
-        if let Ok(xdg_desktop) = std::env::var("XDG_CURRENT_DESKTOP") {
-            if xdg_desktop == "KDE" {
-                // Check if we have a user session
+        // Check for X11 display
+        if let Ok(display) = std::env::var("DISPLAY") {
+            if !display.is_empty() {
                 if let Ok(user) = std::env::var("USER") {
                     if !user.is_empty() && user != "root" {
-                        found_graphical_user = Some(SessionState {
-                            session_type: "desktop-logged".into(),
-                            is_logged_in: true,
-                            user: user.clone(),
-                        });
-                        println!("[session_monitor] Found KDE session via environment: user={}", user);
+                        found_graphical_session = Some(("x11".to_string(), user.clone(), None));
+                        if DEBUG_LOGGING {
+                            println!("[session_monitor] Found X11 session via environment: user={}", user);
+                        }
+                    }
+                }
+            }
+        }
+        // Check for Wayland display
+        else if let Ok(wayland_display) = std::env::var("WAYLAND_DISPLAY") {
+            if !wayland_display.is_empty() {
+                if let Ok(user) = std::env::var("USER") {
+                    if !user.is_empty() && user != "root" {
+                        found_graphical_session = Some(("wayland".to_string(), user.clone(), None));
+                        if DEBUG_LOGGING {
+                            println!("[session_monitor] Found Wayland session via environment: user={}", user);
+                        }
                     }
                 }
             }
         }
     }
 
-    let new_state = if let Some(user_session) = found_graphical_user {
-        user_session
-    } else if found_greeter {
+    let new_state = if let Some((session_type, user, leader_pid)) = found_graphical_session {
         SessionState {
-            session_type: "login-screen".into(),
-            is_logged_in: false,
-            user: "".into(),
+            session_type: session_type,
+            is_logged_in: true,  // Active graphical session
+            user: user,
+            leader: leader_pid,
         }
     } else {
         SessionState {
-            session_type: "unknown".into(),
-            is_logged_in: false,
-            user: "".into(),
+            session_type: "".to_string(),  // No graphical session
+            is_logged_in: false,           // Not logged in to graphical session
+            user: "".to_string(),
+            leader: None,
         }
     };
 
-    println!("[session_monitor] check_session_state: Sending state: {:?}", new_state);
-    let result = tx.send(new_state);
-    match &result {
-        Ok(_) => println!("[session_monitor] check_session_state: Successfully sent session state"),
-        Err(e) => println!("[session_monitor] check_session_state: Failed to send session state: {:?}", e),
+    if DEBUG_LOGGING {
+        println!("[session_monitor] check_session_state: Sending state: {:?}", new_state);
     }
-    result.map_err(|_| zbus::Error::Failure("Send failed".into()))
+    
+    tx.send(new_state).map_err(|_| zbus::Error::Failure("Send failed".into()))
 }
 
 pub async fn monitor_sessions(tx: watch::Sender<SessionState>) -> zbus::Result<()> {
     let connection = Connection::system().await?;
     let mut stream = MessageStream::from(&connection);
+    let mut last_check = Instant::now();
 
     println!("[session_monitor] Starting session monitor...");
 
-    // Subscribe to D-Bus signals we want to monitor
-    println!("[session_monitor] Subscribing to D-Bus signals...");
+    // Subscribe to D-Bus signals
     let dbus_proxy = DBusProxy::new(&connection).await?;
     
-    // Subscribe to login1 manager signals
-    let rule = MatchRule::builder()
-        .msg_type(MessageType::Signal)
-        .interface("org.freedesktop.login1.Manager")?
-        .build();
-    dbus_proxy.add_match_rule(rule).await?;
-    
-    // Subscribe to properties changes from login1 objects
-    let rule = MatchRule::builder()
-        .msg_type(MessageType::Signal)
-        .interface("org.freedesktop.DBus.Properties")?
-        .path_namespace("/org/freedesktop/login1")?
-        .build();
-    dbus_proxy.add_match_rule(rule).await?;
-    
-    // Subscribe to individual session signals
-    let rule = MatchRule::builder()
-        .msg_type(MessageType::Signal)
-        .interface("org.freedesktop.login1.Session")?
-        .build();
-    dbus_proxy.add_match_rule(rule).await?;
-    
-    // Subscribe to user signals
-    let rule = MatchRule::builder()
-        .msg_type(MessageType::Signal)
-        .interface("org.freedesktop.login1.User")?
-        .build();
-    dbus_proxy.add_match_rule(rule).await?;
-    
-    // Subscribe to seat signals
-    let rule = MatchRule::builder()
-        .msg_type(MessageType::Signal)
-        .interface("org.freedesktop.login1.Seat")?
-        .build();
-    dbus_proxy.add_match_rule(rule).await?;
-    
-    println!("[session_monitor] Signal subscriptions added successfully");
+    // Subscribe to all relevant login1 signals
+    let rules = vec![
+        MatchRule::builder()
+            .msg_type(MessageType::Signal)
+            .interface("org.freedesktop.login1.Manager")?
+            .build(),
+        MatchRule::builder()
+            .msg_type(MessageType::Signal)
+            .interface("org.freedesktop.DBus.Properties")?
+            .path_namespace("/org/freedesktop/login1")?
+            .build(),
+        MatchRule::builder()
+            .msg_type(MessageType::Signal)
+            .interface("org.freedesktop.login1.Session")?
+            .build(),
+        MatchRule::builder()
+            .msg_type(MessageType::Signal)
+            .interface("org.freedesktop.login1.User")?
+            .build(),
+        MatchRule::builder()
+            .msg_type(MessageType::Signal)
+            .interface("org.freedesktop.login1.Seat")?
+            .build(),
+    ];
+
+    for rule in rules {
+        dbus_proxy.add_match_rule(rule).await?;
+    }
 
     // Send initial session state
-    println!("[session_monitor] Checking initial session state...");
     check_session_state(&connection, &tx).await?;
 
     println!("🟢 Monitoring session changes...");
@@ -210,7 +204,6 @@ pub async fn monitor_sessions(tx: watch::Sender<SessionState>) -> zbus::Result<(
     let tx_clone = tx.clone();
     tokio::spawn(async move {
         use tokio::signal::unix::{signal, SignalKind};
-        println!("[session_monitor] Starting signal handler...");
         let mut sig = signal(SignalKind::user_defined1()).unwrap();
         while sig.recv().await.is_some() {
             println!("[session_monitor] Manual trigger via SIGUSR1");
@@ -220,7 +213,7 @@ pub async fn monitor_sessions(tx: watch::Sender<SessionState>) -> zbus::Result<(
         }
     });
 
-    println!("[session_monitor] Starting main event loop...");
+    // Main event loop with throttling
     while let Some(msg) = stream.next().await {
         let msg = msg?;
         let header = msg.header()?;
@@ -230,59 +223,27 @@ pub async fn monitor_sessions(tx: watch::Sender<SessionState>) -> zbus::Result<(
             continue;
         }
         
-        // Log all event details for debugging
-        let interface = match header.interface() {
-            Ok(Some(i)) => Some(i.as_str()),
-            _ => None,
-        };
-        let member = match header.member() {
-            Ok(Some(m)) => Some(m.as_str()),
-            _ => None,
-        };
-        let path = match header.path() {
-            Ok(Some(p)) => Some(p.as_str()),
-            _ => None,
-        };
-        
-        println!("[session_monitor] Signal received:");
-        println!("  Interface: {:?}", interface);
-        println!("  Member: {:?}", member);
-        println!("  Path: {:?}", path);
+        // Throttle session checks to avoid spam
+        let now = Instant::now();
+        if now.duration_since(last_check) < Duration::from_millis(SESSION_CHECK_THROTTLE_MS) {
+            continue;
+        }
         
         if let Some(member) = header.member()? {
             let member_str = member.as_str();
-            println!("[session_monitor]############################### start ############################################################################################################");
-            println!("[session_monitor] Processing signal: {}", member_str);
             
-            if member_str == "SessionNew" {
-                println!("[session_monitor] SessionNew signal detected");
+            // Only check session state for relevant signals
+            let should_check = matches!(member_str, 
+                "SessionNew" | "SessionRemoved" | "UserNew" | "UserRemoved" | 
+                "SeatNew" | "SeatRemoved" | "PropertiesChanged"
+            ) || member_str.contains("Session") || member_str.contains("User") || member_str.contains("Login");
+            
+            if should_check {
+                if DEBUG_LOGGING {
+                    println!("[session_monitor] Processing signal: {}", member_str);
+                }
                 check_session_state(&connection, &tx).await?;
-            } else if member_str == "SessionRemoved" {
-                println!("[session_monitor] SessionRemoved signal detected");
-                check_session_state(&connection, &tx).await?;
-            } else if member_str == "UserNew" {
-                println!("[session_monitor] UserNew signal detected");
-                check_session_state(&connection, &tx).await?;
-            } else if member_str == "UserRemoved" {
-                println!("[session_monitor] UserRemoved signal detected");
-                check_session_state(&connection, &tx).await?;
-            } else if member_str == "SeatNew" {
-                println!("[session_monitor] SeatNew signal detected");
-                check_session_state(&connection, &tx).await?;
-            } else if member_str == "SeatRemoved" {
-                println!("[session_monitor] SeatRemoved signal detected");
-                check_session_state(&connection, &tx).await?;
-            } else if member_str == "PropertiesChanged" {
-                println!("[session_monitor] PropertiesChanged signal detected");
-                check_session_state(&connection, &tx).await?;
-            } else if member_str.contains("Session") || member_str.contains("User") || member_str.contains("Login") {
-                // Catch any session-related signals we might have missed
-                println!("[session_monitor] Session-related signal detected: {}", member_str);
-                check_session_state(&connection, &tx).await?;
-            } else {
-                // Log any other signals to see what's happening
-                println!("[session_monitor] Other signal detected: {}", member_str);
-                // Don't check session state for every signal to avoid spam
+                last_check = now;
             }
         }
     }

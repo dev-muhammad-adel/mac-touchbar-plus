@@ -349,7 +349,7 @@ impl FunctionLayer {
                 
                 // Use new session state
                 match session_state {
-                    Some(state) if state.session_type == "desktop-logged" => {
+                    Some(state) if state.is_logged_in => {
                         // User is logged in - show normal modules
                         let left_edge = pixel_shift_x + (pixel_shift_width / 2) as f64;
                         if let Some(window_class) = current_window_class {
@@ -384,7 +384,8 @@ impl FunctionLayer {
                             }
                         }
                     }
-                    Some(state) if state.session_type == "login-screen" => {
+                    Some(state) if !state.is_logged_in && !state.session_type.is_empty() => {
+                        // Login screen or greeter
                         let left_edge = pixel_shift_x + (pixel_shift_width / 2) as f64;
 
                     draw_login_screen(
@@ -846,6 +847,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
         session_type: "none".to_string(),
         is_logged_in: false,
         user: "".to_string(),
+        leader: None,
     });
     tokio::spawn(monitor_sessions(session_tx));
 
@@ -1059,19 +1061,16 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                 // Reset session ready state for next login
                                 // Reset login time is handled in stop() method
                             }
-                            // Step 2: Trigger animation when login screen or desktop-logged becomes visible
-                            if (new_state.session_type == "login-screen" || new_state.session_type == "desktop-logged") && !animation.is_animating_in() {
+                            // Step 2: Trigger animation when user logs in or out
+                            if new_state.is_logged_in && !animation.is_animating_in() {
                                 animation.animate_in();
                                 needs_complete_redraw = true;
-                            } else if new_state.session_type != "login-screen" && new_state.session_type != "desktop-logged" && !animation.is_animating_out() && current_session.as_ref().map(|s| {
-    let t = s.session_type.as_str();
-    t == "login-screen" || t == "desktop-logged"
-}) == Some(true) {
+                            } else if !new_state.is_logged_in && !animation.is_animating_out() && current_session.as_ref().map(|s| s.is_logged_in) == Some(true) {
                                 animation.animate_out();
                                 needs_complete_redraw = true;
                             }
                             // Store last login session state for fade-out
-                            if new_state.session_type == "login-screen" {
+                            if !new_state.is_logged_in && !new_state.session_type.is_empty() {
                                 last_login_session_state = Some(new_state.clone());
                             }
                             current_session = Some(new_state);

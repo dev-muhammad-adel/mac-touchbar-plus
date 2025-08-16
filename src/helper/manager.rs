@@ -7,6 +7,174 @@ use nix::unistd::{chown, User};
 
 use crate::DEBUG_LOGGING;
 
+// Temporarily enable debug logging for testing
+const DEBUG_LOGGING_MANAGER: bool = true;
+
+fn get_env_from_session(user: &str) -> HashMap<String, String> {
+    let mut env = HashMap::new();
+    
+    if DEBUG_LOGGING {
+        println!("[get_env_from_session] Getting environment for user: {}", user);
+    }
+    
+    // Step 1: Get the active graphical session for the user
+    let session_output = match Command::new("loginctl")
+        .arg("list-sessions")
+        .arg("--no-legend")
+        .output() {
+        Ok(output) => output,
+        Err(e) => {
+            println!("[get_env_from_session] Failed to get sessions: {}", e);
+            return env;
+        }
+    };
+    
+    let sessions = String::from_utf8_lossy(&session_output.stdout);
+    let mut session_id = None;
+    
+    // Find the user's session
+    for line in sessions.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 3 && parts[2] == user {
+            session_id = Some(parts[0]);
+            if DEBUG_LOGGING {
+                println!("[get_env_from_session] Found session {} for user {}", parts[0], user);
+            }
+            break;
+        }
+    }
+    
+    let session_id = match session_id {
+        Some(id) => id,
+        None => {
+            println!("[get_env_from_session] No session found for user {}", user);
+            return env;
+        }
+    };
+    
+    // Step 2: Get the session leader PID (display manager)
+    let leader_output = match Command::new("loginctl")
+        .arg("show-session")
+        .arg(session_id)
+        .arg("-p")
+        .arg("Leader")
+        .arg("--value")
+        .output() {
+        Ok(output) => output,
+        Err(e) => {
+            println!("[get_env_from_session] Failed to get leader PID: {}", e);
+            return env;
+        }
+    };
+    
+    let leader_output_str = String::from_utf8_lossy(&leader_output.stdout);
+    let leader_pid_str = leader_output_str.trim();
+    let leader_pid: u32 = match leader_pid_str.parse() {
+        Ok(pid) => pid,
+        Err(e) => {
+            println!("[get_env_from_session] Failed to parse leader PID '{}': {}", leader_pid_str, e);
+            return env;
+        }
+    };
+    
+    if DEBUG_LOGGING {
+        println!("[get_env_from_session] Session leader PID: {}", leader_pid);
+    }
+    
+    // Step 3: Find the deepest child process (GUI session) using pstree
+    let pstree_output = match Command::new("pstree")
+        .arg("-p")
+        .arg(&leader_pid.to_string())
+        .output() {
+        Ok(output) => output,
+        Err(e) => {
+            println!("[get_env_from_session] Failed to get process tree: {}", e);
+            return env;
+        }
+    };
+    
+    let pstree_str = String::from_utf8_lossy(&pstree_output.stdout);
+    if DEBUG_LOGGING {
+        println!("[get_env_from_session] Process tree: {}", pstree_str);
+    }
+    
+    // Extract the last PID from the process tree (deepest child)
+    let lines: Vec<&str> = pstree_str.lines().collect();
+    let gui_pid = if let Some(last_line) = lines.last() {
+        // Find all PIDs in the last line and take the last one
+        let mut pids = Vec::new();
+        for part in last_line.split_whitespace() {
+            if part.contains('(') && part.contains(')') {
+                if let Some(start) = part.find('(') {
+                    if let Some(end) = part.find(')') {
+                        if start < end {
+                            let pid_str = &part[start + 1..end];
+                            if let Ok(pid) = pid_str.parse::<u32>() {
+                                pids.push(pid);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        if let Some(&pid) = pids.last() {
+            if DEBUG_LOGGING {
+                println!("[get_env_from_session] Found GUI PID: {} (deepest child of leader {})", pid, leader_pid);
+            }
+            pid
+        } else {
+            if DEBUG_LOGGING {
+                println!("[get_env_from_session] Using leader PID as fallback: {}", leader_pid);
+            }
+            leader_pid
+        }
+    } else {
+        if DEBUG_LOGGING {
+            println!("[get_env_from_session] Using leader PID as fallback: {}", leader_pid);
+        }
+        leader_pid
+    };
+    
+    // Step 4: Extract environment from the GUI PID
+    if DEBUG_LOGGING {
+        println!("[get_env_from_session] Reading environment from /proc/{}/environ", gui_pid);
+    }
+    
+    let path = format!("/proc/{}/environ", gui_pid);
+    if let Ok(data) = fs::read(&path) {
+        if DEBUG_LOGGING {
+            println!("[get_env_from_session] Successfully read {} bytes from /proc/{}/environ", data.len(), gui_pid);
+        }
+        
+        for entry in data.split(|&b| b == 0) {
+            if entry.is_empty() {
+                continue;
+            }
+            
+            if let Some(eq) = entry.iter().position(|&b| b == b'=') {
+                let key = String::from_utf8_lossy(&entry[..eq]).to_string();
+                let value = String::from_utf8_lossy(&entry[eq+1..]).to_string();
+                
+                // Only log important environment variables
+                if DEBUG_LOGGING && (key == "DISPLAY" || key == "WAYLAND_DISPLAY" || key == "DBUS_SESSION_BUS_ADDRESS" || key == "XDG_RUNTIME_DIR") {
+                    println!("[get_env_from_session] Found key var: {}={}", key, value);
+                }
+                
+                env.insert(key, value);
+            }
+        }
+        
+        if DEBUG_LOGGING {
+            println!("[get_env_from_session] Total environment variables found: {}", env.len());
+        }
+    } else {
+        println!("[get_env_from_session] ERROR: Failed to read environment from /proc/{}/environ", gui_pid);
+    }
+    
+    env
+}
+
 fn get_env_from_pid(pid: u32) -> HashMap<String, String> {
     let mut env = HashMap::new();
     let path = format!("/proc/{}/environ", pid);
@@ -56,135 +224,7 @@ fn get_env_from_pid(pid: u32) -> HashMap<String, String> {
     env
 }
 
-fn find_user_session_pid(user: &str) -> Option<u32> {
-    if DEBUG_LOGGING {
-        println!("[find_user_session_pid] Searching for graphical session for user: {}", user);
-    }
-    
-    // Method 1: Try to find the user's active display session
-    if let Ok(output) = Command::new("loginctl").arg("list-sessions").arg("--no-legend").output() {
-        let sessions = String::from_utf8_lossy(&output.stdout);
-        for line in sessions.lines() {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 3 && parts[2] == user {
-                let session_id = parts[0];
-                if DEBUG_LOGGING {
-                    println!("[find_user_session_pid] Found loginctl session: {} for user {}", session_id, user);
-                }
-                
-                // Check if this session has a display
-                if let Ok(display_output) = Command::new("loginctl").arg("show-session").arg(session_id).arg("--property=Display").output() {
-                    let display_prop = String::from_utf8_lossy(&display_output.stdout);
-                    if display_prop.contains("Display=") && !display_prop.contains("Display=") {
-                        if DEBUG_LOGGING {
-                            println!("[find_user_session_pid] Session {} has display", session_id);
-                        }
-                        
-                        // Get the leader PID of this session
-                        if let Ok(leader_output) = Command::new("loginctl").arg("show-session").arg(session_id).arg("--property=Leader").output() {
-                            let leader_prop = String::from_utf8_lossy(&leader_output.stdout);
-                            if let Some(leader_line) = leader_prop.lines().next() {
-                                if let Some(pid_str) = leader_line.strip_prefix("Leader=") {
-                                    if let Ok(pid) = pid_str.trim().parse::<u32>() {
-                                        if DEBUG_LOGGING {
-                                            println!("[find_user_session_pid] Found session leader PID: {}", pid);
-                                        }
-                                        return Some(pid);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    // Method 2: Look for processes with DISPLAY variable
-    if let Ok(output) = Command::new("pgrep").arg("-u").arg(user).output() {
-        let pids: Vec<u32> = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter_map(|line| line.trim().parse().ok())
-            .collect();
-        
-        if DEBUG_LOGGING {
-            println!("[find_user_session_pid] Found {} processes for user {}", pids.len(), user);
-        }
-        
-        // Look for processes with DISPLAY variable
-        for pid in &pids {
-            if let Ok(env_data) = fs::read(format!("/proc/{}/environ", pid)) {
-                let env_str = String::from_utf8_lossy(&env_data);
-                if env_str.contains("DISPLAY=") || env_str.contains("WAYLAND_DISPLAY=") {
-                    if DEBUG_LOGGING {
-                        println!("[find_user_session_pid] Found process {} with display environment", pid);
-                    }
-                    
-                    // Get the command line to identify what type of process
-                    if let Ok(cmdline) = fs::read_to_string(format!("/proc/{}/cmdline", pid)) {
-                        let cmdline_clean = cmdline.trim_matches('\0');
-                        if DEBUG_LOGGING {
-                            println!("[find_user_session_pid] Process {} cmdline: {:?}", pid, cmdline_clean);
-                        }
-                        
-                        // Check if it's a graphical session process
-                        let graphical_procs = [
-                            "hyprland", "sway", "river", "wayfire", "labwc", "hikari", "cage", "orbment", "velox",
-                            "i3", "openbox", "fluxbox", "awesome", "dwm", "bspwm", "herbstluftwm", "xmonad", "qtile", "spectrwm",
-                            "gnome-session", "plasmashell", "xfce4-session", "mate-session", "cinnamon-session", "budgie-daemon",
-                            "kwin_x11", "kwin_wayland", "kwin", "kdeinit5", "weston", "mutter", "compiz", "marco", "xfwm4", "metacity"
-                        ];
-                        
-                        for proc in &graphical_procs {
-                            if cmdline_clean.contains(proc) {
-                                if DEBUG_LOGGING {
-                                    println!("[find_user_session_pid] Found graphical session process: {} (PID: {})", proc, pid);
-                                }
-                                return Some(*pid);
-                            }
-                        }
-                    }
-                    
-                    // If we found a process with display but can't identify the type, still use it
-                    if DEBUG_LOGGING {
-                        println!("[find_user_session_pid] Using process {} with display environment (unidentified type)", pid);
-                    }
-                    return Some(*pid);
-                }
-            }
-        }
-    }
-    
-    // Method 3: Try to get environment from user's login shell
-    if let Ok(output) = Command::new("su").arg("-").arg(user).arg("-c").arg("env | grep -E '(DISPLAY|WAYLAND_DISPLAY)'").output() {
-        let env_output = String::from_utf8_lossy(&output.stdout);
-        if !env_output.is_empty() {
-            if DEBUG_LOGGING {
-                println!("[find_user_session_pid] Found display environment in user's login shell");
-            }
-            
-            // Find a process that might be the login shell
-            if let Ok(output) = Command::new("pgrep").arg("-u").arg(user).arg("-f").arg("login").output() {
-                let pids: Vec<u32> = String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .filter_map(|line| line.trim().parse().ok())
-                    .collect();
-                
-                if let Some(&pid) = pids.first() {
-                    if DEBUG_LOGGING {
-                        println!("[find_user_session_pid] Using login shell PID: {}", pid);
-                    }
-                    return Some(pid);
-                }
-            }
-        }
-    }
-    
-    if DEBUG_LOGGING {
-        println!("[find_user_session_pid] No graphical session found for user {}", user);
-    }
-    None
-}
+
 
 pub struct HelperManager {
     process: Option<Child>,
@@ -272,24 +312,8 @@ impl HelperManager {
         }
         self.listener = Some(listener);
 
-        // Get environment variables from user's session
-        if DEBUG_LOGGING {
-            println!("[HelperManager::start] Finding user session PID for: {}", user);
-        }
-        let env_vars = if let Some(pid) = find_user_session_pid(user) {
-            if DEBUG_LOGGING {
-                println!("[HelperManager::start] Found user session PID: {}", pid);
-            }
-            let mut vars = get_env_from_pid(pid);
-            if DEBUG_LOGGING {
-                println!("[HelperManager::start] Retrieved {} environment variables from PID {}", vars.len(), pid);
-            }
-            vars
-        } else {
-            println!("[HelperManager::start] ERROR: No user session PID found for user: {}", user);
-            println!("[HelperManager::start] Cannot start helper without session PID");
-            return None;
-        };
+        // Get environment variables using the bash script approach
+        let env_vars = get_env_from_session(user);
         
         // Debug: print only important environment variables
         if DEBUG_LOGGING {
@@ -481,15 +505,8 @@ impl VlcHelperManager {
         let fd = listener.as_raw_fd();
         self.listener = Some(listener);
 
-        // Get environment variables from user's session
-        let env_vars = if let Some(pid) = find_user_session_pid(user) {
-            let mut vars = get_env_from_pid(pid);
-            println!("[main] Found {} environment variables from user session PID {}", vars.len(), pid);
-            vars
-        } else {
-            println!("[main] No user session PID found, cannot start VLC helper");
-            return None;
-        };
+        // Get environment variables using the bash script approach
+        let env_vars = get_env_from_session(user);
         
         // Debug: print all environment variables being passed
         println!("[main] Environment variables for VLC helper:");
@@ -560,15 +577,8 @@ impl BrowserHelperManager {
         let fd = listener.as_raw_fd();
         self.listener = Some(listener);
 
-        // Get environment variables from user's session
-        let env_vars = if let Some(pid) = find_user_session_pid(user) {
-            let mut vars = get_env_from_pid(pid);
-            println!("[main] Found {} environment variables from user session PID {}", vars.len(), pid);
-            vars
-        } else {
-            println!("[main] No user session PID found, cannot start browser helper");
-            return None;
-        };
+        // Get environment variables using the bash script approach
+        let env_vars = get_env_from_session(user);
         
         // Debug: print all environment variables being passed
         println!("[main] Environment variables for browser helper:");
