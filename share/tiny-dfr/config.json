@@ -122,36 +122,35 @@
   },
 
   "AppLayerKeys2": [
-    { "Icon": "go-previous-symbolic", "Action": "Macro1", "Mode": "Media" },
     {
-      "Icon": "web-browser-symbolic",
-      "Action": "WWW",
-      "Mode": "Media",
-      "Background": false
+      "Icon": "display-brightness-low-symbolic",
+      "Action": "BrightnessDown",
+      "Mode": "Media"
     },
     {
-      "Icon": "accessories-calculator-symbolic",
-      "Action": "Calc",
-      "Mode": "Media",
-      "Background": false
+      "Icon": "display-brightness-high-symbolic",
+      "Action": "BrightnessUp",
+      "Mode": "Media"
+    },
+    { "Action": "Unknown", "Mode": "Blank", "Fraction": 0.1 },
+    {
+      "Icon": "keyboard-brightness-low-symbolic",
+      "Action": "IllumDown",
+      "Mode": "Media"
     },
     {
-      "Icon": "system-file-manager-symbolic",
-      "Action": "File",
-      "Mode": "Media",
-      "Background": false
+      "Icon": "keyboard-brightness-high-symbolic",
+      "Action": "IllumUp",
+      "Mode": "Media"
+    },
+    { "Action": "Unknown", "Mode": "Blank", "Fraction": 0.1 },
+    {
+      "Icon": "audio-volume-muted-symbolic",
+      "Action": "Mute",
+      "Mode": "Media"
     },
     {
-      "Icon": "view-app-grid-symbolic",
-      "Action": "AllApplications",
-      "Mode": "Media",
-      "Background": false
-    },
-    { "Action": "Unknown", "Mode": "Blank" },
-    { "Action": "Unknown", "Mode": "Blank" },
-    { "Action": "Unknown", "Mode": "Blank" },
-    {
-      "Icon": "audio-volume-low-symbolic",
+      "Icon": "audio-volume-down-symbolic",
       "Action": "VolumeDown",
       "Mode": "Media"
     },
@@ -160,13 +159,13 @@
       "Action": "VolumeUp",
       "Mode": "Media"
     },
-    {
-      "Icon": "media-playback-start-symbolic",
-      "Action": "PlayPause",
-      "Mode": "Media"
-    },
-    { "Icon": "system-search-symbolic", "Action": "Search", "Mode": "Media" },
-    { "Icon": "go-next-symbolic", "Action": "Macro3", "Mode": "Media" }
+    { "Action": "Unknown", "Mode": "Blank" },
+    { "Action": "Unknown", "Mode": "Blank" },
+    { "Action": "Unknown", "Mode": "Blank" },
+    { "Action": "Unknown", "Mode": "Blank" },
+    { "Action": "Unknown", "Mode": "Blank" },
+    { "Action": "Unknown", "Mode": "Blank" },
+    { "Action": "Unknown", "Mode": "Blank" }
   ],
   "AppLayerKeys3": [
     {

@@ -817,8 +817,15 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
     // --- end eventfd integration ---
     uinput.set_evbit(EventKind::Key).unwrap();
     for layer in layers.values() {
+        // Register buttons from regular layer.buttons
         for button in &layer.buttons {
             uinput.set_keybit(button.action).unwrap();
+        }
+        // Register buttons from split layout media section
+        if let Some(split) = &layer.split {
+            for button in &split.media {
+                uinput.set_keybit(button.action).unwrap();
+            }
         }
     }
     // Browser buttons use Key::Unknown (no uinput events needed)
