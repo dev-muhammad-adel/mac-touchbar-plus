@@ -384,8 +384,8 @@ impl FunctionLayer {
                             }
                         }
                     }
-                    Some(state) if !state.is_logged_in && !state.session_type.is_empty() => {
-                        // Login screen or greeter
+                    Some(state) if !state.is_logged_in => {
+                        // Login screen - show whenever not logged in
                         let left_edge = pixel_shift_x + (pixel_shift_width / 2) as f64;
 
                     draw_login_screen(
@@ -844,7 +844,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
 
     // Initialize session monitor
     let (session_tx, session_rx) = watch::channel(SessionState {
-        session_type: "none".to_string(),
+        session_type: "".to_string(),  // Empty string = no session type detected yet
         is_logged_in: false,
         user: "".to_string(),
         leader: None,
@@ -1042,7 +1042,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                 println!("[main] User logged in, waiting 20 seconds for session to be fully ready before starting helper");
                                 
                                 // VLC helper will be started when VLC window gains focus
-                                                        } else {
+                             } else {
                                 println!("[main] User logged out: {:?}", current_session);
                                 if let Some(fd) = helper_listener_fd.take() {
                                     println!("[main] Removing helper listener fd: {}", fd);
@@ -1062,7 +1062,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                 // Reset login time is handled in stop() method
                             }
                             // Step 2: Trigger animation when user logs in or out
-                            if new_state.is_logged_in && !animation.is_animating_in() {
+                            if !animation.is_animating_in() {
                                 animation.animate_in();
                                 needs_complete_redraw = true;
                             } else if !new_state.is_logged_in && !animation.is_animating_out() && current_session.as_ref().map(|s| s.is_logged_in) == Some(true) {
@@ -1070,7 +1070,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                 needs_complete_redraw = true;
                             }
                             // Store last login session state for fade-out
-                            if !new_state.is_logged_in && !new_state.session_type.is_empty() {
+                            if !new_state.is_logged_in {
                                 last_login_session_state = Some(new_state.clone());
                             }
                             current_session = Some(new_state);

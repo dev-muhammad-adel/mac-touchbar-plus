@@ -20,9 +20,7 @@ const DEBUG_LOGGING: bool = false;
 const SESSION_CHECK_THROTTLE_MS: u64 = 1000; // Throttle session checks to avoid spam
 
 async fn check_session_state(connection: &Connection, tx: &watch::Sender<SessionState>) -> zbus::Result<()> {
-    if DEBUG_LOGGING {
-        println!("[session_monitor] check_session_state: Starting session state check...");
-    }
+    println!("[session_monitor] check_session_state: Starting session state check...");
     
     let manager_proxy: zbus::Proxy<'_> = zbus::ProxyBuilder::new_bare(connection)
         .destination("org.freedesktop.login1")?
@@ -147,11 +145,14 @@ async fn check_session_state(connection: &Connection, tx: &watch::Sender<Session
         }
     };
 
-    if DEBUG_LOGGING {
-        println!("[session_monitor] check_session_state: Sending state: {:?}", new_state);
-    }
+    println!("[session_monitor] check_session_state: Sending state: {:?}", new_state);
     
-    tx.send(new_state).map_err(|_| zbus::Error::Failure("Send failed".into()))
+    let result = tx.send(new_state);
+    match &result {
+        Ok(_) => println!("[session_monitor] check_session_state: Successfully sent session state"),
+        Err(e) => println!("[session_monitor] check_session_state: Failed to send session state: {:?}", e),
+    }
+    result.map_err(|_| zbus::Error::Failure("Send failed".into()))
 }
 
 pub async fn monitor_sessions(tx: watch::Sender<SessionState>) -> zbus::Result<()> {
