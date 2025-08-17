@@ -40,7 +40,6 @@ use chrono::{Local, Timelike};
 use crate::services::sessionmanager::{SessionState, monitor_sessions};
 use tokio::sync::{watch, mpsc};
 use view::media_screen::draw_media_section;
-use view::module_screen::draw_module_screen;
 use view::app_ui_manager::{AppUiManager, AppAction};
 use view::vlc_screen::VlcAction;
 use view::browser_screen::BrowserAction;
@@ -362,52 +361,38 @@ impl FunctionLayer {
                 match session_state {
                     Some(state) if state.is_logged_in => {
                         // User is logged in - show normal modules
-                        if let Some(window_class) = current_window_class {
-                            
-                            // Use app-specific UI if available, otherwise fall back to default
-                            if let Some(app_ui_manager) = &mut app_ui_manager {
-                                app_ui_manager.draw_app_ui(
-                                    &c,
-                                    left_edge,
-                                    bot,
-                                    modules_width,
-                                    top - bot,
-                                    radius,
-                                    1.0, // Always fully visible
-                                    window_class,
-                                    vlc_drag_position, // Pass drag position for visual feedback
-                                    &mut modified_regions,
-                                );
-                            } else {
-                                draw_module_screen(
-                                    &c,
-                                    left_edge,
-                                    bot,
-                                    modules_width,
-                                    top - bot,
-                                    radius,
-                                    height,
-                                    complete_redraw,
-                                    window_class,
-                                    1.0, // Always fully visible
-                                );
-                            }
+                        // Always use app UI manager for consistent module screen drawing
+                        if let Some(app_ui_manager) = &mut app_ui_manager {
+                            app_ui_manager.draw_app_ui(
+                                &c,
+                                left_edge,
+                                bot,
+                                modules_width,
+                                top - bot,
+                                radius,
+                                1.0, // Always fully visible
+                                current_window_class.as_deref(), // Pass Option<&str> to handle None case
+                                vlc_drag_position, // Pass drag position for visual feedback
+                                &mut modified_regions,
+                            );
                         }
                     }
                     Some(state) if !state.is_logged_in => {
                         // Show simple module screen when not logged in
-                        draw_module_screen(
-                            &c,
-                            left_edge,
-                            bot,
-                            modules_width,
-                            top - bot,
-                            radius,
-                            height,
-                            complete_redraw,
-                            "Not Logged In",
-                            1.0, // Always fully visible
-                        );
+                        if let Some(app_ui_manager) = &mut app_ui_manager {
+                            app_ui_manager.draw_app_ui(
+                                &c,
+                                left_edge,
+                                bot,
+                                modules_width,
+                                top - bot,
+                                radius,
+                                1.0, // Always fully visible
+                                Some("Not Logged In"), // Pass as Some for consistent handling
+                                None, // No drag position
+                                &mut modified_regions,
+                            );
+                        }
                     }
                     _ => {
                         // Handle None or unknown status if needed
@@ -1086,6 +1071,9 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                     active_layer = LayerKey::Custom2;
                                     needs_complete_redraw = true;
                                 }
+                                
+                                // Clear current window class when user logs out
+                                current_window_class = None;
                             }
                             // No animation needed - just update session state
                             current_session = Some(new_state);
