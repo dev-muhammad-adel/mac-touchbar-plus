@@ -90,7 +90,7 @@ pub mod view;
 pub mod services;
 pub mod helper;
 
-#[derive(Hash, Eq, PartialEq, Clone, Debug)]
+#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
 enum LayerKey {
     Media,
     Fn,
@@ -111,6 +111,7 @@ use crate::helper::manager::{HelperManager, VlcHelperManager, BrowserHelperManag
 
 
 const BUTTON_SPACING_PX: i32 = 16;
+const APP_LAYER_KEYS2_GAP_PX: f64 = 4.0; // Custom gap for AppLayerKeys2 (Custom2)
 const APP_LAYER_KEYS3_GAP_PX: f64 = 4.0; // Custom gap for AppLayerKeys3
 const BUTTON_COLOR_INACTIVE: f64 = 0.172;
 const BUTTON_COLOR_ACTIVE: f64 = 0.350;
@@ -446,8 +447,16 @@ impl FunctionLayer {
                 c.translate(height as f64, 0.0);
                 c.rotate((90.0f64).to_radians());
                 let pixel_shift_width = if config.enable_pixel_shift { PIXEL_SHIFT_WIDTH_PX } else { 0 };
-                // Use custom gap for AppLayerKeys3 (layer index 3), else default
-                let gap = if let Some(LayerKey::Custom3) = layer_index { APP_LAYER_KEYS3_GAP_PX } else { BUTTON_SPACING_PX as f64 };
+                // Use custom gap for AppLayerKeys2/3, else default
+                let gap = if let Some(layer) = layer_index {
+                    match layer {
+                        LayerKey::Custom2 => APP_LAYER_KEYS2_GAP_PX,
+                        LayerKey::Custom3 => APP_LAYER_KEYS3_GAP_PX,
+                        _ => BUTTON_SPACING_PX as f64,
+                    }
+                } else {
+                    BUTTON_SPACING_PX as f64
+                };
                 // --- AppLayerKeys3 slide animation translation ---
                 if let Some(LayerKey::Custom3) = layer_index {
                     // If progress is 0.0, skip drawing (prevents flicker)
@@ -586,9 +595,17 @@ impl FunctionLayer {
         }
     
     // Helper for modules hit test
-    fn hit_test_modules(&self, x: f64, width: i32) -> Option<usize> {
+    fn hit_test_modules(&self, x: f64, width: i32, layer_index: Option<LayerKey>) -> Option<usize> {
         if let Some(split) = &self.split {
-            let group_spacing = BUTTON_SPACING_PX as f64;
+            let group_spacing = if let Some(layer) = layer_index {
+                match layer {
+                    LayerKey::Custom2 => APP_LAYER_KEYS2_GAP_PX,
+                    LayerKey::Custom3 => APP_LAYER_KEYS3_GAP_PX,
+                    _ => BUTTON_SPACING_PX as f64,
+                }
+            } else {
+                BUTTON_SPACING_PX as f64
+            };
             let total_width = (width - group_spacing as i32) as f64;
             let modules_width = (split.modules_width as f64 * total_width).round();
             if x >= 0.0 && x < modules_width {
@@ -598,9 +615,17 @@ impl FunctionLayer {
         None
     }
     // Helper for media hit test
-    fn hit_test_media(&self, x: f64, width: i32) -> Option<usize> {
+    fn hit_test_media(&self, x: f64, width: i32, layer_index: Option<LayerKey>) -> Option<usize> {
         if let Some(split) = &self.split {
-            let group_spacing = BUTTON_SPACING_PX as f64;
+            let group_spacing = if let Some(layer) = layer_index {
+                match layer {
+                    LayerKey::Custom2 => APP_LAYER_KEYS2_GAP_PX,
+                    LayerKey::Custom3 => APP_LAYER_KEYS3_GAP_PX,
+                    _ => BUTTON_SPACING_PX as f64,
+                }
+            } else {
+                BUTTON_SPACING_PX as f64
+            };
             let total_width = (width - group_spacing as i32) as f64;
             let modules_width = (split.modules_width as f64 * total_width).round();
             let media_width = total_width - modules_width - group_spacing;
@@ -631,10 +656,18 @@ impl FunctionLayer {
         None
     }
     // Helper for flat hit test
-    fn hit_test_flat(&self, x: f64, width: i32) -> Option<usize> {
+    fn hit_test_flat(&self, x: f64, width: i32, layer_index: Option<LayerKey>) -> Option<usize> {
         if self.split.is_none() {
             let count = self.buttons.len();
-            let gap = BUTTON_SPACING_PX as f64;
+            let gap = if let Some(layer) = layer_index {
+                match layer {
+                    LayerKey::Custom2 => APP_LAYER_KEYS2_GAP_PX,
+                    LayerKey::Custom3 => APP_LAYER_KEYS3_GAP_PX,
+                    _ => BUTTON_SPACING_PX as f64,
+                }
+            } else {
+                BUTTON_SPACING_PX as f64
+            };
             let spacing = if count > 1 { gap * (count as f64 - 1.0) } else { 0.0 };
             let button_area = (width as f64) - spacing;
             let weights: Vec<f32> = self.buttons.iter().map(|b| b.fraction.unwrap_or(1.0)).collect();
@@ -659,17 +692,17 @@ impl FunctionLayer {
         None
     }
     /// Returns (group, index) where group is "modules" or "media" or "flat", and index is the button index in that group
-    pub fn hit_test(&self, x: f64, width: i32) -> Option<(&'static str, usize)> {
+    pub fn hit_test(&self, x: f64, width: i32, layer_index: Option<LayerKey>) -> Option<(&'static str, usize)> {
         if self.split.is_some() {
-            if let Some(idx) = self.hit_test_modules(x, width) {
+            if let Some(idx) = self.hit_test_modules(x, width, layer_index) {
                 return Some(("modules", idx));
             }
-            if let Some(idx) = self.hit_test_media(x, width) {
+            if let Some(idx) = self.hit_test_media(x, width, layer_index) {
                 return Some(("media", idx));
             }
             None
         } else {
-            if let Some(idx) = self.hit_test_flat(x, width) {
+            if let Some(idx) = self.hit_test_flat(x, width, layer_index) {
                 return Some(("flat", idx));
             }
             None
@@ -697,9 +730,18 @@ impl LibinputInterface for Interface {
 }
 
 
-fn button_hit(num: u32, idx: u32, width: u16, height: u16, x: f64, y: f64) -> bool {
-    let button_width = (width as i32 - (BUTTON_SPACING_PX * (num - 1) as i32)) as f64 / num as f64;
-    let left_edge = idx as f64 * (button_width + BUTTON_SPACING_PX as f64);
+fn button_hit(num: u32, idx: u32, width: u16, height: u16, x: f64, y: f64, layer_index: Option<LayerKey>) -> bool {
+    let gap = if let Some(layer) = layer_index {
+        match layer {
+            LayerKey::Custom2 => APP_LAYER_KEYS2_GAP_PX,
+            LayerKey::Custom3 => APP_LAYER_KEYS3_GAP_PX,
+            _ => BUTTON_SPACING_PX as f64,
+        }
+    } else {
+        BUTTON_SPACING_PX as f64
+    };
+    let button_width = (width as i32 - (gap as i32 * (num - 1) as i32)) as f64 / num as f64;
+    let left_edge = idx as f64 * (button_width + gap);
     if x < left_edge || x > (left_edge + button_width) {
         return false
     }
@@ -1516,7 +1558,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                             let _x = dn.x_transformed(width as u32);
                             let _y = dn.y_transformed(height as u32);
                             println!("[main] Touch down at ({}, {})", _x, _y);
-                            if let Some((group, idx)) = layers.get_mut(&active_layer).unwrap().hit_test(_x, width as i32) {
+                            if let Some((group, idx)) = layers.get_mut(&active_layer).unwrap().hit_test(_x, width as i32, Some(active_layer.clone())) {
                                 match group {
                                     "modules" => {
                                         // Store touch for modules group
