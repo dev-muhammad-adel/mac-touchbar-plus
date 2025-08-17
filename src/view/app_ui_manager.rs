@@ -84,6 +84,13 @@ impl AppUiManager {
         let pill_w = width;
         let pill_h = height + radius * 2.0;
         
+        // Always clear the area first to prevent text overlap
+        c.save().unwrap();
+        c.set_source_rgb(0.0, 0.0, 0.0);
+        c.rectangle(pill_x, pill_y, pill_w, pill_h);
+        c.fill().unwrap();
+        c.restore().unwrap();
+        
         c.save().unwrap();
         c.set_source_rgba(0.0, 0.0, 0.0, anim_progress);
         

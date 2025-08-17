@@ -39,7 +39,6 @@ use nix::{
 use chrono::{Local, Timelike};
 use crate::services::sessionmanager::{SessionState, monitor_sessions};
 use tokio::sync::{watch, mpsc};
-use view::login_screen::draw_login_screen;
 use view::media_screen::draw_media_section;
 use view::module_screen::draw_module_screen;
 use view::app_ui_manager::{AppUiManager, AppAction};
@@ -53,6 +52,11 @@ use utils::button_images::*;
 // Add log level control at the top
 // Set to true to enable verbose debug logging, false for production (much less resource usage)
 const DEBUG_LOGGING: bool = false; // Set to false to disable verbose logging
+
+// Layer switching behavior:
+// - When user is not logged in: Custom2 layer (AppLayerKeys2) is active
+// - When user logs in: Media layer becomes active
+// - When user logs out: Custom2 layer becomes active again
 
 // Helper function to send commands to VLC helper
 fn send_vlc_command(stream: &mut UnixStream, command: &str) -> Result<(), std::io::Error> {
@@ -296,7 +300,7 @@ impl FunctionLayer {
             }),
         }
     }
-    fn draw(&mut self, config: &Config, width: i32, height: i32, surface: &Surface, pixel_shift: (f64, f64), complete_redraw: bool, modules_only_redraw: bool, session_state: Option<&SessionState>, layer_index: Option<LayerKey>, login_anim_progress: f64, app_layer3_slide_progress: f64, current_window_class: Option<&str>, mut app_ui_manager: Option<&mut AppUiManager>, vlc_drag_position: Option<f64>) -> Vec<ClipRect> {
+    fn draw(&mut self, config: &Config, width: i32, height: i32, surface: &Surface, pixel_shift: (f64, f64), complete_redraw: bool, modules_only_redraw: bool, session_state: Option<&SessionState>, layer_index: Option<LayerKey>, app_layer3_slide_progress: f64, current_window_class: Option<&str>, mut app_ui_manager: Option<&mut AppUiManager>, vlc_drag_position: Option<f64>) -> Vec<ClipRect> {
         match &mut self.split {
             Some(split) => {
                 let c = Context::new(&surface).unwrap();
@@ -347,11 +351,17 @@ impl FunctionLayer {
                 } else { panic!("Invalid font renderer chosen. Choose between \"Cairo\" and \"FreeType\""); }
                 c.set_font_size(32.0);
                 
+                // Clear modules area first to prevent text overlap when switching between session states
+                // This ensures old text doesn't remain visible when drawing new content
+                let left_edge = pixel_shift_x + (pixel_shift_width / 2) as f64;
+                c.set_source_rgb(0.0, 0.0, 0.0);
+                c.rectangle(left_edge, bot - radius, modules_width, top - bot + radius * 2.0);
+                c.fill().unwrap();
+                
                 // Use new session state
                 match session_state {
                     Some(state) if state.is_logged_in => {
                         // User is logged in - show normal modules
-                        let left_edge = pixel_shift_x + (pixel_shift_width / 2) as f64;
                         if let Some(window_class) = current_window_class {
                             
                             // Use app-specific UI if available, otherwise fall back to default
@@ -363,7 +373,7 @@ impl FunctionLayer {
                                     modules_width,
                                     top - bot,
                                     radius,
-                                    login_anim_progress,
+                                    1.0, // Always fully visible
                                     window_class,
                                     vlc_drag_position, // Pass drag position for visual feedback
                                     &mut modified_regions,
@@ -379,30 +389,25 @@ impl FunctionLayer {
                                     height,
                                     complete_redraw,
                                     window_class,
-                                    login_anim_progress, // Use the same animation progress as login screen
+                                    1.0, // Always fully visible
                                 );
                             }
                         }
                     }
                     Some(state) if !state.is_logged_in => {
-                        // Login screen - show whenever not logged in
-                        let left_edge = pixel_shift_x + (pixel_shift_width / 2) as f64;
-
-                    draw_login_screen(
-                        &c,
-                        left_edge,
-                        bot,
-                        modules_width,
-                        top - bot,
-                        top,
-                        bot,
-                        radius,
-                        height,
-                        complete_redraw,
-                        &mut modified_regions,
-                        session_state,
-                        login_anim_progress,
-                    );
+                        // Show simple module screen when not logged in
+                        draw_module_screen(
+                            &c,
+                            left_edge,
+                            bot,
+                            modules_width,
+                            top - bot,
+                            radius,
+                            height,
+                            complete_redraw,
+                            "Not Logged In",
+                            1.0, // Always fully visible
+                        );
                     }
                     _ => {
                         // Handle None or unknown status if needed
@@ -799,7 +804,8 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
     // Privilege dropping removed - run with appropriate permissions
 
     let mut surface = ImageSurface::create(Format::ARgb32, db_width as i32, db_height as i32).unwrap();
-    let mut active_layer = LayerKey::Media;
+    // Start with Custom2 layer since user starts as not logged in
+    let mut active_layer = LayerKey::Custom2;
     let mut last_layer = active_layer.clone();
     let mut pending_layer: Option<LayerKey> = None;
 
@@ -875,7 +881,6 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
     });
     // --- end eventfd integration ---
     let mut current_session: Option<SessionState> = None;
-    let mut last_login_session_state: Option<SessionState> = None;
     let mut helper_listener_fd: Option<i32> = None;
     let mut helper_stream: Option<UnixStream> = None;
     let mut helper_reader: Option<BufReader<UnixStream>> = None;
@@ -884,7 +889,6 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
     let mut vlc_helper_reader: Option<BufReader<UnixStream>> = None;
     let mut current_window_class: Option<String> = None;
     let mut needs_complete_redraw = false;
-    let mut animation = Animation::new(0.05, 50.0); // step, interval_ms
     let mut app_layer3_slide_anim = Animation::new(0.18, 16.0); // 60fps for smooth slide
     let mut app_ui_manager = AppUiManager::new();
     let mut vlc_touch_active = false; // Track if VLC touch interaction is active
@@ -893,7 +897,12 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
     // --- main event loop ---
     loop {
         if cfg_mgr.update_config(&mut cfg, &mut layers, width) {
-            active_layer = LayerKey::Media;
+            // Respect current session state when updating config
+            active_layer = if current_session.as_ref().map(|s| s.is_logged_in).unwrap_or(false) {
+                LayerKey::Media
+            } else {
+                LayerKey::Custom2
+            };
             needs_complete_redraw = true;
         }
         let mut next_timeout_ms = TIMEOUT_MS;
@@ -904,10 +913,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
             }
             next_timeout_ms = min(next_timeout_ms, pixel_shift_next_timeout_ms);
         }
-        // Add animation timeout - ensure animation runs even without input events
-        if animation.is_running() {
-            next_timeout_ms = min(next_timeout_ms, 16); // 16ms = ~60fps for smooth animation
-        }
+        // No login animation timeout needed
         // --- AppLayerKeys3 slide animation update ---
         if app_layer3_slide_anim.is_running() {
             next_timeout_ms = min(next_timeout_ms, 16);
@@ -980,12 +986,8 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
             } else {
                 (0.0, 0.0)
             };
-            // Use last_login_session_state for fade-out
-            let session_for_draw = if animation.is_animating_out() {
-                last_login_session_state.as_ref()
-            } else {
-                current_session.as_ref()
-            };
+            // Use current session state directly
+            let session_for_draw = current_session.as_ref();
             // --- Pass slide progress for AppLayerKeys3 ---
             let app_layer3_slide_progress = if active_layer == LayerKey::Custom3 || last_layer == LayerKey::Custom3 {
                 app_layer3_slide_anim.progress()
@@ -996,7 +998,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
             if vlc_drag_position.is_some() {
 
             }
-            let mut clips = layers.get_mut(&active_layer).unwrap().draw(&cfg, width as i32, height as i32, &surface, shift, needs_complete_redraw, false, session_for_draw, Some(active_layer.clone()), animation.progress(), app_layer3_slide_progress, current_window_class.as_deref(), Some(&mut app_ui_manager), vlc_drag_position);
+            let mut clips = layers.get_mut(&active_layer).unwrap().draw(&cfg, width as i32, height as i32, &surface, shift, needs_complete_redraw, false, session_for_draw, Some(active_layer.clone()), app_layer3_slide_progress, current_window_class.as_deref(), Some(&mut app_ui_manager), vlc_drag_position);
             let data = surface.data().unwrap();
             drm.map().unwrap().as_mut()[..data.len()].copy_from_slice(&data);
             drm.dirty(&clips).unwrap();
@@ -1033,7 +1035,10 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                     println!("[main] Received session event: {:?}", new_state);
                     let session_changed = match &current_session {
                         Some(current) => current != &new_state,
-                        None => true,
+                        None => {
+                            // First session state update - always treat as changed
+                            true
+                        }
                     };
                     println!("[main] Session changed: {} (current: {:?}, new: {:?})", session_changed, current_session, new_state);
                     
@@ -1042,13 +1047,20 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                 println!("[main] User logged in: {}", new_state.user);
                                 current_user = Some(new_state.user.clone());
                                 
-                                // Set login time for 20-second delay
+                                // Set login time and start delay
                                 helper_manager.set_login_time();
                                 
-                                // Don't start helper immediately - wait for session to be ready
-                                println!("[main] User logged in, waiting 20 seconds for session to be fully ready before starting helper");
+                                // Don't start helper immediately - wait for delay to complete
+                                println!("[main] User logged in, starting 1 second delay before helper");
                                 
                                 // VLC helper will be started when VLC window gains focus
+                                
+                                // Switch to Media layer when user logs in
+                                if active_layer != LayerKey::Media {
+                                    println!("[main] User logged in, switching from {:?} to Media layer", active_layer);
+                                    active_layer = LayerKey::Media;
+                                    needs_complete_redraw = true;
+                                }
                              } else {
                                 println!("[main] User logged out: {:?}", current_session);
                                 if let Some(fd) = helper_listener_fd.take() {
@@ -1067,19 +1079,15 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                 
                                 // Reset session ready state for next login
                                 // Reset login time is handled in stop() method
+                                
+                                // Switch to Custom2 layer when user logs out
+                                if active_layer != LayerKey::Custom2 {
+                                    println!("[main] User logged out, switching from {:?} to Custom2 layer", active_layer);
+                                    active_layer = LayerKey::Custom2;
+                                    needs_complete_redraw = true;
+                                }
                             }
-                            // Step 2: Trigger animation when user logs in or out
-                            if !animation.is_animating_in() {
-                                animation.animate_in();
-                                needs_complete_redraw = true;
-                            } else if !new_state.is_logged_in && !animation.is_animating_out() && current_session.as_ref().map(|s| s.is_logged_in) == Some(true) {
-                                animation.animate_out();
-                                needs_complete_redraw = true;
-                            }
-                            // Store last login session state for fade-out
-                            if !new_state.is_logged_in {
-                                last_login_session_state = Some(new_state.clone());
-                            }
+                            // No animation needed - just update session state
                             current_session = Some(new_state);
                             needs_complete_redraw = true;
                         } else {
@@ -1141,7 +1149,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                                    // VLC window gained focus - start VLC helper
                                                    println!("[main] VLC window focused, starting VLC helper");
                                                    if let Some(user) = &current_user {
-                                                       if let Some(fd) = vlc_helper_manager.start(user) {
+                                                       if let Some(fd) = vlc_helper_manager.start(user, current_session.as_ref().and_then(|s| s.leader).unwrap_or(0)) {
                                                            let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
                                                            epoll.add(listener_fd_obj.as_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 6)).unwrap();
                                                            vlc_helper_listener_fd = Some(listener_fd_obj.into_raw_fd());
@@ -1188,7 +1196,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                                    // Browser window gained focus - start browser helper
                                                    println!("[main] Browser window focused: '{}', starting browser helper", class);
                                                    if let Some(user) = &current_user {
-                                                       if let Some(fd) = browser_helper_manager.start(user) {
+                                                       if let Some(fd) = browser_helper_manager.start(user, current_session.as_ref().and_then(|s| s.leader).unwrap_or(0)) {
                                                            let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
                                                            epoll.add(listener_fd_obj.as_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 8)).unwrap();
                                                            browser_helper_listener_fd = Some(listener_fd_obj.into_raw_fd());
@@ -1220,7 +1228,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                                    
                                                    // Start new helper for the new browser type
                                                    if let Some(user) = &current_user {
-                                                       if let Some(fd) = browser_helper_manager.start(user) {
+                                                       if let Some(fd) = browser_helper_manager.start(user, current_session.as_ref().and_then(|s| s.leader).unwrap_or(0)) {
                                                            let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
                                                            epoll.add(listener_fd_obj.as_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 8)).unwrap();
                                                            browser_helper_listener_fd = Some(listener_fd_obj.into_raw_fd());
@@ -1462,14 +1470,26 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                     if key.key() == Key::Fn as u32 {
                         let new_layer = match key.key_state() {
                             KeyState::Pressed => LayerKey::Fn,
-                            KeyState::Released => LayerKey::Media,
+                            KeyState::Released => {
+                                // Return to appropriate layer based on session state
+                                if current_session.as_ref().map(|s| s.is_logged_in).unwrap_or(false) {
+                                    LayerKey::Media
+                                } else {
+                                    LayerKey::Custom2
+                                }
+                            },
                         };
                         if active_layer != new_layer {
                             active_layer = new_layer;
                             needs_complete_redraw = true;
                         }
                     } else if key.key() == Key::Macro1 as u32 && key.key_state() == KeyState::Pressed {
-                        active_layer = LayerKey::Media;
+                        // Switch to appropriate layer based on session state
+                        active_layer = if current_session.as_ref().map(|s| s.is_logged_in).unwrap_or(false) {
+                            LayerKey::Media
+                        } else {
+                            LayerKey::Custom2
+                        };
                         needs_complete_redraw = true;
                     } else if key.key() == Key::Macro2 as u32 && key.key_state() == KeyState::Pressed {
                         active_layer = LayerKey::Custom2;
@@ -1964,9 +1984,36 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
         
         backlight.update_backlight(&cfg);
         
-        // Step 3: Increment animation in main loop (time-based)
-        if animation.update() {
-            needs_complete_redraw = true;
+        // No login animation needed
+        
+        // Check process status and clean up zombies periodically
+        helper_manager.check_process_status();
+        vlc_helper_manager.check_process_status();
+        browser_helper_manager.check_process_status();
+        
+        // Debug: Log process status periodically
+        static mut PROCESS_STATUS_COUNTER: u64 = 0;
+        unsafe {
+            PROCESS_STATUS_COUNTER += 1;
+            if PROCESS_STATUS_COUNTER % 1000 == 0 { // Log every 1000 frames
+                println!("[main] Process status - Main helper: {}, VLC helper: {}, Browser helper: {}", 
+                    if helper_manager.is_process_running() { "running" } else { "stopped" },
+                    if vlc_helper_manager.is_process_running() { "running" } else { "stopped" },
+                    if browser_helper_manager.is_process_running() { "running" } else { "stopped" }
+                );
+            }
+        }
+        
+        // Force cleanup of any zombie processes every 5000 frames
+        static mut FORCE_CLEANUP_COUNTER: u64 = 0;
+        unsafe {
+            FORCE_CLEANUP_COUNTER += 1;
+            if FORCE_CLEANUP_COUNTER % 5000 == 0 { // Every 5000 frames
+                println!("[main] Performing forced cleanup of zombie processes");
+                helper_manager.force_cleanup();
+                vlc_helper_manager.force_cleanup();
+                browser_helper_manager.force_cleanup();
+            }
         }
         
         // Check if we can start the helper now that session might be ready
@@ -1975,7 +2022,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                 if DEBUG_LOGGING {
                     println!("[main] Session is now ready, starting main helper for user: {}", user);
                 }
-                if let Some(fd) = helper_manager.start(user) {
+                if let Some(fd) = helper_manager.start(user, current_session.as_ref().and_then(|s| s.leader).unwrap_or(0)) {
                     if DEBUG_LOGGING {
                         println!("[main] Main helper started successfully, fd: {}", fd);
                     }
