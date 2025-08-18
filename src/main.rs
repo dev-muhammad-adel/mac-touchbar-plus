@@ -363,36 +363,36 @@ impl FunctionLayer {
                     Some(state) if state.is_logged_in => {
                         // User is logged in - show normal modules
                         // Always use app UI manager for consistent module screen drawing
-                        if let Some(app_ui_manager) = &mut app_ui_manager {
-                            app_ui_manager.draw_app_ui(
-                                &c,
-                                left_edge,
-                                bot,
-                                modules_width,
-                                top - bot,
-                                radius,
-                                1.0, // Always fully visible
+                            if let Some(app_ui_manager) = &mut app_ui_manager {
+                                app_ui_manager.draw_app_ui(
+                                    &c,
+                                    left_edge,
+                                    bot,
+                                    modules_width,
+                                    top - bot,
+                                    radius,
+                                    1.0, // Always fully visible
                                 current_window_class.as_deref(), // Pass Option<&str> to handle None case
-                                vlc_drag_position, // Pass drag position for visual feedback
-                                &mut modified_regions,
-                            );
+                                    vlc_drag_position, // Pass drag position for visual feedback
+                                    &mut modified_regions,
+                                );
                         }
                     }
                     Some(state) if !state.is_logged_in => {
                         // Show simple module screen when not logged in
                         if let Some(app_ui_manager) = &mut app_ui_manager {
                             app_ui_manager.draw_app_ui(
-                                &c,
-                                left_edge,
-                                bot,
-                                modules_width,
-                                top - bot,
-                                radius,
-                                1.0, // Always fully visible
+                            &c,
+                            left_edge,
+                            bot,
+                            modules_width,
+                            top - bot,
+                            radius,
+                            1.0, // Always fully visible
                                 Some("Not Logged In"), // Pass as Some for consistent handling
                                 None, // No drag position
                                 &mut modified_regions,
-                            );
+                        );
                         }
                     }
                     _ => {

@@ -51,15 +51,24 @@ pub fn draw_module_screen(
     c.set_font_size(text_size);
     c.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
     
-    // Handle empty window class (logout state)
-    let display_text = if window_class.is_empty() { "No Active Window" } else { window_class };
+    // Handle special cases and empty window class
+    let display_text = match window_class {
+        "" => "",
+        "Install WindowMonitorPro" => "Install WindowMonitorPro Extension",
+        other => other,
+    };
     
     let ext = c.text_extents(display_text).unwrap();
     let group_h = ext.height();
     let group_w = ext.width();
     let group_y = pill_y + (pill_h - group_h) / 2.0;
     let group_x = pill_x + (pill_w - group_w) / 2.0;
-    c.set_source_rgba(1.0, 1.0, 1.0, anim_progress); // White text, faded in
+    // Special styling for installation message
+    if display_text == "Install WindowMonitorPro Extension" {
+        c.set_source_rgba(1.0, 0.5, 0.0, anim_progress); // Orange text for warning
+    } else {
+        c.set_source_rgba(1.0, 1.0, 1.0, anim_progress); // White text for normal
+    }
     c.move_to(group_x, group_y + group_h - 2.0);
     c.show_text(display_text).unwrap();
     c.restore().unwrap();

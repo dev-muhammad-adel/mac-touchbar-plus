@@ -53,18 +53,18 @@ impl AppUiManager {
         match window_class {
             Some(class) => {
                 match class.to_lowercase().as_str() {
-                    "vlc" | "vlc.exe" => {
-                        self.vlc_screen.draw(c, x, y, width, height, radius, anim_progress, drag_position);
-                    }
-                    "firefox" | "chrome" | "chromium" | "brave" | "brave-browser" | "edge" | "safari" | "opera" | "google-chrome" => {
-                        println!("[app_ui_manager] Drawing browser screen with {} active buttons", self.browser_screen.buttons.iter().filter(|b| b.active).count());
-                        // Check if any browser buttons have changed for partial redraw
-                        let any_browser_button_changed = self.browser_screen.buttons.iter().any(|b| b.changed);
-                        let complete_redraw = !any_browser_button_changed; // Use complete redraw if no buttons changed
-                        self.browser_screen.draw(c, x, y, width, height, radius, anim_progress, complete_redraw, modified_regions);
-                    }
-                    _ => {
-                        // Fall back to default module screen behavior
+            "vlc" | "vlc.exe" => {
+                self.vlc_screen.draw(c, x, y, width, height, radius, anim_progress, drag_position);
+            }
+            "firefox" | "chrome" | "chromium" | "brave" | "brave-browser" | "edge" | "safari" | "opera" | "google-chrome" => {
+                println!("[app_ui_manager] Drawing browser screen with {} active buttons", self.browser_screen.buttons.iter().filter(|b| b.active).count());
+                // Check if any browser buttons have changed for partial redraw
+                let any_browser_button_changed = self.browser_screen.buttons.iter().any(|b| b.changed);
+                let complete_redraw = !any_browser_button_changed; // Use complete redraw if no buttons changed
+                self.browser_screen.draw(c, x, y, width, height, radius, anim_progress, complete_redraw, modified_regions);
+            }
+            _ => {
+                // Fall back to default module screen behavior
                         self.draw_default_ui(c, x, y, width, height, radius, anim_progress, class);
                     }
                 }

@@ -4,6 +4,7 @@ use std::io::Write;
 use std::thread;
 use std::time::Duration;
 use x11rb::connection::Connection;
+
 use x11rb::protocol::xproto::{self, ConnectionExt, Window};
 use x11rb::rust_connection::RustConnection;
 use std::collections::HashMap;
@@ -268,27 +269,38 @@ impl GnomeWindowMonitor {
         
         match output {
             Ok(output) => {
+                eprintln!("[helper] FocusClass command output: status={}, stdout='{}'", output.status, String::from_utf8_lossy(&output.stdout));
                 if output.status.success() {
                     let stdout = String::from_utf8_lossy(&output.stdout);
                     // Parse the output: ('Cursor',) -> Cursor or ('') -> Desktop
                     if let Some(start) = stdout.find("('") {
                         if let Some(end) = stdout[start..].find("',") {
                             let class = &stdout[start + 2..start + end];
+                            eprintln!("[helper] Parsed window class: '{}'", class);
                             if class.is_empty() {
                                 // Empty string means no window focused (desktop)
+                                eprintln!("[helper] Empty window class, returning Desktop");
                                 return Some("Desktop".to_string());
                             } else if class != "null" {
+                                eprintln!("[helper] Valid window class, returning: {}", class);
                                 return Some(class.to_string());
                             }
                         }
                     }
+                    eprintln!("[helper] Failed to parse FocusClass output, will return install message");
+                } else {
+                    eprintln!("[helper] FocusClass command failed with status: {}", output.status);
                 }
             }
-            Err(_) => {}
+            Err(e) => {
+                eprintln!("[helper] FocusClass command error: {:?}", e);
+            }
         }
         
-        // Fallback to Desktop if we can't get window info
-        Some("Desktop".to_string())
+        // If FocusClass failed, WindowMonitorPro is likely not working properly
+        // Send install message to help user
+        eprintln!("[helper] Returning install message for WindowMonitorPro");
+        Some("Install WindowMonitorPro".to_string())
     }
     
     fn extract_window_class_from_signal(signal_body: &str) -> Option<String> {
@@ -354,15 +366,56 @@ impl GnomeWindowMonitor {
             .interface("org.gnome.Shell.Extensions.WindowMonitorPro")?
             .member("WindowFocusChanged")?
             .build();
-        dbus_proxy.add_match_rule(rule).await?;
         
-        eprintln!("[helper] GNOME D-Bus signal subscription added for WindowMonitorPro.WindowFocusChanged");
+
+        
+        match dbus_proxy.add_match_rule(rule).await {
+            Ok(_) => {
+                eprintln!("[helper] GNOME D-Bus signal subscription added for WindowMonitorPro.WindowFocusChanged");
+            }
+            Err(_) => {
+                eprintln!("[helper] Failed to subscribe to WindowMonitorPro signals - extension not available");
+                // Send message to install WindowMonitorPro
+                let _ = tx.send("Install WindowMonitorPro".to_string());
+                return Ok(());
+            }
+        }
+        
+        // Start a separate thread to monitor extension state using the bash filter
+        let tx_clone = tx.clone();
+        std::thread::spawn(move || {
+            eprintln!("[helper] Starting bash filter extension monitor...");
+            let mut child = std::process::Command::new("bash")
+                .arg("-c")
+                .arg("dbus-monitor \"interface='org.gnome.Shell.Extensions'\" | awk '/member=EnableExtension/  { next_action=\"true\" } /member=DisableExtension/ { next_action=\"false\" } /string/ && next_action != \"\" { if ($0 ~ /window-monitor-pro@muhammed\\.hussien2030\\.gmail\\.com/) { if (last_action != next_action) { print next_action; fflush(); last_action = next_action } } next_action = \"\" }'")
+                .stdout(std::process::Stdio::piped())
+                .spawn();
+            
+            if let Ok(mut child) = child {
+                if let Some(stdout) = child.stdout.take() {
+                    use std::io::{BufRead, BufReader};
+                    let reader = BufReader::new(stdout);
+                    for line in reader.lines() {
+                        if let Ok(line) = line {
+                            eprintln!("[helper] Bash filter output: '{}'", line);
+                            if line.trim() == "false" {
+                                eprintln!("[helper] Bash filter detected WindowMonitorPro extension disabled");
+                                let _ = tx_clone.send("Install WindowMonitorPro".to_string());
+                                // Don't break - keep monitoring for future events
+                            }
+                        }
+                    }
+                }
+            }
+        });
         
         let mut last_class = String::new();
         
         // Event loop for D-Bus signals
         while let Some(msg) = stream.next().await {
             if let Ok(msg) = msg {
+
+                
                 // Check if this is the WindowFocusChanged signal from WindowMonitorPro
                 if let Some(interface) = msg.interface() {
                     let interface_str = interface.as_str();
@@ -396,6 +449,7 @@ impl GnomeWindowMonitor {
                                 eprintln!("[helper] GNOME window focus changed via WindowMonitorPro signal: {}", display_class);
                                 let _ = tx.send(display_class.clone());
                                 last_class = display_class;
+
                             }
                         } else {
                             eprintln!("[helper] Failed to parse signal body as tuple, trying alternative approach");
@@ -408,6 +462,29 @@ impl GnomeWindowMonitor {
                                 }
                             } else {
                                 eprintln!("[helper] All parsing methods failed, signal body format not supported");
+                            }
+                        }
+                    } else if interface_str == "org.gnome.Shell.Extensions" {
+                        // Handle GNOME extension enable/disable signals
+                        if let Some(member) = msg.member() {
+                            let member_str = member.as_str();
+                            eprintln!("[helper] Received GNOME Extensions signal: member={}", member_str);
+                            
+                            if member_str == "DisableExtension" || member_str == "EnableExtension" {
+                                eprintln!("[helper] Processing {} signal", member_str);
+                                
+                                // The DisableExtension/EnableExtension signals don't contain the extension UUID
+                                // We need to wait for the next signal that contains the extension info
+                                // For now, let's just send the install message on any DisableExtension signal
+                                // since we're specifically monitoring for WindowMonitorPro
+                                if member_str == "DisableExtension" {
+                                    eprintln!("[helper] DisableExtension signal received - sending install message");
+                                    // Extension was disabled - send install message
+                                    let _ = tx.send("Install WindowMonitorPro".to_string());
+                                    break;
+                                } else {
+                                    eprintln!("[helper] EnableExtension signal received - no action needed");
+                                }
                             }
                         }
                     }
