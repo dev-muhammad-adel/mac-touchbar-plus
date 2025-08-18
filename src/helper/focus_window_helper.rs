@@ -1,6 +1,6 @@
 //! Helper binary for tiny-dfr, providing auxiliary functionality.
 use std::os::unix::net::UnixStream;
-use std::io::Write;
+use std::io::{Write, BufRead, BufReader};
 use std::thread;
 use std::time::Duration;
 use x11rb::connection::Connection;
@@ -504,37 +504,233 @@ impl HyprlandWindowMonitor {
     }
     
     fn get_active_window_class() -> Option<String> {
-        // Use hyprctl to get active window info
-        let output = std::process::Command::new("hyprctl")
-            .arg("activewindow")
-            .arg("-j")
-        .output();
+        // This function is no longer needed since we get all info from socket events
+        Some("Desktop".to_string())
+    }
     
-    match output {
-        Ok(output) => {
-                if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
-                    // Check if there's actually an active window
-                    if json.is_null() || json.as_object().map_or(true, |obj| obj.is_empty()) {
-                        // No active window, return Desktop
-                        return Some("Desktop".to_string());
-                    }
-                    
-                    if let Some(class) = json["class"].as_str() {
-                        if !class.is_empty() && class != "null" {
-                            return Some(class.to_string());
+    fn run_event_monitor(tx: mpsc::Sender<String>) -> Result<(), Box<dyn std::error::Error>> {
+        // Send initial active window
+        if let Some(class) = Self::get_active_window_class() {
+            let _ = tx.send(class);
+        }
+        
+        // Use D-Bus to listen for window focus changes, then query hyprctl for current window
+        let rt = tokio::runtime::Runtime::new()?;
+        rt.block_on(async {
+            Self::run_dbus_event_monitor(tx).await
+        })
+    }
+    
+    async fn run_dbus_event_monitor(tx: mpsc::Sender<String>) -> Result<(), Box<dyn std::error::Error>> {
+        // Try multiple approaches for event-driven window focus detection
+        
+        // Approach 1: Try to use hyprland crate event listener
+        match Self::try_hyprland_event_listener(tx.clone()).await {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                eprintln!("[helper] Hyprland event listener failed: {}, trying file monitoring approach", e);
+            }
+        }
+        
+        // Approach 2: Monitor Hyprland's socket file for changes
+        eprintln!("[helper] Using file monitoring approach for Hyprland");
+        Self::monitor_hyprland_socket(tx).await
+    }
+    
+    async fn monitor_hyprland_socket(tx: mpsc::Sender<String>) -> Result<(), Box<dyn std::error::Error>> {
+        // Direct socket connection approach - much simpler and more reliable!
+        eprintln!("[helper] Using direct socket connection for Hyprland events");
+        
+        // Get Hyprland socket path
+        let socket_path = if let Ok(signature) = std::env::var("HYPRLAND_INSTANCE_SIGNATURE") {
+            if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
+                format!("{}/hypr/{}/.socket2.sock", runtime_dir, signature)
+            } else {
+                format!("/tmp/hypr/{}/.socket2.sock", signature)
+            }
+        } else {
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "HYPRLAND_INSTANCE_SIGNATURE not found"
+            )));
+        };
+        
+        eprintln!("[helper] Connecting to socket: {}", socket_path);
+        
+        // Connect to the Hyprland IPC socket
+        let mut stream = UnixStream::connect(socket_path)?;
+        eprintln!("[helper] Connected to Hyprland socket successfully");
+        
+        // Send the subscribe command
+        stream.write_all(b"subscribe\n")?;
+        eprintln!("[helper] Sent subscribe command");
+        
+        let reader = BufReader::new(stream);
+        
+        // Read lines from the socket
+        for line in reader.lines() {
+            match line {
+                Ok(line) => {
+                    eprintln!("[helper] Received line: {}", line);
+                    if line.starts_with("activewindow>>") {
+                        // Extract window name (after >> and before comma)
+                        let window_name = if let Some(pos) = line.find(',') {
+                            &line[14..pos] // skip "activewindow>>"
+                        } else {
+                            &line[14..]
+                        };
+                        
+                        if window_name.trim().is_empty() {
+                            eprintln!("[helper] Focused window: desktop");
+                            let _ = tx.send("Desktop".to_string());
+                        } else {
+                            eprintln!("[helper] Focused window: {}", window_name);
+                            let _ = tx.send(window_name.to_string());
                         }
                     }
-                    if let Some(title) = json["title"].as_str() {
-                        if !title.is_empty() && title != "null" {
-                            return Some(title.to_string());
+                }
+                Err(e) => {
+                    eprintln!("[helper] Error reading from socket: {:?}", e);
+                    break;
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    async fn try_hyprland_event_listener(tx: mpsc::Sender<String>) -> Result<(), Box<dyn std::error::Error>> {
+        // Try to use the hyprland crate event listener
+        let mut event_listener = hyprland::event_listener::EventListener::new();
+        
+        let tx_title = tx.clone();
+        event_listener.add_window_title_change_handler(move |_| {
+            if let Some(class) = HyprlandWindowMonitor::get_active_window_class() {
+                let _ = tx_title.send(class);
+            }
+        });
+        
+        let tx_open = tx.clone();
+        event_listener.add_window_open_handler(move |_| {
+            if let Some(class) = HyprlandWindowMonitor::get_active_window_class() {
+                let _ = tx_open.send(class);
+            }
+        });
+        
+        event_listener.add_window_close_handler(move |_| {
+            if let Some(class) = HyprlandWindowMonitor::get_active_window_class() {
+                let _ = tx.send(class);
+            }
+        });
+        
+        event_listener.start_listener()?;
+        Ok(())
+    }
+}
+
+struct NiriWindowMonitor;
+
+impl NiriWindowMonitor {
+    fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        Ok(Self)
+    }
+    
+    fn get_active_window_class() -> Option<String> {
+        // Use niri msg to get active window info
+        let output = std::process::Command::new("niri")
+            .arg("msg")
+            .arg("focused-window")
+            .env("WAYLAND_DISPLAY", std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-1".to_string()))
+            .env("NIRI_SOCKET", std::env::var("NIRI_SOCKET").unwrap_or_else(|_| {
+                // Try to find the actual Niri socket path
+                let user_id = unsafe { libc::getuid() };
+                let wayland_display = std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-1".to_string());
+                let socket_pattern = format!("/run/user/{}/niri.{}.", user_id, wayland_display);
+                
+                // Try to find the socket file with the pattern
+                if let Ok(entries) = std::fs::read_dir(format!("/run/user/{}", user_id)) {
+                    for entry in entries {
+                        if let Ok(entry) = entry {
+                            let path = entry.path();
+                            if let Some(name) = path.file_name() {
+                                if let Some(name_str) = name.to_str() {
+                                    if name_str.starts_with(&format!("niri.{}.", wayland_display)) && name_str.ends_with(".sock") {
+                                        eprintln!("[helper] Found Niri socket: {}", path.display());
+                                        return path.to_string_lossy().to_string();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Fallback to the basic pattern
+                format!("/run/user/{}/niri.{}.sock", user_id, wayland_display)
+            }))
+            .output();
+        
+        match output {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                eprintln!("[helper] Niri focused-window output: '{}'", stdout);
+                
+                // Check if the command failed
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    eprintln!("[helper] Niri command failed: status={}, stderr='{}'", output.status, stderr);
+                    return Some("Desktop".to_string());
+                }
+                
+                // Parse the text output format:
+                // Window ID 4: (focused)
+                //   Title: "focus_window_helper.rs - tiny-dfr - Cursor"
+                //   App ID: "cursor"
+                //   Is floating: no
+                //   PID: 3765
+                //   Workspace ID: 2
+                
+                let lines: Vec<&str> = stdout.lines().collect();
+                
+                // Check if there's actually a focused window
+                if lines.is_empty() || !lines[0].contains("Window ID") {
+                    // No active window, return Desktop
+                    eprintln!("[helper] Niri no focused window found");
+                    return Some("Desktop".to_string());
+                }
+                
+                // Look for App ID line first (preferred)
+                for line in &lines {
+                    if line.trim().starts_with("App ID:") {
+                        if let Some(app_id) = line.split("App ID:").nth(1) {
+                            let app_id = app_id.trim().trim_matches('"');
+                            if !app_id.is_empty() && app_id != "null" {
+                                eprintln!("[helper] Niri found app_id: {}", app_id);
+                                return Some(app_id.to_string());
+                            }
+                        }
+                    }
+                }
+                
+                // Fallback to Title if App ID is not available
+                for line in &lines {
+                    if line.trim().starts_with("Title:") {
+                        if let Some(title) = line.split("Title:").nth(1) {
+                            let title = title.trim().trim_matches('"');
+                            if !title.is_empty() && title != "null" {
+                                eprintln!("[helper] Niri found title: {}", title);
+                                return Some(title.to_string());
+                            }
                         }
                     }
                 }
             }
-            Err(_) => {}
+            Err(e) => {
+                eprintln!("[helper] Niri command error: {:?}", e);
+            }
         }
         
         // If we can't get window info or no valid window, return Desktop
+        eprintln!("[helper] Niri no valid window found, returning Desktop");
         Some("Desktop".to_string())
     }
     
@@ -544,20 +740,86 @@ impl HyprlandWindowMonitor {
             let _ = tx.send(class);
         }
         
-        // Hyprland doesn't have a direct event subscription API in the Rust crate,
-        // so we'll use a more efficient polling approach with shorter intervals
-        // and monitor for changes
-        let mut last_class = String::new();
-        
-        loop {
-            if let Some(class) = Self::get_active_window_class() {
-                if class != last_class {
-                    let _ = tx.send(class.clone());
-                    last_class = class;
+        // Try to use Niri's event stream for true event-driven monitoring
+        let mut child = std::process::Command::new("niri")
+            .arg("msg")
+            .arg("event-stream")
+            .env("WAYLAND_DISPLAY", std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-1".to_string()))
+            .env("NIRI_SOCKET", std::env::var("NIRI_SOCKET").unwrap_or_else(|_| {
+                // Try to find the actual Niri socket path
+                let user_id = unsafe { libc::getuid() };
+                let wayland_display = std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-1".to_string());
+                let socket_pattern = format!("/run/user/{}/niri.{}.", user_id, wayland_display);
+                
+                // Try to find the socket file with the pattern
+                if let Ok(entries) = std::fs::read_dir(format!("/run/user/{}", user_id)) {
+                    for entry in entries {
+                        if let Ok(entry) = entry {
+                            let path = entry.path();
+                            if let Some(name) = path.file_name() {
+                                if let Some(name_str) = name.to_str() {
+                                    if name_str.starts_with(&format!("niri.{}.", wayland_display)) && name_str.ends_with(".sock") {
+                                        eprintln!("[helper] Found Niri socket: {}", path.display());
+                                        return path.to_string_lossy().to_string();
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
+                
+                // Fallback to the basic pattern
+                format!("/run/user/{}/niri.{}.sock", user_id, wayland_display)
+            }))
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn();
+        
+        match child {
+            Ok(mut child) => {
+                eprintln!("[helper] Niri event stream started successfully");
+                
+                if let Some(stdout) = child.stdout.take() {
+                    use std::io::{BufRead, BufReader};
+                    let reader = BufReader::new(stdout);
+                    
+                    for line in reader.lines() {
+                        if let Ok(line) = line {
+                            eprintln!("[helper] Niri event: {}", line);
+                            
+                                                // Check if this is a "Windows changed" event
+                    if line.contains("Windows changed:") {
+                        eprintln!("[helper] Niri windows changed event detected");
+                        // Get the current focused window
+                        if let Some(class) = Self::get_active_window_class() {
+                            let _ = tx.send(class);
+                        }
+                    }
+                    // Check if this is a "Window focus changed" event
+                    else if line.contains("Window focus changed:") {
+                        eprintln!("[helper] Niri window focus changed event detected");
+                        // Get the current focused window
+                        if let Some(class) = Self::get_active_window_class() {
+                            let _ = tx.send(class);
+                        }
+                    }
+                        }
+                    }
+                }
+                
+                // If we reach here, the event stream has ended
+                eprintln!("[helper] Niri event stream ended");
             }
-            std::thread::sleep(std::time::Duration::from_millis(100)); // Much shorter than the old 500ms
+            Err(e) => {
+                eprintln!("[helper] Failed to start Niri event stream: {:?}", e);
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Failed to start Niri event stream: {}", e)
+                )));
+            }
         }
+        
+        Ok(())
     }
 }
 
@@ -729,6 +991,62 @@ fn run_hyprland_event_driven() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn run_niri_event_driven() -> Result<(), Box<dyn std::error::Error>> {
+    let socket_path = "/tmp/touchbar.sock";
+    
+    // Connect to the socket
+    let mut stream = loop {
+        match UnixStream::connect(socket_path) {
+            Ok(stream) => break stream,
+            Err(_) => {
+                thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+        }
+    };
+    
+    // Create channel for communication between event monitor and main thread
+    let (tx, rx) = mpsc::channel();
+    
+    // Initialize Niri monitor
+    let _monitor = NiriWindowMonitor::new()?;
+    eprintln!("[helper] Niri event-driven monitor initialized");
+    
+    // Spawn event monitor in separate thread
+    let monitor_thread = std::thread::spawn(move || {
+        if let Err(e) = NiriWindowMonitor::run_event_monitor(tx) {
+            eprintln!("[helper] Niri event monitor error: {}", e);
+        }
+    });
+    
+    // Main thread: receive events and send to socket
+    let mut last_class = String::new();
+    
+    loop {
+        match rx.recv() {
+            Ok(class) => {
+                if class != last_class {
+                    eprintln!("[helper] Niri window focus changed from '{}' to '{}'", last_class, class);
+                    if stream.write_all(class.as_bytes()).is_ok() && stream.write_all(b"\n").is_ok() {
+                        last_class = class;
+                    } else {
+                        eprintln!("[helper] Failed to write to socket, breaking");
+                        break;
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("[helper] Error receiving from Niri event monitor: {}", e);
+                break;
+            }
+        }
+    }
+    
+    // Wait for monitor thread to finish
+    let _ = monitor_thread.join();
+    Ok(())
+}
+
 fn run_x11_event_driven() -> Result<(), Box<dyn std::error::Error>> {
     let socket_path = "/tmp/touchbar.sock";
     
@@ -794,6 +1112,8 @@ fn main() -> std::io::Result<()> {
     eprintln!("[helper] WAYLAND_DISPLAY={:?}", std::env::var("WAYLAND_DISPLAY"));
     eprintln!("[helper] SWAYSOCK={:?}", std::env::var("SWAYSOCK"));
     eprintln!("[helper] HYPRLAND_INSTANCE_SIGNATURE={:?}", std::env::var("HYPRLAND_INSTANCE_SIGNATURE"));
+    eprintln!("[helper] NIRI_SOCKET={:?}", std::env::var("NIRI_SOCKET"));
+    eprintln!("[helper] UID={:?}", std::env::var("UID"));
     eprintln!("[helper] GNOME_DESKTOP_SESSION_ID={:?}", std::env::var("GNOME_DESKTOP_SESSION_ID"));
     eprintln!("[helper] XDG_CURRENT_DESKTOP={:?}", std::env::var("XDG_CURRENT_DESKTOP"));
     eprintln!("[helper] XDG_RUNTIME_DIR={:?}", std::env::var("XDG_RUNTIME_DIR"));
@@ -813,6 +1133,16 @@ fn main() -> std::io::Result<()> {
             eprintln!("[helper] Hyprland detected, using event-driven approach");
             if let Err(e) = run_hyprland_event_driven() {
                 eprintln!("[helper] Hyprland event-driven approach failed: {}", e);
+                return Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
+            }
+            return Ok(());
+        }
+        
+        // Check for Niri (more specific detection)
+        if std::env::var("XDG_CURRENT_DESKTOP").map_or(false, |desktop| desktop.to_lowercase() == "niri") {
+            eprintln!("[helper] Niri detected, using event-driven approach");
+            if let Err(e) = run_niri_event_driven() {
+                eprintln!("[helper] Niri event-driven approach failed: {}", e);
                 return Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
             }
             return Ok(());
@@ -854,7 +1184,7 @@ fn main() -> std::io::Result<()> {
     }
     
     // No supported compositor detected
-    eprintln!("[helper] No supported compositor detected (not X11, Sway, Hyprland, or generic Wayland)");
+    eprintln!("[helper] No supported compositor detected (not X11, Sway, Hyprland, Niri, or generic Wayland)");
     return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "No supported compositor detected"));
 }
 
