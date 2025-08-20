@@ -377,8 +377,7 @@ impl BrowserScreen {
                     1 => Some(BrowserAction::Forward),
                     2 => Some(BrowserAction::Refresh),
                     3 => Some(BrowserAction::AddressBar), // Address Bar is interactive
-                    4 => Some(BrowserAction::CloseTab), // Changed from AddBookmark
-                    5 => Some(BrowserAction::NewTab),
+                    4 => Some(BrowserAction::NewTab), // New Tab
                     _ => None,
                 };
             }
