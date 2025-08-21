@@ -4,19 +4,161 @@
 //! handling different types of button images (SVG, PNG, text, blank).
 //! Includes a simple per-thread cache for performance optimization.
 
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
-use lazy_static::lazy_static;
+use std::time::{Duration, Instant};
 use cairo::{ImageSurface, Context, Format, Antialias};
 use rsvg::{SvgHandle, Loader};
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::fs::File;
 use anyhow::Result;
 use icon_loader::{IconLoader, IconFileType};
+use lazy_static::lazy_static;
+use std::path::PathBuf;
+use std::fs::File;
 
-// Simple per-thread cache for button images (only cloneable types)
+// LRU Cache entry with timestamp for automatic cleanup
+#[derive(Debug)]
+struct CacheEntry {
+    image: CachedImage,
+    last_accessed: Instant,
+    size_bytes: usize,
+}
+
+// Thread-local LRU cache with automatic cleanup
 thread_local! {
-    static IMAGE_CACHE: Mutex<HashMap<String, CachedImage>> = Mutex::new(HashMap::new());
+    static IMAGE_CACHE: Mutex<LruCache> = Mutex::new(LruCache::new());
+}
+
+// LRU Cache implementation
+struct LruCache {
+    entries: HashMap<String, CacheEntry>,
+    access_order: VecDeque<String>, // Most recently used first
+    max_size: usize,
+    max_memory_mb: f64,
+    last_cleanup: Instant,
+    cleanup_interval: Duration,
+}
+
+impl LruCache {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            access_order: VecDeque::new(),
+            max_size: MAX_CACHE_SIZE,
+            max_memory_mb: CACHE_MEMORY_LIMIT_MB,
+            last_cleanup: Instant::now(),
+            cleanup_interval: Duration::from_secs(CACHE_CLEANUP_INTERVAL),
+        }
+    }
+
+    fn get(&mut self, key: &str) -> Option<&CachedImage> {
+        if let Some(entry) = self.entries.get_mut(key) {
+            // Update access time
+            entry.last_accessed = Instant::now();
+            
+            // Move to front of access order
+            if let Some(pos) = self.access_order.iter().position(|k| *k == key) {
+                self.access_order.remove(pos);
+            }
+            self.access_order.push_front(key.to_string());
+            
+            Some(&entry.image)
+        } else {
+            None
+        }
+    }
+
+    fn insert(&mut self, key: String, image: CachedImage, size_bytes: usize) {
+        // Check if we need to cleanup before inserting
+        self.cleanup_if_needed();
+        
+        // Remove old entry if it exists
+        if let Some(_old_entry) = self.entries.remove(&key) {
+            // Remove from access order
+            if let Some(pos) = self.access_order.iter().position(|k| *k == key) {
+                self.access_order.remove(pos);
+            }
+        }
+        
+        // Insert new entry
+        let entry = CacheEntry {
+            image,
+            last_accessed: Instant::now(),
+            size_bytes,
+        };
+        
+        self.entries.insert(key.clone(), entry);
+        self.access_order.push_front(key);
+        
+        // Enforce size limits
+        self.enforce_limits();
+    }
+
+    fn cleanup_if_needed(&mut self) {
+        let now = Instant::now();
+        if now.duration_since(self.last_cleanup) >= self.cleanup_interval {
+            self.cleanup_expired_entries();
+            self.last_cleanup = now;
+        }
+    }
+
+    fn cleanup_expired_entries(&mut self) {
+        let now = Instant::now();
+        let max_age = Duration::from_secs(300); // 5 minutes max age
+        
+        let expired_keys: Vec<String> = self.entries
+            .iter()
+            .filter(|(_, entry)| now.duration_since(entry.last_accessed) > max_age)
+            .map(|(key, _)| key.clone())
+            .collect();
+        
+        let expired_count = expired_keys.len();
+        
+        for key in &expired_keys {
+            self.entries.remove(key);
+            if let Some(pos) = self.access_order.iter().position(|k| *k == *key) {
+                self.access_order.remove(pos);
+            }
+        }
+        
+        if expired_count > 0 {
+            println!("[CacheCleanup] Removed {} expired entries", expired_count);
+        }
+    }
+
+    fn enforce_limits(&mut self) {
+        let current_memory_mb = self.get_total_memory_mb();
+        
+        // Remove oldest entries if we exceed memory or size limits
+        while (self.entries.len() > self.max_size || current_memory_mb > self.max_memory_mb) 
+               && !self.access_order.is_empty() {
+            if let Some(oldest_key) = self.access_order.pop_back() {
+                if let Some(entry) = self.entries.remove(&oldest_key) {
+                    println!("[CacheEviction] Evicted entry '{}' ({} bytes)", oldest_key, entry.size_bytes);
+                }
+            }
+        }
+    }
+
+    fn get_total_memory_mb(&self) -> f64 {
+        let total_bytes: usize = self.entries.values().map(|entry| entry.size_bytes).sum();
+        total_bytes as f64 / 1024.0 / 1024.0
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.access_order.clear();
+        println!("[CacheClear] Cache cleared completely");
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn get_stats(&self) -> (usize, usize) {
+        let entry_count = self.entries.len();
+        let total_memory = self.entries.values().map(|entry| entry.size_bytes).sum();
+        (entry_count, total_memory)
+    }
 }
 
 // Cached image types (only cloneable ones)
@@ -61,8 +203,6 @@ pub enum ButtonImage {
     Blank,
 }
 
-
-
 // Manual implementation of Debug for ButtonImage
 impl std::fmt::Debug for ButtonImage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -98,7 +238,7 @@ pub fn update_cache_config(new_config: CacheConfig) {
 /// Get image from cache
 pub fn get_cached_image(key: &str) -> Option<ButtonImage> {
     IMAGE_CACHE.with(|cache| {
-        if let Ok(cache) = cache.lock() {
+        if let Ok(mut cache) = cache.lock() {
             cache.get(key).map(|cached| match cached {
                 CachedImage::Text(text) => ButtonImage::Text(text.clone()),
                 CachedImage::Bitmap(surface) => ButtonImage::Bitmap(surface.clone()),
@@ -112,23 +252,23 @@ pub fn get_cached_image(key: &str) -> Option<ButtonImage> {
 
 /// Store image in cache (only cloneable types)
 pub fn cache_image(key: String, image: &ButtonImage) {
-    let cached_image = match image {
-        ButtonImage::Text(text) => Some(CachedImage::Text(text.clone())),
-        ButtonImage::Bitmap(surface) => Some(CachedImage::Bitmap(surface.clone())),
-        ButtonImage::Blank => Some(CachedImage::Blank),
-        ButtonImage::Svg(_) => None, // Don't cache SVG handles
+    let (cached_image, size_bytes) = match image {
+        ButtonImage::Text(text) => (Some(CachedImage::Text(text.clone())), text.len()),
+        ButtonImage::Bitmap(surface) => {
+            // Estimate bitmap size (ARGB32 = 4 bytes per pixel)
+            let width = surface.width() as usize;
+            let height = surface.height() as usize;
+            let size = width * height * 4;
+            (Some(CachedImage::Bitmap(surface.clone())), size)
+        },
+        ButtonImage::Blank => (Some(CachedImage::Blank), 0),
+        ButtonImage::Svg(_) => (None, 0), // Don't cache SVG handles
     };
     
     if let Some(cached) = cached_image {
         IMAGE_CACHE.with(|cache| {
             if let Ok(mut cache) = cache.lock() {
-                // Simple LRU: remove oldest entry if cache is full
-                if cache.len() >= MAX_CACHE_SIZE {
-                    if let Some(oldest_key) = cache.keys().next().cloned() {
-                        cache.remove(&oldest_key);
-                    }
-                }
-                cache.insert(key, cached);
+                cache.insert(key, cached, size_bytes);
             }
         });
     }
@@ -147,9 +287,7 @@ pub fn clear_cache() {
 pub fn get_cache_stats() -> (usize, usize) {
     IMAGE_CACHE.with(|cache| {
         if let Ok(cache) = cache.lock() {
-            let entry_count = cache.len();
-            let estimated_memory = entry_count * 1024; // Rough estimate: 1KB per entry
-            (entry_count, estimated_memory)
+            cache.get_stats()
         } else {
             (0, 0)
         }
@@ -169,14 +307,14 @@ pub fn display_detailed_cache_info() {
     println!("    - Debug keys: {}", if config.debug_keys_enabled { "enabled" } else { "disabled" });
     println!("  Current Status:");
     println!("    - Active entries: {}", entry_count);
-    println!("    - Estimated memory: {:.2} KB", memory_usage as f64 / 1024.0);
+    println!("    - Memory usage: {:.2} MB", memory_usage as f64 / 1024.0 / 1024.0);
     println!("    - Cache utilization: {:.1}%", (entry_count as f64 / config.max_size as f64) * 100.0);
 }
 
 /// Debug cache state
 pub fn debug_cache_state() {
     let (entry_count, memory_usage) = get_cache_stats();
-    println!("[CacheDebug] Current cache state: {} entries, {:.2} KB", entry_count, memory_usage as f64 / 1024.0);
+    println!("[CacheDebug] Current cache state: {} entries, {:.2} MB", entry_count, memory_usage as f64 / 1024.0 / 1024.0);
 }
 
 /// Force cache cleanup
@@ -199,13 +337,26 @@ pub fn clear_image_cache_if_needed() {
 
 /// Manage image cache (called before redraws)
 pub fn manage_image_cache() {
-    // Simple cleanup check - could be enhanced with time-based cleanup
+    // Trigger cleanup if needed
+    IMAGE_CACHE.with(|cache| {
+        if let Ok(mut cache) = cache.lock() {
+            cache.cleanup_if_needed();
+        }
+    });
+    
+    // Check memory pressure
     clear_image_cache_if_needed();
 }
 
 /// Display cache performance statistics
 pub fn display_cache_stats() {
     let (entry_count, memory_usage) = get_cache_stats();
+    let memory_mb = memory_usage as f64 / 1024.0 / 1024.0;
+    
+    // Only log if there are entries or if memory usage is significant
+    if entry_count > 0 || memory_mb > 1.0 {
+        println!("[CacheStats] {} entries, {:.2} MB", entry_count, memory_mb);
+    }
 }
 
 /// Test cache performance
@@ -354,20 +505,20 @@ pub fn load_image(icon_name: &str, mode: Option<String>, path: &str, theme: &str
     let icon = icon_loader.file_for_size(256);
     let result = match icon.icon_type() {
         IconFileType::SVG => {
-            let handle = Loader::new().read_path(icon.path())?;
+            let handle = rsvg::Loader::new().read_path(icon.path())?;
             Ok(ButtonImage::Svg(handle))
         }
         IconFileType::PNG => {
-            let mut file = File::open(icon.path())?;
+            let mut file = std::fs::File::open(icon.path())?;
             let surf = ImageSurface::create_from_png(&mut file)?;
             if surf.height() == ICON_SIZE && surf.width() == ICON_SIZE {
                 Ok(ButtonImage::Bitmap(surf))
             } else {
-                let resized = ImageSurface::create(Format::ARgb32, ICON_SIZE, ICON_SIZE).unwrap();
-                let c = Context::new(&resized).unwrap();
-                c.scale(ICON_SIZE as f64 / surf.width() as f64, ICON_SIZE as f64 / surf.height() as f64);
-                c.set_source_surface(surf, 0.0, 0.0).unwrap();
-                c.set_antialias(Antialias::Best);
+                        let resized = ImageSurface::create(Format::ARgb32, ICON_SIZE, ICON_SIZE).unwrap();
+        let c = Context::new(&resized).unwrap();
+        c.scale(ICON_SIZE as f64 / surf.width() as f64, ICON_SIZE as f64 / surf.height() as f64);
+        c.set_source_surface(surf, 0.0, 0.0).unwrap();
+        c.set_antialias(Antialias::Best);
                 c.paint().unwrap();
                 Ok(ButtonImage::Bitmap(resized))
             }

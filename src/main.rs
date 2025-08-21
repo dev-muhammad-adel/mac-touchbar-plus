@@ -1,21 +1,19 @@
 use std::{
-    fs::{File, OpenOptions, self},
+    fs::{File, OpenOptions},
     os::{
         fd::{AsRawFd, AsFd, IntoRawFd},
-        unix::{io::{OwnedFd, FromRawFd}, fs::OpenOptionsExt, net::{UnixListener, UnixStream}},
+        unix::{io::{OwnedFd, FromRawFd}, fs::OpenOptionsExt, net::UnixStream},
     },
-    path::{Path, PathBuf},
+    path::Path,
     collections::HashMap,
     cmp::min,
-    // panic::self,
-    process::{Command, Child},
 };
 use std::io::{BufReader, Read, Write};
 use std::sync::Arc;
-use cairo::{ImageSurface, Format, Context, Surface, Rectangle, FontSlant, FontWeight, Antialias};
-use rsvg::{Loader, CairoRenderer, SvgHandle};
+use cairo::{ImageSurface, Format, Context, Surface, Rectangle, FontSlant, FontWeight};
+use rsvg::CairoRenderer;
 use drm::control::ClipRect;
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use input::{
     Libinput, LibinputInterface, Device as InputDevice,
     event::{
@@ -33,7 +31,6 @@ use nix::{
         epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags}
     },
     sys::eventfd::{eventfd, EfdFlags},
-    unistd::{chown, User},
 };
 
 use chrono::{Local, Timelike};
@@ -46,7 +43,7 @@ use view::browser_screen::BrowserAction;
 
 // Import the utils module
 mod utils;
-use utils::button_images::*;
+use crate::utils::button_images::{self, ICON_SIZE};
 
 // Add log level control at the top
 // Set to true to enable verbose debug logging, false for production (much less resource usage)
@@ -91,37 +88,24 @@ pub mod services;
 pub mod helper;
 
 #[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
-enum LayerKey {
+pub enum LayerKey {
     Media,
     Fn,
     Custom2,
     Custom3,
 }
 
-
-
-
-
 use crate::helper::manager::{HelperManager, VlcHelperManager, BrowserHelperManager};
-
-
-
-
-
-
 
 const BUTTON_SPACING_PX: i32 = 16;
 const APP_LAYER_KEYS2_GAP_PX: f64 = 4.0; // Custom gap for AppLayerKeys2 (Custom2)
 const APP_LAYER_KEYS3_GAP_PX: f64 = 4.0; // Custom gap for AppLayerKeys3
 const BUTTON_COLOR_INACTIVE: f64 = 0.172;
 const BUTTON_COLOR_ACTIVE: f64 = 0.350;
-use crate::utils::button_images::ICON_SIZE;
 const TIMEOUT_MS: i32 = 10 * 1000;
 
-
-
-struct Button {
-    image: utils::button_images::ButtonImage,
+pub struct Button {
+    image: button_images::ButtonImage,
     changed: bool,
     active: bool,
     action: Key,
@@ -190,7 +174,7 @@ impl Button {
             action,
             active: false,
             changed: false,
-            image: utils::button_images::ButtonImage::Text(text),
+            image: button_images::ButtonImage::Text(text),
             background,
             fraction: None,
         }
@@ -206,10 +190,10 @@ impl Button {
             }
         };
         
-        let image = utils::button_images::load_image(icon_name, mode, path, &icon_theme)
-            .or_else(|_| utils::button_images::try_load_svg_path(icon_name, path))
-            .or_else(|_| utils::button_images::try_load_png_path(icon_name, path))
-            .unwrap_or_else(|_| utils::button_images::ButtonImage::Text(icon_name.to_string()));
+                    let image = button_images::load_image(icon_name, mode, path, &icon_theme)
+                .or_else(|_| button_images::try_load_svg_path(icon_name, path))
+                .or_else(|_| button_images::try_load_png_path(icon_name, path))
+                .unwrap_or_else(|_| button_images::ButtonImage::Text(icon_name.to_string()));
         Button {
             action, image,
             active: false,
@@ -223,14 +207,14 @@ impl Button {
             action,
             active: false,
             changed: false,
-            image: utils::button_images::ButtonImage::Blank,
+            image: button_images::ButtonImage::Blank,
             background,
             fraction: None,
         }
     }
     fn render(&self, c: &Context, height: i32, button_left_edge: f64, button_width: u64, y_shift: f64) {
         match &self.image {
-            utils::button_images::ButtonImage::Text(text) => {
+            button_images::ButtonImage::Text(text) => {
                 let extents = c.text_extents(text).unwrap();
                 c.move_to(
                     button_left_edge + (button_width as f64 / 2.0 - extents.width() / 2.0).round(),
@@ -238,7 +222,7 @@ impl Button {
                 );
                 c.show_text(text).unwrap();
             },
-            utils::button_images::ButtonImage::Svg(svg) => {
+            button_images::ButtonImage::Svg(svg) => {
                 let renderer = CairoRenderer::new(&svg);
                 let x = button_left_edge + (button_width as f64 / 2.0 - (ICON_SIZE / 2) as f64).round();
                 let y = y_shift + ((height as f64 - ICON_SIZE as f64) / 2.0).round();
@@ -247,7 +231,7 @@ impl Button {
                     &Rectangle::new(x, y, ICON_SIZE as f64, ICON_SIZE as f64)
                 ).unwrap();
             }
-            utils::button_images::ButtonImage::Bitmap(surf) => {
+            button_images::ButtonImage::Bitmap(surf) => {
                 let x = button_left_edge + (button_width as f64 / 2.0 - (ICON_SIZE / 2) as f64).round();
                 let y = y_shift + ((height as f64 - ICON_SIZE as f64) / 2.0).round();
                 c.set_source_surface(surf, x, y).unwrap();
@@ -730,23 +714,7 @@ impl LibinputInterface for Interface {
 }
 
 
-fn button_hit(num: u32, idx: u32, width: u16, height: u16, x: f64, y: f64, layer_index: Option<LayerKey>) -> bool {
-    let gap = if let Some(layer) = layer_index {
-        match layer {
-            LayerKey::Custom2 => APP_LAYER_KEYS2_GAP_PX,
-            LayerKey::Custom3 => APP_LAYER_KEYS3_GAP_PX,
-            _ => BUTTON_SPACING_PX as f64,
-        }
-    } else {
-        BUTTON_SPACING_PX as f64
-    };
-    let button_width = (width as i32 - (gap as i32 * (num - 1) as i32)) as f64 / num as f64;
-    let left_edge = idx as f64 * (button_width + gap);
-    if x < left_edge || x > (left_edge + button_width) {
-        return false
-    }
-    y > 0.1 * height as f64 && y < 0.9 * height as f64
-}
+
 
 fn emit<F>(uinput: &mut UInputHandle<F>, ty: EventKind, code: u16, value: i32) where F: AsRawFd {
     uinput.write(&[input_event {
@@ -805,8 +773,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn real_main(drm: &mut DrmBackend) -> Result<()> {
     let (height, width) = drm.mode().size();
-    let (db_width, db_height) = drm.fb_info().unwrap().size();
-    let mut uinput = UInputHandle::new(OpenOptions::new().write(true).open("/dev/uinput").unwrap());
+    let (db_width, db_height) = drm.fb_info().expect("Failed to get framebuffer info").size();
+    let mut uinput = UInputHandle::new(OpenOptions::new().write(true).open("/dev/uinput").expect("Failed to open /dev/uinput"));
     let mut backlight = BacklightManager::new();
     let mut last_redraw_minute = Local::now().minute();
     let mut cfg_mgr = ConfigManager::new();
@@ -815,9 +783,6 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
     let mut helper_manager = HelperManager::new();
     let mut vlc_helper_manager = VlcHelperManager::new();
     let mut browser_helper_manager = BrowserHelperManager::new();
-    let mut vlc_helper_listener_fd: Option<i32> = None;
-    let mut vlc_helper_stream: Option<UnixStream> = None;
-    let mut vlc_helper_reader: Option<BufReader<UnixStream>> = None;
     let mut browser_helper_listener_fd: Option<i32> = None;
     let mut browser_helper_stream: Option<UnixStream> = None;
     let mut browser_helper_reader: Option<BufReader<UnixStream>> = None;
@@ -825,12 +790,12 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
     // Add focus-based VLC helper management
     let mut vlc_window_focused = false;
     let mut browser_window_focused = false;
-    let mut last_window_class: Option<String> = None;
+    let _last_window_class: Option<String> = None;
     let mut current_user: Option<String> = None;
 
     // Privilege dropping removed - run with appropriate permissions
 
-    let mut surface = ImageSurface::create(Format::ARgb32, db_width as i32, db_height as i32).unwrap();
+    let mut surface = ImageSurface::create(Format::ARgb32, db_width as i32, db_height as i32).expect("Failed to create image surface");
     // Start with Custom2 layer since user starts as not logged in
     let mut active_layer = LayerKey::Custom2;
     let mut last_layer = active_layer.clone();
@@ -838,14 +803,14 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
 
     let mut input_tb = Libinput::new_with_udev(Interface);
     let mut input_main = Libinput::new_with_udev(Interface);
-    input_tb.udev_assign_seat("seat-touchbar").unwrap();
-    input_main.udev_assign_seat("seat0").unwrap();
-    let epoll = Epoll::new(EpollCreateFlags::empty()).unwrap();
+    input_tb.udev_assign_seat("seat-touchbar").expect("Failed to assign touch bar seat");
+    input_main.udev_assign_seat("seat0").expect("Failed to assign main seat");
+    let epoll = Epoll::new(EpollCreateFlags::empty()).expect("Failed to create epoll instance");
     epoll.add(input_main.as_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 0)).unwrap();
     epoll.add(input_tb.as_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 1)).unwrap();
     epoll.add(cfg_mgr.fd(), EpollEvent::new(EpollFlags::EPOLLIN, 2)).unwrap();
     // --- eventfd integration ---
-    let event_fd = Arc::new(eventfd(0, EfdFlags::EFD_NONBLOCK).unwrap());
+    let event_fd = Arc::new(eventfd(0, EfdFlags::EFD_NONBLOCK).expect("Failed to create eventfd"));
     epoll.add(&*event_fd, EpollEvent::new(EpollFlags::EPOLLIN, 3)).unwrap();
     // --- end eventfd integration ---
     uinput.set_evbit(EventKind::Key).unwrap();
@@ -877,7 +842,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
         ff_effects_max: 0,
         name: dev_name_c
     }).unwrap();
-    uinput.dev_create().unwrap();
+    uinput.dev_create().expect("Failed to create uinput device");
 
     let mut digitizer: Option<InputDevice> = None;
     let mut touches = HashMap::new();
@@ -946,7 +911,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
             next_timeout_ms = min(next_timeout_ms, 16);
         }
         let current_minute = Local::now().minute();
-        for button in &mut layers.get_mut(&active_layer).unwrap().buttons {
+        for button in &mut layers.get_mut(&active_layer).expect("Active layer not found").buttons {
             if (button.action == Key::Time) && (current_minute != last_redraw_minute) {
                 needs_complete_redraw = true;
                 last_redraw_minute = current_minute;
@@ -976,15 +941,15 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
         }
         // After slide-out animation, switch to pending layer if needed
         if !app_layer3_slide_anim.is_animating_out() && pending_layer.is_some() {
-            active_layer = pending_layer.take().unwrap().clone();
+            active_layer = pending_layer.take().expect("Pending layer not found").clone();
             last_layer = active_layer.clone();
             needs_complete_redraw = true;
         }
         // --- Restore any_changed variable for redraw logic ---
-        let any_changed = if let Some(split) = &layers.get(&active_layer).unwrap().split {
+        let any_changed = if let Some(split) = &layers.get(&active_layer).expect("Active layer not found").split {
             split.media.iter().any(|b| b.changed)
         } else {
-            layers.get(&active_layer).unwrap().buttons.iter().any(|b| b.changed)
+            layers.get(&active_layer).expect("Active layer not found").buttons.iter().any(|b| b.changed)
         };
         
         // Check for browser screen button changes
@@ -1005,61 +970,89 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
         // Handle different types of redraws
         if needs_complete_redraw || any_changed || browser_buttons_changed {
             // Manage image cache before redraw
-            utils::button_images::manage_image_cache();
+            button_images::manage_image_cache();
             
-            println!("[main] REDRAW TRIGGERED: needs_complete_redraw={}, any_changed={}, browser_buttons_changed={}", needs_complete_redraw, any_changed, browser_buttons_changed);
+            // Performance optimization: Only log redraws in debug mode
+            if DEBUG_LOGGING {
+                println!("[main] REDRAW TRIGGERED: needs_complete_redraw={}, any_changed={}, browser_buttons_changed={}", needs_complete_redraw, any_changed, browser_buttons_changed);
+            }
+            
             let shift = if cfg.enable_pixel_shift {
                 pixel_shift.get()
             } else {
                 (0.0, 0.0)
             };
+            
             // Use current session state directly
             let session_for_draw = current_session.as_ref();
+            
             // --- Pass slide progress for AppLayerKeys3 ---
             let app_layer3_slide_progress = if active_layer == LayerKey::Custom3 || last_layer == LayerKey::Custom3 {
                 app_layer3_slide_anim.progress()
             } else {
                 1.0
             };
+            
+            // Performance optimization: Batch drawing operations
+            let start_time = std::time::Instant::now();
+            
             // Draw only the current active layer (layer 3 during slide-out)
-            if vlc_drag_position.is_some() {
-
+            // VLC drag position is handled in the drawing functions
+            let clips = layers.get_mut(&active_layer).expect("Active layer not found").draw(&cfg, width as i32, height as i32, &surface, shift, needs_complete_redraw, false, session_for_draw, Some(active_layer.clone()), app_layer3_slide_progress, current_window_class.as_deref(), Some(&mut app_ui_manager), vlc_drag_position);
+            
+            // Performance optimization: Batch DRM operations
+            let data = surface.data().expect("Failed to get surface data");
+            drm.map().expect("Failed to map DRM buffer").as_mut()[..data.len()].copy_from_slice(&data);
+            drm.dirty(&clips).expect("Failed to mark DRM buffer as dirty");
+            
+            // Performance monitoring
+            let draw_time = start_time.elapsed();
+            if DEBUG_LOGGING && draw_time > std::time::Duration::from_millis(16) {
+                println!("[main] SLOW DRAW: {:.2}ms (target: 16ms for 60fps)", draw_time.as_millis() as f64);
             }
-            let mut clips = layers.get_mut(&active_layer).unwrap().draw(&cfg, width as i32, height as i32, &surface, shift, needs_complete_redraw, false, session_for_draw, Some(active_layer.clone()), app_layer3_slide_progress, current_window_class.as_deref(), Some(&mut app_ui_manager), vlc_drag_position);
-            let data = surface.data().unwrap();
-            drm.map().unwrap().as_mut()[..data.len()].copy_from_slice(&data);
-            drm.dirty(&clips).unwrap();
+            
             needs_complete_redraw = false;
         }
         
-        // Check cache memory pressure periodically
+        // Performance optimization: Reduce cache check frequency
         static mut CACHE_CHECK_COUNTER: u64 = 0;
         unsafe {
             CACHE_CHECK_COUNTER += 1;
-            if CACHE_CHECK_COUNTER % 1000 == 0 { // Check every 1000 frames
-                utils::button_images::clear_image_cache_if_needed();
+            // Check every 2000 frames instead of 1000 for better performance
+            if CACHE_CHECK_COUNTER % 2000 == 0 {
+                button_images::clear_image_cache_if_needed();
             }
         }
         
-        // Display cache performance statistics
-        utils::button_images::display_cache_stats();
+        // Performance optimization: Only display cache stats in debug mode
+        if DEBUG_LOGGING {
+            button_images::display_cache_stats();
+        }
         
         // --- epoll wait and event handling ---
         let mut events = [EpollEvent::empty(); 5];
-        let n = epoll.wait(&mut events, next_timeout_ms as isize).unwrap();
+        
+        // Performance optimization: Frame rate limiting
+        let frame_start = std::time::Instant::now();
+        
+        let n = epoll.wait(&mut events, next_timeout_ms as isize).expect("Epoll wait failed");
 
         for i in 0..n {
             let event = events[i];
             match event.data() {
-                0 => {  },
-                1 => {  },
-                2 => { /* handle cfg_mgr.fd() if needed */ },
+                0 => { /* Main input events handled in the input processing loop */ },
+                1 => { /* Touch bar input events handled in the input processing loop */ },
+                2 => { /* Config manager events handled by cfg_mgr.update_config() */ },
                 3 => {
                     // eventfd triggered: read and process session event
                     let mut buf = [0u8; 8];
                     let _ = nix::unistd::read(event_fd.as_raw_fd(), &mut buf);
                                     if let Ok(new_state) = event_rx.try_recv() {
-                    println!("[main] Received session event: {:?}", new_state);
+                    // Performance optimization: Reduce logging in production
+                    if DEBUG_LOGGING {
+                        println!("[main] Received session event: {:?}", new_state);
+                    }
+                    
                     let session_changed = match &current_session {
                         Some(current) => current != &new_state,
                         None => {
@@ -1067,41 +1060,58 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                             true
                         }
                     };
-                    println!("[main] Session changed: {} (current: {:?}, new: {:?})", session_changed, current_session, new_state);
+                    
+                    if DEBUG_LOGGING {
+                        println!("[main] Session changed: {} (current: {:?}, new: {:?})", session_changed, current_session, new_state);
+                    }
                     
                                             if session_changed {
                             if new_state.is_logged_in {
-                                println!("[main] User logged in: {}", new_state.user);
+                                if DEBUG_LOGGING {
+                                    println!("[main] User logged in: {}", new_state.user);
+                                }
                                 current_user = Some(new_state.user.clone());
                                 
                                 // Set login time and start delay
                                 helper_manager.set_login_time();
                                 
                                 // Don't start helper immediately - wait for delay to complete
-                                println!("[main] User logged in, starting 1 second delay before helper");
+                                if DEBUG_LOGGING {
+                                    println!("[main] User logged in, starting 1 second delay before helper");
+                                }
                                 
                                 // VLC helper will be started when VLC window gains focus
                                 
                                 // Switch to Media layer when user logs in
                                 if active_layer != LayerKey::Media {
-                                    println!("[main] User logged in, switching from {:?} to Media layer", active_layer);
+                                    if DEBUG_LOGGING {
+                                        println!("[main] User logged in, switching from {:?} to Media layer", active_layer);
+                                    }
                                     active_layer = LayerKey::Media;
                                     needs_complete_redraw = true;
                                 }
                              } else {
-                                println!("[main] User logged out: {:?}", current_session);
+                                if DEBUG_LOGGING {
+                                    println!("[main] User logged out: {:?}", current_session);
+                                }
                                 if let Some(fd) = helper_listener_fd.take() {
-                                    println!("[main] Removing helper listener fd: {}", fd);
+                                    if DEBUG_LOGGING {
+                                        println!("[main] Removing helper listener fd: {}", fd);
+                                    }
                                     let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
                                     epoll.delete(listener_fd_obj.as_fd()).unwrap();
                                 }
                                 if let Some(stream) = helper_stream.take() {
-                                    println!("[main] Removing helper stream from epoll");
+                                    if DEBUG_LOGGING {
+                                        println!("[main] Removing helper stream from epoll");
+                                    }
                                     epoll.delete(&stream).unwrap();
                                     helper_reader = None;
                                 }
                                 // VLC helper will be stopped when VLC window loses focus
-                                println!("[main] Stopping main helper");
+                                if DEBUG_LOGGING {
+                                    println!("[main] Stopping main helper");
+                                }
                                 helper_manager.stop();
                                 
                                 // Reset session ready state for next login
@@ -1109,7 +1119,9 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                 
                                 // Switch to Custom2 layer when user logs out
                                 if active_layer != LayerKey::Custom2 {
-                                    println!("[main] User logged out, switching from {:?} to Custom2 layer", active_layer);
+                                    if DEBUG_LOGGING {
+                                        println!("[main] User logged out, switching from {:?} to Custom2 layer", active_layer);
+                                    }
                                     active_layer = LayerKey::Custom2;
                                     needs_complete_redraw = true;
                                 }
@@ -1121,27 +1133,39 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                             current_session = Some(new_state);
                             needs_complete_redraw = true;
                         } else {
-                            println!("[main] Session state unchanged, skipping redraw");
+                            if DEBUG_LOGGING {
+                                println!("[main] Session state unchanged, skipping redraw");
+                            }
                         }
                     }
                 }
                 4 => { // Helper listener event
-                    println!("[main] Helper listener event triggered");
+                    if DEBUG_LOGGING {
+                        println!("[main] Helper listener event triggered");
+                    }
                     if let Some(stream) = helper_manager.accept_connection() {
-                        println!("[main] Helper connected to socket successfully");
+                        if DEBUG_LOGGING {
+                            println!("[main] Helper connected to socket successfully");
+                        }
                         epoll.add(&stream, EpollEvent::new(EpollFlags::EPOLLIN, 5)).unwrap();
                         helper_reader = Some(BufReader::new(stream.try_clone().unwrap()));
                         helper_stream = Some(stream);
-                        println!("[main] Helper stream added to epoll and stored");
+                        if DEBUG_LOGGING {
+                            println!("[main] Helper stream added to epoll and stored");
+                        }
                         
                         // Stop listening for new connections
                         if let Some(fd) = helper_listener_fd.take() {
-                            println!("[main] Removing helper listener fd: {} from epoll", fd);
+                            if DEBUG_LOGGING {
+                                println!("[main] Removing helper listener fd: {} from epoll", fd);
+                            }
                             let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
                             epoll.delete(listener_fd_obj.as_fd()).unwrap();
                         }
                     } else {
-                        println!("[main] No helper connection available to accept");
+                        if DEBUG_LOGGING {
+                            println!("[main] No helper connection available to accept");
+                        }
                     }
                 }
                 5 => { // Helper stream event
@@ -1484,8 +1508,8 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
             }
         }
         // // After epoll, always process all pending input events:
-        input_tb.dispatch().unwrap();
-        input_main.dispatch().unwrap();
+        input_tb.dispatch().expect("Failed to dispatch touch bar input");
+        input_main.dispatch().expect("Failed to dispatch main input");
 
         for event in &mut input_tb.clone().chain(input_main.clone()) {
             backlight.process_event(&event);
@@ -1531,21 +1555,21 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                     // Cache management commands (Ctrl+Shift+C for cache debug, Ctrl+Shift+X for cache cleanup)
                     else if key.key() == Key::C as u32 && key.key_state() == KeyState::Pressed {
                         // Check if cache debug keys are enabled
-                        let config = utils::button_images::get_cache_config();
+                        let config = button_images::get_cache_config();
                         if config.debug_keys_enabled {
-                            utils::button_images::debug_cache_state();
+                            button_images::debug_cache_state();
                         }
                     } else if key.key() == Key::X as u32 && key.key_state() == KeyState::Pressed {
                         // Check if cache debug keys are enabled
-                        let config = utils::button_images::get_cache_config();
+                        let config = button_images::get_cache_config();
                         if config.debug_keys_enabled {
-                            utils::button_images::force_cache_cleanup();
+                            button_images::force_cache_cleanup();
                         }
                     } else if key.key() == Key::V as u32 && key.key_state() == KeyState::Pressed {
                         // Check if cache debug keys are enabled
-                        let config = utils::button_images::get_cache_config();
+                        let config = button_images::get_cache_config();
                         if config.debug_keys_enabled {
-                            utils::button_images::display_detailed_cache_info();
+                            button_images::display_detailed_cache_info();
                         }
                     }
                 },
@@ -1558,7 +1582,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                             let _x = dn.x_transformed(width as u32);
                             let _y = dn.y_transformed(height as u32);
                             println!("[main] Touch down at ({}, {})", _x, _y);
-                            if let Some((group, idx)) = layers.get_mut(&active_layer).unwrap().hit_test(_x, width as i32, Some(active_layer.clone())) {
+                            if let Some((group, idx)) = layers.get_mut(&active_layer).expect("Active layer not found").hit_test(_x, width as i32, Some(active_layer.clone())) {
                                 match group {
                                     "modules" => {
                                         // Store touch for modules group
@@ -1820,7 +1844,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                     }
                                 
                                     "media" => {
-                                        if let Some(split) = &mut layers.get_mut(&active_layer).unwrap().split {
+                                        if let Some(split) = &mut layers.get_mut(&active_layer).expect("Active layer not found").split {
                                             let button = &mut split.media[idx];
                                             if button.action == Key::Unknown {
                                                 continue;
@@ -1830,7 +1854,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                         }
                                     }
                                     "flat" => {
-                                        let button = &mut layers.get_mut(&active_layer).unwrap().buttons[idx];
+                                        let button = &mut layers.get_mut(&active_layer).expect("Active layer not found").buttons[idx];
                                         if button.action == Key::Unknown {
                                             continue;
                                         }
@@ -1851,7 +1875,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                             }
                             let _x = mtn.x_transformed(width as u32);
                             let _y = mtn.y_transformed(height as u32);
-                            let (layer, group, idx) = touches.get(&mtn.seat_slot()).unwrap();
+                            let (layer, group, idx) = touches.get(&mtn.seat_slot()).expect("Touch slot not found");
                             println!("[main] Motion event: group={}, idx={}, coords=({}, {})", group, idx, _x, _y);
                             match *group {
                                 "modules" => {
@@ -1922,7 +1946,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                     continue;
                                 }
                                 "media" => {
-                                    if let Some(split) = &mut layers.get_mut(layer).unwrap().split {
+                                    if let Some(split) = &mut layers.get_mut(layer).expect("Layer not found").split {
                                         let button = &mut split.media[*idx];
                                         if button.action == Key::Unknown {
                                             continue;
@@ -1931,7 +1955,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                     }
                                 }
                                 "flat" => {
-                                    let button = &mut layers.get_mut(layer).unwrap().buttons[*idx];
+                                    let button = &mut layers.get_mut(layer).expect("Layer not found").buttons[*idx];
                                     if button.action == Key::Unknown {
                                         continue;
                                     }
@@ -1944,7 +1968,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                             if !touches.contains_key(&up.seat_slot()) {
                                 continue;
                             }
-                            let (layer, group, idx) = touches.get(&up.seat_slot()).unwrap();
+                            let (layer, group, idx) = touches.get(&up.seat_slot()).expect("Touch slot not found");
                             println!("Up: group={}, idx={}", group, idx);
                             match *group {
                                 "modules" => {
@@ -1987,7 +2011,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                     continue;
                                 }
                                 "media" => {
-                                    if let Some(split) = &mut layers.get_mut(layer).unwrap().split {
+                                    if let Some(split) = &mut layers.get_mut(layer).expect("Layer not found").split {
                                         let button = &mut split.media[*idx];
                                         if button.action == Key::Unknown {
                                             continue;
@@ -1996,7 +2020,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                     }
                                 }
                                 "flat" => {
-                                    let button = &mut layers.get_mut(layer).unwrap().buttons[*idx];
+                                    let button = &mut layers.get_mut(layer).expect("Layer not found").buttons[*idx];
                                     if button.action == Key::Unknown {
                                         continue;
                                     }
@@ -2039,7 +2063,9 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
         unsafe {
             FORCE_CLEANUP_COUNTER += 1;
             if FORCE_CLEANUP_COUNTER % 5000 == 0 { // Every 5000 frames
-                println!("[main] Performing forced cleanup of zombie processes");
+                if DEBUG_LOGGING {
+                    println!("[main] Performing forced cleanup of zombie processes");
+                }
                 helper_manager.force_cleanup();
                 vlc_helper_manager.force_cleanup();
                 browser_helper_manager.force_cleanup();
@@ -2066,6 +2092,15 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                     println!("[main] ERROR: Failed to start main helper for user: {}", user);
                 }
             }
+        }
+        
+        // Performance optimization: Frame rate limiting to maintain 60fps
+        let frame_duration = frame_start.elapsed();
+        let target_frame_time = std::time::Duration::from_millis(16); // 60fps = 16.67ms per frame
+        
+        if frame_duration < target_frame_time {
+            let sleep_time = target_frame_time - frame_duration;
+            std::thread::sleep(sleep_time);
         }
         
         // Process session events (event-driven)

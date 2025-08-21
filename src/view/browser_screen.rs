@@ -1,6 +1,6 @@
 use cairo::Context;
 use input_linux::Key;
-use crate::toggle_key;
+
 use drm::control::ClipRect;
 use crate::helper::BrowserStatus;
 
@@ -411,7 +411,7 @@ impl Button {
         }
     }
 
-    pub fn set_active<F>(&mut self, uinput: &mut input_linux::uinput::UInputHandle<F>, active: bool) 
+    pub fn set_active<F>(&mut self, _uinput: &mut input_linux::uinput::UInputHandle<F>, active: bool) 
     where F: std::os::fd::AsRawFd {
         println!("[browser_screen::Button] set_active called: text='{}', old_active={}, new_active={}", self.text, self.active, active);
         if self.active != active {
