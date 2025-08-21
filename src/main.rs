@@ -27,7 +27,7 @@ use input_linux::{uinput::UInputHandle, EventKind, Key, SynchronizeKind};
 use input_linux_sys::{uinput_setup, input_id, timeval, input_event};
 use nix::{
     sys::{
-        signal::{Signal, SigSet, SigAction, SigHandler, SigFlags},
+        signal::{Signal, SigSet, SigAction, SigHandler, SaFlags},
         epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags}
     },
     sys::eventfd::{eventfd, EfdFlags},
@@ -79,7 +79,7 @@ fn setup_signal_handlers() {
     unsafe {
         let action = SigAction::new(
             SigHandler::Handler(signal_handler),
-            SigFlags::empty(),
+            SaFlags::empty(),
             SigSet::empty(),
         );
         
