@@ -9,9 +9,6 @@ const PLAY_PAUSE_BUTTON_SIZE: f64 = 32.0;
 pub struct VlcScreen {
     pub last_status: Option<VlcStatus>,
     pub is_dragging: bool,
-    pub waveform_phase: f64,
-    pub waveform_amplitude: f64,
-    pub last_waveform_update: u64,
 }
 
 impl VlcScreen {
@@ -19,9 +16,6 @@ impl VlcScreen {
         Self {
             last_status: None,
             is_dragging: false,
-            waveform_phase: 0.0,
-            waveform_amplitude: 0.0,
-            last_waveform_update: 0,
         }
     }
 
@@ -32,70 +26,6 @@ impl VlcScreen {
     
     pub fn reset_drag_state(&mut self) {
         self.is_dragging = false;
-    }
-
-    fn update_waveform(&mut self, is_playing: bool) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-        
-        if now - self.last_waveform_update > 16 { // ~60 FPS
-            self.last_waveform_update = now;
-            
-            if is_playing {
-                self.waveform_phase += 0.3; // Slower, less distracting animation
-                self.waveform_amplitude = (self.waveform_amplitude * 0.8 + 0.2).min(0.8); // Lower amplitude
-            } else {
-                self.waveform_amplitude *= 0.9; // Slower fade out when not playing
-            }
-        }
-    }
-
-    fn draw_waveform(&self, c: &Context, x: f64, y: f64, width: f64, height: f64, anim_progress: f64) {
-        if self.waveform_amplitude < 0.01 {
-            return;
-        }
-
-        c.save().unwrap();
-        
-        // Simple, subtle gradient for waveform
-        let gradient = cairo::LinearGradient::new(x, y, x, y + height);
-        gradient.add_color_stop_rgba(0.0, 0.2, 0.5, 0.8, anim_progress * 0.6);
-        gradient.add_color_stop_rgba(0.5, 0.3, 0.6, 0.9, anim_progress * 0.5);
-        gradient.add_color_stop_rgba(1.0, 0.1, 0.4, 0.7, anim_progress * 0.4);
-        
-        c.set_source(&gradient);
-        c.set_line_width(2.0); // Thinner, less distracting lines
-        
-        // Draw only 2 simple waveforms instead of 4 complex ones
-        for wave in 0..2 {
-            let amplitude = (self.waveform_amplitude + 0.2) * (1.0 - wave as f64 * 0.3);
-            let phase_offset = self.waveform_phase * (1.0 + wave as f64 * 0.2);
-            
-            c.new_path();
-            let center_y = y + height * 0.5;
-            
-            for i in 0..=width as i32 {
-                let x_pos = x + i as f64;
-                let normalized_x = i as f64 / width;
-                
-                // Simple sine wave only
-                let wave_y = center_y + 
-                    (normalized_x * std::f64::consts::PI * 2.0 + phase_offset).sin() * 
-                    height * 0.25 * amplitude;
-                
-                if i == 0 {
-                    c.move_to(x_pos, wave_y);
-                } else {
-                    c.line_to(x_pos, wave_y);
-                }
-            }
-            
-            c.stroke().unwrap();
-        }
-        
-        c.restore().unwrap();
     }
 
     fn draw_apple_style_button(&self, c: &Context, x: f64, y: f64, width: f64, height: f64, is_playing: bool, anim_progress: f64) {
@@ -181,12 +111,6 @@ impl VlcScreen {
         let pill_w = width;
         let pill_h = height + radius * 2.0;
 
-        // Update VU meter first (before any status checks)
-        if let Some(status) = &self.last_status {
-            let is_playing = status.is_playing;
-            self.update_waveform(is_playing);
-        }
-        
         if let Some(status) = &self.last_status {
             // macOS Touch Bar style layout: [icon] [current_time] [progress_bar] [total_time]
             
@@ -276,7 +200,7 @@ impl VlcScreen {
             c.restore().unwrap();
             
             // Draw VU meter background inside the INNER progress bar area only
-            self.draw_waveform(c, inner_x, inner_y, inner_w, inner_h, anim_progress);
+            // self.draw_cava_visualizer(c, inner_x, inner_y, inner_w, inner_h, anim_progress); // Removed cava visualizer
 
             
             // Progress bar head (white, 6px wide, rounded)
