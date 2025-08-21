@@ -48,6 +48,8 @@ detect_package_manager() {
         echo "yum"
     elif command -v zypper >/dev/null 2>&1; then
         echo "zypper"
+    elif [ -f /etc/os-release ] && grep -q "ID=nixos" /etc/os-release; then
+        echo "nixos"
     else
         echo "unknown"
     fi
@@ -76,7 +78,33 @@ install_dependencies() {
                 gdk-pixbuf2 \
                 libxml2 \
                 librsvg \
-                xdotool >/dev/null 2>&1
+                xdotool \
+                libdrm \
+                libx11 \
+                libxcb \
+                libxcb-render \
+                libxcb-xfixes \
+                libxcb-shape \
+                libxcb-keysyms \
+                libxcb-util \
+                libxcb-icccm \
+                libxcb-image \
+                libxcb-shm \
+                libxcb-randr \
+                libxcb-xkb \
+                libxkbcommon \
+                libxkbcommon-x11 \
+                libxss \
+                libxtst \
+                libxi \
+                libxrandr \
+                libxinerama \
+                libxcursor \
+                libxcomposite \
+                libxdamage \
+                libxext \
+                libxfixes \
+                libxrender >/dev/null 2>&1
             ;;
         "apt")
             # Ubuntu / Debian
@@ -94,7 +122,33 @@ install_dependencies() {
                 libgdk-pixbuf2.0-dev \
                 libxml2-dev \
                 librsvg2-dev \
-                xdotool
+                xdotool \
+                libdrm-dev \
+                libx11-dev \
+                libxcb1-dev \
+                libxcb-render0-dev \
+                libxcb-xfixes0-dev \
+                libxcb-shape0-dev \
+                libxcb-keysyms1-dev \
+                libxcb-util0-dev \
+                libxcb-icccm4-dev \
+                libxcb-image0-dev \
+                libxcb-shm0-dev \
+                libxcb-randr0-dev \
+                libxcb-xkb1-dev \
+                libxkbcommon-dev \
+                libxkbcommon-x11-dev \
+                libxss-dev \
+                libxtst-dev \
+                libxi-dev \
+                libxrandr-dev \
+                libxinerama-dev \
+                libxcursor-dev \
+                libxcomposite-dev \
+                libxdamage-dev \
+                libxext-dev \
+                libxfixes-dev \
+                libxrender-dev
             ;;
         "dnf"|"yum")
             # Fedora / RHEL / CentOS
@@ -111,7 +165,33 @@ install_dependencies() {
                 gdk-pixbuf2-devel \
                 libxml2-devel \
                 librsvg2-devel \
-                xdotool
+                xdotool \
+                libdrm-devel \
+                libX11-devel \
+                libxcb-devel \
+                libxcb-render0-devel \
+                libxcb-xfixes0-devel \
+                libxcb-shape0-devel \
+                libxcb-keysyms1-devel \
+                libxcb-util0-devel \
+                libxcb-icccm4-devel \
+                libxcb-image0-devel \
+                libxcb-shm0-devel \
+                libxcb-randr0-devel \
+                libxcb-xkb1-devel \
+                libxkbcommon-devel \
+                libxkbcommon-x11-devel \
+                libXScrnSaver-devel \
+                libXtst-devel \
+                libXi-devel \
+                libXrandr-devel \
+                libXinerama-devel \
+                libXcursor-devel \
+                libXcomposite-devel \
+                libXdamage-devel \
+                libXext-devel \
+                libXfixes-devel \
+                libXrender-devel
             ;;
         "zypper")
             # openSUSE
@@ -128,7 +208,50 @@ install_dependencies() {
                 gdk-pixbuf2-devel \
                 libxml2-devel \
                 librsvg2-devel \
-                xdotool
+                xdotool \
+                libdrm-devel \
+                libX11-devel \
+                libxcb-devel \
+                libxcb-render0-devel \
+                libxcb-xfixes0-devel \
+                libxcb-shape0-devel \
+                libxcb-keysyms1-devel \
+                libxcb-util0-devel \
+                libxcb-icccm4-devel \
+                libxcb-image0-devel \
+                libxcb-shm0-devel \
+                libxcb-randr0-devel \
+                libxcb-xkb1-devel \
+                libxkbcommon-devel \
+                libxkbcommon-x11-devel \
+                libXScrnSaver-devel \
+                libXtst-devel \
+                libXi-devel \
+                libXrandr-devel \
+                libXinerama-devel \
+                libXcursor-devel \
+                libXcomposite-devel \
+                libXdamage-devel \
+                libXext-devel \
+                libXfixes-devel \
+                libXrender-devel
+            ;;
+        "nixos")
+            # NixOS
+            print_status "NixOS detected. Installing dependencies via nix-env..."
+            print_warning "Note: On NixOS, you may need to add these packages to your configuration.nix instead of using nix-env"
+            print_warning "Consider adding them to your systemPackages or using a development shell with nix-shell"
+            
+            # Try to install via nix-env, but warn if it fails
+            if command -v nix-env >/dev/null 2>&1; then
+                nix-env -iA nixos.rustc nixos.cargo nixos.pkg-config nixos.cairo nixos.libinput nixos.freetype nixos.fontconfig nixos.glib nixos.pango nixos.gdk-pixbuf nixos.libxml2 nixos.librsvg nixos.xdotool nixos.libdrm nixos.libX11 nixos.libxcb nixos.libxcb-render nixos.libxcb-xfixes nixos.libxcb-shape nixos.libxcb-keysyms nixos.libxcb-util nixos.libxcb-icccm nixos.libxcb-image nixos.libxcb-shm nixos.libxcb-randr nixos.libxcb-xkb nixos.libxkbcommon nixos.libxkbcommon-x11 nixos.libxss nixos.libxtst nixos.libxi nixos.libxrandr nixos.libxinerama nixos.libxcursor nixos.libxcomposite nixos.libxdamage nixos.libxext nixos.libxfixes nixos.libxrender || {
+                    print_warning "nix-env installation failed. Please add the required packages to your configuration.nix"
+                    print_warning "Required packages: rustc cargo pkg-config cairo libinput freetype fontconfig glib pango gdk-pixbuf libxml2 librsvg xdotool libdrm libX11 libxcb and related X11 libraries"
+                }
+            else
+                print_warning "nix-env not found. Please add the required packages to your configuration.nix"
+                print_warning "Required packages: rustc cargo pkg-config cairo libinput freetype fontconfig glib pango gdk-pixbuf libxml2 librsvg xdotool libdrm libX11 libxcb and related X11 libraries"
+            fi
             ;;
         *)
             print_warning "Unknown package manager. Please install dependencies manually:"
@@ -136,6 +259,7 @@ install_dependencies() {
             print_warning "- pkg-config"
             print_warning "- cairo, libinput, freetype, fontconfig, glib2, pango, gdk-pixbuf2, libxml2, librsvg"
             print_warning "- xdotool (for X11 window management and input simulation)"
+            print_warning "- libdrm, libx11, libxcb and related X11 development libraries"
             read -p "Press Enter to continue anyway..."
             ;;
     esac
@@ -153,13 +277,11 @@ cargo build --release
 print_status "Installing main binary..."
 install -D -m 755 target/release/tiny-dfr /usr/bin/tiny-dfr
 
-# Install helper binaries
+# Install helper binaries with correct names
 print_status "Installing helper binaries..."
-install -D -m 755 target/release/tiny-dfr-helper /usr/bin/tiny-dfr-helper
+install -D -m 755 target/release/tiny-dfr-focus-window-helper /usr/bin/tiny-dfr-focus-window-helper
 install -D -m 755 target/release/tiny-dfr-vlc-helper /usr/bin/tiny-dfr-vlc-helper
 install -D -m 755 target/release/tiny-dfr-browser-helper /usr/bin/tiny-dfr-browser-helper
-
-
 
 # Install udev rules
 print_status "Installing udev rules..."
@@ -195,8 +317,18 @@ udevadm trigger
 print_status "Enabling and starting tiny-dfr service..."
 systemctl daemon-reload
 systemctl enable tiny-dfr.service
-systemctl start tiny-dfr.service
 
-print_status "Installation completed successfully!"
-print_status "tiny-dfr service is now running and enabled to start on boot."
-print_status "You can check the service status with: systemctl status tiny-dfr" 
+# Check if the required devices exist before starting
+print_status "Checking for required devices..."
+if [ -e "/dev/tiny_dfr_display" ] && [ -e "/dev/tiny_dfr_backlight" ]; then
+    print_status "Required devices found, starting service..."
+    systemctl start tiny-dfr.service
+    print_status "Installation completed successfully!"
+    print_status "tiny-dfr service is now running and enabled to start on boot."
+    print_status "You can check the service status with: systemctl status tiny-dfr"
+else
+    print_warning "Required devices not found. Service will start automatically when devices become available."
+    print_status "Installation completed successfully!"
+    print_status "tiny-dfr service is enabled and will start when the required devices are detected."
+    print_status "You can check the service status with: systemctl status tiny-dfr"
+fi 

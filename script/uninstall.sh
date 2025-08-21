@@ -60,7 +60,7 @@ udevadm trigger
 # Remove binaries
 print_status "Removing binaries..."
 rm -f /usr/bin/tiny-dfr
-rm -f /usr/bin/tiny-dfr-helper
+rm -f /usr/bin/tiny-dfr-focus-window-helper
 rm -f /usr/bin/tiny-dfr-vlc-helper
 rm -f /usr/bin/tiny-dfr-browser-helper
 
