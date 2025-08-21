@@ -93,12 +93,16 @@ impl X11WindowMonitor {
                         reply.value[2],
                         reply.value[3],
                     ]);
-                    if window_id != 0 {
-                        return Some(window_id);
-                    }
+                    
+                    // Return the window ID even if it's 0 (empty workspace)
+                    // We'll handle the 0 case in get_active_window_class()
+                    eprintln!("[helper] Active window ID: {}", window_id);
+                    return Some(window_id);
                 }
             }
-            Err(_) => {}
+            Err(e) => {
+                eprintln!("[helper] Error getting active window property: {:?}", e);
+            }
         }
         
         None
@@ -107,16 +111,29 @@ impl X11WindowMonitor {
     fn get_active_window_class(&mut self) -> Option<String> {
         let active_window = self.get_active_window()?;
         
-        // Update active window
-        if self.active_window != Some(active_window) {
-            self.active_window = Some(active_window);
+        // Check if there's actually an active window (not 0 or invalid)
+        if active_window == 0 {
+            eprintln!("[helper] No active window (empty workspace)");
+            return Some("Desktop".to_string());
         }
         
-        self.get_window_class(active_window)
+        // Try to get the window class
+        if let Some(class) = self.get_window_class(active_window) {
+            // Update active window only if we successfully got a class
+            if self.active_window != Some(active_window) {
+                self.active_window = Some(active_window);
+            }
+            return Some(class);
+        }
+        
+        // If we can't get the window class, fall back to Desktop
+        eprintln!("[helper] Could not get window class for window {}, using Desktop", active_window);
+        Some("Desktop".to_string())
     }
     
     fn setup_event_listening(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Select for property change events on root window
+        // Monitor the _NET_ACTIVE_WINDOW property on the root window
+        // This is the most reliable way to detect focus changes in X11
         self.conn.change_window_attributes(
             self.root,
             &xproto::ChangeWindowAttributesAux::new().event_mask(
@@ -124,13 +141,7 @@ impl X11WindowMonitor {
             ),
         )?;
         
-        // Also listen for window focus events
-        self.conn.change_window_attributes(
-            self.root,
-            &xproto::ChangeWindowAttributesAux::new().event_mask(
-                xproto::EventMask::SUBSTRUCTURE_NOTIFY
-            ),
-        )?;
+        eprintln!("[helper] X11 event listening setup complete - monitoring _NET_ACTIVE_WINDOW property changes");
         
         Ok(())
     }
@@ -143,22 +154,16 @@ impl X11WindowMonitor {
             x11rb::protocol::Event::PropertyNotify(ev) => {
                 // Check if it's the active window property that changed
                 if ev.atom == self.net_active_window_atom {
-                    eprintln!("[helper] Active window property changed");
+                    eprintln!("[helper] Active window property changed!");
                     return Ok(self.get_active_window_class());
                 }
-            }
-            x11rb::protocol::Event::ConfigureNotify(_ev) => {
-                // Window configuration changed, might indicate focus change
-                eprintln!("[helper] Window configuration changed");
-                return Ok(self.get_active_window_class());
-            }
-            x11rb::protocol::Event::FocusIn(ev) => {
-                // Focus changed
-                eprintln!("[helper] Focus changed to window {}", ev.event);
-                return Ok(self.get_window_class(ev.event));
+                
+                // Ignore other property changes
+                eprintln!("[helper] Other property changed: atom={}", ev.atom);
             }
             _ => {
                 // Other events, ignore
+                eprintln!("[helper] Ignoring non-property event: {:?}", event);
             }
         }
         
@@ -1094,6 +1099,7 @@ fn run_x11_event_driven() -> Result<(), Box<dyn std::error::Error>> {
             }
             Ok(None) => {
                 // No focus change, continue waiting
+                // This can happen when switching to an empty workspace
             }
             Err(e) => {
                 eprintln!("[helper] Error waiting for X11 events: {}", e);
@@ -1188,4 +1194,5 @@ fn main() -> std::io::Result<()> {
     return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "No supported compositor detected"));
 }
 
+ 
  
