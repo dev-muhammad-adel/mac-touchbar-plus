@@ -387,11 +387,30 @@ impl HelperManager {
             let result = unsafe { libc::killpg(child.id() as i32, libc::SIGKILL) };
             if result != 0 {
                 let errno = std::io::Error::last_os_error();
-                println!("[HelperManager] WARNING: Failed to send SIGKILL: {}", errno);
+                // Only log as warning if it's not "No such process" (process already dead)
+                if errno.raw_os_error() != Some(3) { // ESRCH = 3
+                    println!("[HelperManager] WARNING: Failed to send SIGKILL: {}", errno);
+                } else {
+                    println!("[HelperManager] Process {} already terminated", child.id());
+                }
             }
             
-            // Wait for it to die
-            let _ = child.wait();
+            // Wait for it to die (non-blocking)
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    println!("[HelperManager] Process {} exited with status: {:?}", child.id(), status);
+                }
+                Ok(None) => {
+                    // Process still running, wait a bit more
+                    let _ = std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_millis(100));
+                        let _ = child.wait();
+                    });
+                }
+                Err(e) => {
+                    println!("[HelperManager] Error waiting for process {}: {}", child.id(), e);
+                }
+            }
         }
         
         self.listener.take();
@@ -668,11 +687,30 @@ impl VlcHelperManager {
             let result = unsafe { libc::killpg(child.id() as i32, libc::SIGKILL) };
             if result != 0 {
                 let errno = std::io::Error::last_os_error();
-                println!("[VlcHelperManager] WARNING: Failed to send SIGKILL: {}", errno);
+                // Only log as warning if it's not "No such process" (process already dead)
+                if errno.raw_os_error() != Some(3) { // ESRCH = 3
+                    println!("[VlcHelperManager] WARNING: Failed to send SIGKILL: {}", errno);
+                } else {
+                    println!("[VlcHelperManager] VLC helper process {} already terminated", child.id());
+                }
             }
             
-            // Wait for it to die
-            let _ = child.wait();
+            // Wait for it to die (non-blocking)
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    println!("[VlcHelperManager] VLC helper process {} exited with status: {:?}", child.id(), status);
+                }
+                Ok(None) => {
+                    // Process still running, wait a bit more
+                    let _ = std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_millis(100));
+                        let _ = child.wait();
+                    });
+                }
+                Err(e) => {
+                    println!("[VlcHelperManager] Error waiting for VLC helper process {}: {}", child.id(), e);
+                }
+            }
         }
         
         self.listener.take();
@@ -928,11 +966,30 @@ impl BrowserHelperManager {
             let result = unsafe { libc::killpg(child.id() as i32, libc::SIGKILL) };
             if result != 0 {
                 let errno = std::io::Error::last_os_error();
-                println!("[BrowserHelperManager] WARNING: Failed to send SIGKILL: {}", errno);
+                // Only log as warning if it's not "No such process" (process already dead)
+                if errno.raw_os_error() != Some(3) { // ESRCH = 3
+                    println!("[BrowserHelperManager] WARNING: Failed to send SIGKILL: {}", errno);
+                } else {
+                    println!("[BrowserHelperManager] Browser helper process {} already terminated", child.id());
+                }
             }
             
-            // Wait for it to exit
-            let _ = child.wait();
+            // Wait for it to exit (non-blocking)
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    println!("[BrowserHelperManager] Browser helper process {} exited with status: {:?}", child.id(), status);
+                }
+                Ok(None) => {
+                    // Process still running, wait a bit more
+                    let _ = std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_millis(100));
+                        let _ = child.wait();
+                    });
+                }
+                Err(e) => {
+                    println!("[BrowserHelperManager] Error waiting for browser helper process {}: {}", child.id(), e);
+                }
+            }
         }
         
         self.listener.take();

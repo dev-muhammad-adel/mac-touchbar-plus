@@ -27,7 +27,7 @@ use input_linux::{uinput::UInputHandle, EventKind, Key, SynchronizeKind};
 use input_linux_sys::{uinput_setup, input_id, timeval, input_event};
 use nix::{
     sys::{
-        signal::{Signal, SigSet},
+        signal::{Signal, SigSet, SigAction, SigHandler, SigFlags},
         epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags}
     },
     sys::eventfd::{eventfd, EfdFlags},
@@ -66,6 +66,31 @@ fn send_browser_command(stream: &mut UnixStream, command: &str) -> Result<(), st
     let command_with_newline = format!("{}\n", command);
     stream.write_all(command_with_newline.as_bytes())?;
     Ok(())
+}
+
+// Signal handler for graceful shutdown
+extern "C" fn signal_handler(_signal: i32) {
+    println!("[main] Received shutdown signal, exiting gracefully...");
+    std::process::exit(0);
+}
+
+// Setup signal handlers for graceful shutdown
+fn setup_signal_handlers() {
+    unsafe {
+        let action = SigAction::new(
+            SigHandler::Handler(signal_handler),
+            SigFlags::empty(),
+            SigSet::empty(),
+        );
+        
+        if let Err(e) = nix::sys::signal::sigaction(Signal::SIGTERM, &action) {
+            eprintln!("[main] Failed to set SIGTERM handler: {}", e);
+        }
+        
+        if let Err(e) = nix::sys::signal::sigaction(Signal::SIGINT, &action) {
+            eprintln!("[main] Failed to set SIGINT handler: {}", e);
+        }
+    }
 }
 use crate::display::display::DrmBackend;
 use display::animation::Animation;
@@ -772,6 +797,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn real_main(drm: &mut DrmBackend) -> Result<()> {
+    // Setup signal handlers for graceful shutdown
+    setup_signal_handlers();
     let (height, width) = drm.mode().size();
     let (db_width, db_height) = drm.fb_info().expect("Failed to get framebuffer info").size();
     let mut uinput = UInputHandle::new(OpenOptions::new().write(true).open("/dev/uinput").expect("Failed to open /dev/uinput"));
@@ -1320,18 +1347,30 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                     }
                 }
                 6 => { // VLC helper listener event
-                                    if let Some(stream) = vlc_helper_manager.accept_connection() {
-                    stream.set_nonblocking(true).expect("Failed to set VLC stream non-blocking");
-                    println!("[main] VLC helper connected to socket.");
-                    epoll.add(&stream, EpollEvent::new(EpollFlags::EPOLLIN, 7)).unwrap();
-                    vlc_helper_reader = Some(BufReader::new(stream.try_clone().unwrap()));
-                    vlc_helper_stream = Some(stream);
-                    // Stop listening for new connections
-                    if let Some(fd) = vlc_helper_listener_fd.take() {
-                        let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
-                        epoll.delete(listener_fd_obj.as_fd()).unwrap();
+                    if let Some(stream) = vlc_helper_manager.accept_connection() {
+                        if let Err(e) = stream.set_nonblocking(true) {
+                            eprintln!("[main] Failed to set VLC stream non-blocking: {}", e);
+                            continue;
+                        }
+                        println!("[main] VLC helper connected to socket.");
+                        if let Err(e) = epoll.add(&stream, EpollEvent::new(EpollFlags::EPOLLIN, 7)) {
+                            eprintln!("[main] Failed to add VLC stream to epoll: {}", e);
+                            continue;
+                        }
+                        if let Ok(stream_clone) = stream.try_clone() {
+                            vlc_helper_reader = Some(BufReader::new(stream_clone));
+                            vlc_helper_stream = Some(stream);
+                            // Stop listening for new connections
+                            if let Some(fd) = vlc_helper_listener_fd.take() {
+                                let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
+                                if let Err(e) = epoll.delete(listener_fd_obj.as_fd()) {
+                                    eprintln!("[main] Failed to remove VLC listener from epoll: {}", e);
+                                }
+                            }
+                        } else {
+                            eprintln!("[main] Failed to clone VLC stream");
+                        }
                     }
-                }
                 }
                 7 => { // VLC helper stream event
                     if let Some(reader) = &mut vlc_helper_reader {
@@ -1398,13 +1437,16 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                                    break; // No more data right now
                                },
-                                                               Err(_e) => {
-                                    if let Some(stream) = vlc_helper_stream.take() {
-                                        epoll.delete(&stream).unwrap();
-                                    }
-                                    vlc_helper_reader = None;
-                                    break;
-                                }
+                               Err(e) => {
+                                   eprintln!("[main] VLC helper stream error: {}", e);
+                                   if let Some(stream) = vlc_helper_stream.take() {
+                                       if let Err(e) = epoll.delete(&stream) {
+                                           eprintln!("[main] Failed to remove VLC stream from epoll: {}", e);
+                                       }
+                                   }
+                                   vlc_helper_reader = None;
+                                   break;
+                               }
                            }
                         }
                     }
@@ -2041,9 +2083,21 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
         // No login animation needed
         
         // Check process status and clean up zombies periodically
-        helper_manager.check_process_status();
-        vlc_helper_manager.check_process_status();
-        browser_helper_manager.check_process_status();
+        if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            helper_manager.check_process_status();
+        })) {
+            eprintln!("[main] Error during helper manager status check: {:?}", e);
+        }
+        if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vlc_helper_manager.check_process_status();
+        })) {
+            eprintln!("[main] Error during VLC helper manager status check: {:?}", e);
+        }
+        if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            browser_helper_manager.check_process_status();
+        })) {
+            eprintln!("[main] Error during browser helper manager status check: {:?}", e);
+        }
         
         // Debug: Log process status periodically
         static mut PROCESS_STATUS_COUNTER: u64 = 0;
@@ -2058,17 +2112,30 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
             }
         }
         
-        // Force cleanup of any zombie processes every 5000 frames
+        // Force cleanup of any zombie processes every 10000 frames (less frequent to reduce overhead)
         static mut FORCE_CLEANUP_COUNTER: u64 = 0;
         unsafe {
             FORCE_CLEANUP_COUNTER += 1;
-            if FORCE_CLEANUP_COUNTER % 5000 == 0 { // Every 5000 frames
+            if FORCE_CLEANUP_COUNTER % 10000 == 0 { // Every 10000 frames (reduced frequency)
                 if DEBUG_LOGGING {
                     println!("[main] Performing forced cleanup of zombie processes");
                 }
-                helper_manager.force_cleanup();
-                vlc_helper_manager.force_cleanup();
-                browser_helper_manager.force_cleanup();
+                // Wrap cleanup calls in error handling to prevent crashes
+                if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    helper_manager.force_cleanup();
+                })) {
+                    eprintln!("[main] Error during helper manager cleanup: {:?}", e);
+                }
+                if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    vlc_helper_manager.force_cleanup();
+                })) {
+                    eprintln!("[main] Error during VLC helper manager cleanup: {:?}", e);
+                }
+                if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    browser_helper_manager.force_cleanup();
+                })) {
+                    eprintln!("[main] Error during browser helper manager cleanup: {:?}", e);
+                }
             }
         }
         

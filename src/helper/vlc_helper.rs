@@ -49,7 +49,9 @@ impl VlcStatus {
 }
 
 fn is_vlc_running() -> bool {
-    Command::new("dbus-send")
+    Command::new("timeout")
+        .arg("1") // 1 second timeout
+        .arg("dbus-send")
         .arg("--session")
         .arg("--dest=org.mpris.MediaPlayer2.vlc")
         .arg("--type=method_call")
@@ -64,8 +66,10 @@ fn is_vlc_running() -> bool {
 }
 
 fn get_vlc_status() -> Option<VlcStatus> {
-    // Get playback status
-    let status_output = Command::new("dbus-send")
+    // Get playback status with timeout to prevent hanging
+    let status_output = Command::new("timeout")
+        .arg("1") // 1 second timeout
+        .arg("dbus-send")
         .arg("--session")
         .arg("--dest=org.mpris.MediaPlayer2.vlc")
         .arg("--type=method_call")
@@ -84,8 +88,10 @@ fn get_vlc_status() -> Option<VlcStatus> {
     let status_text = String::from_utf8_lossy(&status_output.stdout);
     let is_playing = status_text.contains("Playing");
 
-    // Get position
-    let position_output = Command::new("dbus-send")
+    // Get position with timeout to prevent hanging
+    let position_output = Command::new("timeout")
+        .arg("1") // 1 second timeout
+        .arg("dbus-send")
         .arg("--session")
         .arg("--dest=org.mpris.MediaPlayer2.vlc")
         .arg("--type=method_call")
@@ -104,8 +110,10 @@ fn get_vlc_status() -> Option<VlcStatus> {
         .and_then(|s| s.parse::<i64>().ok())
         .unwrap_or(0);
 
-    // Get metadata
-    let metadata_output = Command::new("dbus-send")
+    // Get metadata with timeout to prevent hanging
+    let metadata_output = Command::new("timeout")
+        .arg("1") // 1 second timeout
+        .arg("dbus-send")
         .arg("--session")
         .arg("--dest=org.mpris.MediaPlayer2.vlc")
         .arg("--type=method_call")
@@ -190,8 +198,10 @@ fn get_vlc_status() -> Option<VlcStatus> {
 }
 
 fn execute_vlc_command(command: &str, args: &[&str]) -> bool {
-    let mut cmd = Command::new("dbus-send");
-    cmd.arg("--session")
+    let mut cmd = Command::new("timeout");
+    cmd.arg("1") // 1 second timeout
+       .arg("dbus-send")
+       .arg("--session")
        .arg("--dest=org.mpris.MediaPlayer2.vlc")
        .arg("--type=method_call")
        .arg("/org/mpris/MediaPlayer2")
@@ -262,8 +272,10 @@ fn handle_command(command: &str) {
                         position = 0.999;
                     }
                     
-                    // Get current position and duration
-                    let current_pos_output = Command::new("dbus-send")
+                    // Get current position and duration with timeout
+                    let current_pos_output = Command::new("timeout")
+                        .arg("1") // 1 second timeout
+                        .arg("dbus-send")
                         .arg("--session")
                         .arg("--dest=org.mpris.MediaPlayer2.vlc")
                         .arg("--type=method_call")
@@ -286,7 +298,9 @@ fn handle_command(command: &str) {
                         .unwrap_or(0);
 
                     // Get duration
-                    let duration_output = Command::new("dbus-send")
+                    let duration_output = Command::new("timeout")
+                        .arg("1") // 1 second timeout
+                        .arg("dbus-send")
                         .arg("--session")
                         .arg("--dest=org.mpris.MediaPlayer2.vlc")
                         .arg("--type=method_call")
@@ -724,6 +738,9 @@ fn main() -> std::io::Result<()> {
                 break stream;
             }
             Err(_) => {
+                // Add small delay to prevent busy-waiting during connection attempts
+                // This prevents the helper from consuming 100% CPU when the main app is not ready
+                thread::sleep(Duration::from_millis(10));
                 continue;
             }
         }
@@ -771,7 +788,9 @@ fn main() -> std::io::Result<()> {
             }
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::WouldBlock {
-                    // No data available, continue immediately (fully event-driven)
+                    // No data available - add small sleep to prevent busy-waiting
+                    // This prevents 100% CPU usage and freezing when switching modules
+                    thread::sleep(Duration::from_millis(1));
                     continue;
                 } else {
                     eprintln!("[vlc-helper] Error reading from socket: {}", e);
