@@ -18,7 +18,6 @@ use std::thread;
 use std::time::Duration;
 use std::process::Command;
 use std::env;
-use std::fs;
 
 // Add Unix socket-based browser control
 fn execute_socket_browser_command(command: &str, browser_type: &str) -> bool {

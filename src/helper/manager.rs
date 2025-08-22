@@ -4,7 +4,6 @@ use std::os::unix::io::AsRawFd;
 use std::os::unix::process::CommandExt;
 
 use std::fs;
-use std::path;
 use std::collections::HashMap;
 use nix::unistd::{chown, User};
 use std::time::{Duration, Instant};
@@ -517,7 +516,13 @@ impl VlcHelperManager {
         }
         
         println!("[main] Spawning VLC helper: {} (as user {})", helper_path, user);
-        let child = cmd.spawn().expect("Failed to start VLC helper");
+        let child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                println!("[VlcHelperManager] Failed to start VLC helper: {}", e);
+                return None;
+            }
+        };
         self.process = Some(child);
         self.process_info.status = ProcessStatus::Running;
         self.process_info.consecutive_failures = 0; // Reset failure count on success
@@ -650,7 +655,10 @@ impl VlcHelperManager {
     pub fn accept_connection(&mut self) -> Option<UnixStream> {
         if let Some(listener) = &self.listener {
             if let Ok((stream, _)) = listener.accept() {
-                stream.set_nonblocking(true).expect("Failed to set VLC stream non-blocking");
+                if let Err(e) = stream.set_nonblocking(true) {
+            println!("[VlcHelperManager] Failed to set VLC stream non-blocking: {}", e);
+            return None;
+        }
                 return Some(stream);
             }
         }
@@ -817,7 +825,13 @@ impl BrowserHelperManager {
         }
         
         println!("[main] Spawning browser helper: {} (as user {})", helper_path, user);
-        let child = cmd.spawn().expect("Failed to start browser helper");
+        let child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                println!("[BrowserHelperManager] Failed to start browser helper: {}", e);
+                return None;
+            }
+        };
         self.process = Some(child);
         self.process_info.status = ProcessStatus::Running;
         self.process_info.consecutive_failures = 0; // Reset failure count on success
@@ -950,7 +964,10 @@ impl BrowserHelperManager {
     pub fn accept_connection(&mut self) -> Option<UnixStream> {
         if let Some(listener) = &self.listener {
             if let Ok((stream, _)) = listener.accept() {
-                stream.set_nonblocking(true).expect("Failed to set browser stream non-blocking");
+                if let Err(e) = stream.set_nonblocking(true) {
+            println!("[BrowserHelperManager] Failed to set browser stream non-blocking: {}", e);
+            return None;
+        }
                 return Some(stream);
             }
         }
@@ -1005,7 +1022,7 @@ impl BrowserHelperManager {
 } 
 
 // Add the missing functions that were referenced
-fn get_env_from_session(user: &str, leader_pid: u32) -> HashMap<String, String> {
+fn get_env_from_session(_user: &str, leader_pid: u32) -> HashMap<String, String> {
     let mut env = HashMap::new();
     
     // NEW APPROACH: Use the exact same bash command that works

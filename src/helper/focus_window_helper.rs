@@ -1,6 +1,6 @@
 //! Helper binary for tiny-dfr, providing auxiliary functionality.
 use std::os::unix::net::UnixStream;
-use std::io::{Write, BufRead, BufReader};
+use std::io::{Write, BufReader, Read};
 use std::thread;
 use std::time::Duration;
 use x11rb::connection::Connection;
@@ -168,6 +168,49 @@ impl X11WindowMonitor {
         }
         
         Ok(None)
+    }
+    
+    fn wait_for_focus_change_with_timeout(&mut self, timeout: Duration) -> Result<Option<String>, Box<dyn std::error::Error>> {
+        // Use a timeout-based approach to prevent blocking indefinitely
+        let start_time = std::time::Instant::now();
+        
+        loop {
+            // Check if timeout has expired
+            if start_time.elapsed() > timeout {
+                return Ok(None); // Timeout occurred, no focus change
+            }
+            
+            // Try to poll for events with a short timeout
+            match self.conn.poll_for_event() {
+                Ok(Some(event)) => {
+                    match event {
+                        x11rb::protocol::Event::PropertyNotify(ev) => {
+                            // Check if it's the active window property that changed
+                            if ev.atom == self.net_active_window_atom {
+                                eprintln!("[helper] Active window property changed!");
+                                return Ok(self.get_active_window_class());
+                            }
+                            
+                            // Ignore other property changes
+                            eprintln!("[helper] Other property changed: atom={}", ev.atom);
+                        }
+                        _ => {
+                            // Other events, ignore
+                            eprintln!("[helper] Ignoring non-property event: {:?}", event);
+                        }
+                    }
+                }
+                Ok(None) => {
+                    // No events available, sleep briefly and try again
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(e) => {
+                    // Error occurred, return it
+                    return Err(Box::new(e));
+                }
+            }
+        }
     }
 }
 
@@ -390,7 +433,7 @@ impl GnomeWindowMonitor {
         let tx_clone = tx.clone();
         std::thread::spawn(move || {
             eprintln!("[helper] Starting bash filter extension monitor...");
-            let mut child = std::process::Command::new("bash")
+            let child = std::process::Command::new("bash")
                 .arg("-c")
                 .arg("dbus-monitor \"interface='org.gnome.Shell.Extensions'\" | awk '/member=EnableExtension/  { next_action=\"true\" } /member=DisableExtension/ { next_action=\"false\" } /string/ && next_action != \"\" { if ($0 ~ /window-monitor-pro@muhammed\\.hussien2030\\.gmail\\.com/) { if (last_action != next_action) { print next_action; fflush(); last_action = next_action } } next_action = \"\" }'")
                 .stdout(std::process::Stdio::piped())
@@ -562,8 +605,12 @@ impl HyprlandWindowMonitor {
         
         eprintln!("[helper] Connecting to socket: {}", socket_path);
         
-        // Connect to the Hyprland IPC socket
+        // Connect to the Hyprland IPC socket with timeout
         let mut stream = UnixStream::connect(socket_path)?;
+        
+        // Set socket to non-blocking mode to prevent hanging
+        stream.set_nonblocking(true)?;
+        
         eprintln!("[helper] Connected to Hyprland socket successfully");
         
         // Send the subscribe command
@@ -572,30 +619,59 @@ impl HyprlandWindowMonitor {
         
         let reader = BufReader::new(stream);
         
-        // Read lines from the socket
-        for line in reader.lines() {
-            match line {
-                Ok(line) => {
-                    eprintln!("[helper] Received line: {}", line);
-                    if line.starts_with("activewindow>>") {
-                        // Extract window name (after >> and before comma)
-                        let window_name = if let Some(pos) = line.find(',') {
-                            &line[14..pos] // skip "activewindow>>"
-                        } else {
-                            &line[14..]
-                        };
+        // Read lines from the socket with timeout protection
+        let mut buffer = String::new();
+        let mut last_activity = std::time::Instant::now();
+        const SOCKET_TIMEOUT: Duration = Duration::from_secs(30); // 30 second timeout
+        
+        loop {
+            // Check for timeout
+            if last_activity.elapsed() > SOCKET_TIMEOUT {
+                eprintln!("[helper] Hyprland socket timeout, reconnecting...");
+                break;
+            }
+            
+            // Try to read from socket with timeout
+            let mut temp_buf = [0u8; 1024];
+            match reader.get_ref().read(&mut temp_buf) {
+                Ok(0) => {
+                    eprintln!("[helper] Hyprland socket closed");
+                    break;
+                }
+                Ok(n) => {
+                    last_activity = std::time::Instant::now();
+                    buffer.push_str(&String::from_utf8_lossy(&temp_buf[..n]));
+                    
+                    // Process complete lines
+                    while let Some(newline_pos) = buffer.find('\n') {
+                        let line = buffer.drain(..=newline_pos).collect::<String>();
+                        let line = line.trim_end_matches('\n');
                         
-                        if window_name.trim().is_empty() {
-                            eprintln!("[helper] Focused window: desktop");
-                            let _ = tx.send("Desktop".to_string());
-                        } else {
-                            eprintln!("[helper] Focused window: {}", window_name);
-                            let _ = tx.send(window_name.to_string());
+                        if line.starts_with("activewindow>>") {
+                            // Extract window name (after >> and before comma)
+                            let window_name = if let Some(pos) = line.find(',') {
+                                &line[14..pos] // skip "activewindow>>"
+                            } else {
+                                &line[14..]
+                            };
+                            
+                            if window_name.trim().is_empty() {
+                                eprintln!("[helper] Focused window: desktop");
+                                let _ = tx.send("Desktop".to_string());
+                            } else {
+                                eprintln!("[helper] Focused window: {}", window_name);
+                                let _ = tx.send(window_name.to_string());
+                            }
                         }
                     }
                 }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    // No data available, sleep briefly and continue
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
                 Err(e) => {
-                    eprintln!("[helper] Error reading from socket: {:?}", e);
+                    eprintln!("[helper] Error reading from Hyprland socket: {:?}", e);
                     break;
                 }
             }
@@ -650,7 +726,7 @@ impl NiriWindowMonitor {
                 // Try to find the actual Niri socket path
                 let user_id = unsafe { libc::getuid() };
                 let wayland_display = std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-1".to_string());
-                let socket_pattern = format!("/run/user/{}/niri.{}.", user_id, wayland_display);
+                let _socket_pattern = format!("/run/user/{}/niri.{}.", user_id, wayland_display);
                 
                 // Try to find the socket file with the pattern
                 if let Ok(entries) = std::fs::read_dir(format!("/run/user/{}", user_id)) {
@@ -746,7 +822,7 @@ impl NiriWindowMonitor {
         }
         
         // Try to use Niri's event stream for true event-driven monitoring
-        let mut child = std::process::Command::new("niri")
+        let child = std::process::Command::new("niri")
             .arg("msg")
             .arg("event-stream")
             .env("WAYLAND_DISPLAY", std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-1".to_string()))
@@ -754,7 +830,7 @@ impl NiriWindowMonitor {
                 // Try to find the actual Niri socket path
                 let user_id = unsafe { libc::getuid() };
                 let wayland_display = std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-1".to_string());
-                let socket_pattern = format!("/run/user/{}/niri.{}.", user_id, wayland_display);
+                let _socket_pattern = format!("/run/user/{}/niri.{}.", user_id, wayland_display);
                 
                 // Try to find the socket file with the pattern
                 if let Ok(entries) = std::fs::read_dir(format!("/run/user/{}", user_id)) {
@@ -831,16 +907,36 @@ impl NiriWindowMonitor {
 fn run_sway_event_driven() -> Result<(), Box<dyn std::error::Error>> {
     let socket_path = "/tmp/touchbar.sock";
     
-    // Connect to the socket
-    let mut stream = loop {
-        match UnixStream::connect(socket_path) {
-            Ok(stream) => break stream,
-            Err(_) => {
-                thread::sleep(Duration::from_millis(100));
-                continue;
+    // Set up watchdog timer to prevent indefinite hanging
+    let start_time = std::time::Instant::now();
+    const WATCHDOG_TIMEOUT: Duration = Duration::from_secs(60); // 1 minute timeout
+    
+    // Connect to the socket with timeout and retry limit
+    let mut stream = {
+        let mut retry_count = 0;
+        const MAX_RETRIES: u32 = 10;
+        const RETRY_DELAY_MS: u64 = 100;
+        
+        loop {
+            match UnixStream::connect(socket_path) {
+                Ok(stream) => break stream,
+                Err(_) => {
+                    retry_count += 1;
+                    if retry_count >= MAX_RETRIES {
+                        return Err(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::ConnectionRefused,
+                            format!("Failed to connect to socket after {} retries", MAX_RETRIES)
+                        )));
+                    }
+                    eprintln!("[helper] Socket connection attempt {} failed, retrying in {}ms...", retry_count, RETRY_DELAY_MS);
+                    thread::sleep(Duration::from_millis(RETRY_DELAY_MS));
+                }
             }
         }
     };
+    
+    // Set socket to non-blocking mode to prevent hanging
+    stream.set_nonblocking(true)?;
     
     // Create channel for communication between event monitor and main thread
     let (tx, rx) = mpsc::channel();
@@ -856,24 +952,39 @@ fn run_sway_event_driven() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
     
-    // Main thread: receive events and send to socket
+    // Main thread: receive events and send to socket with timeout
     let mut last_class = String::new();
     
     loop {
-        match rx.recv() {
+        // Check watchdog timeout
+        if start_time.elapsed() > WATCHDOG_TIMEOUT {
+            eprintln!("[helper] Watchdog timeout reached, exiting to prevent hanging");
+            break;
+        }
+        
+        // Use recv_timeout to prevent infinite blocking
+        match rx.recv_timeout(Duration::from_millis(1000)) { // 1 second timeout
             Ok(class) => {
                 if class != last_class {
                     eprintln!("[helper] Sway window focus changed from '{}' to '{}'", last_class, class);
-                    if stream.write_all(class.as_bytes()).is_ok() && stream.write_all(b"\n").is_ok() {
-                        last_class = class;
-                    } else {
-                        eprintln!("[helper] Failed to write to socket, breaking");
+                    // Use write_all with timeout to prevent hanging
+                    if let Err(e) = stream.write_all(class.as_bytes()) {
+                        eprintln!("[helper] Failed to write to socket: {}, breaking", e);
                         break;
                     }
+                    if let Err(e) = stream.write_all(b"\n") {
+                        eprintln!("[helper] Failed to write newline to socket: {}, breaking", e);
+                        break;
+                    }
+                    last_class = class;
                 }
             }
-            Err(e) => {
-                eprintln!("[helper] Error receiving from Sway event monitor: {}", e);
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // Timeout occurred, continue loop (this is normal)
+                continue;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                eprintln!("[helper] Event monitor disconnected, breaking");
                 break;
             }
         }
@@ -887,16 +998,36 @@ fn run_sway_event_driven() -> Result<(), Box<dyn std::error::Error>> {
 fn run_gnome_event_driven() -> Result<(), Box<dyn std::error::Error>> {
     let socket_path = "/tmp/touchbar.sock";
     
-    // Connect to the socket
-    let mut stream = loop {
-        match UnixStream::connect(socket_path) {
-            Ok(stream) => break stream,
-            Err(_) => {
-                thread::sleep(Duration::from_millis(100));
-                continue;
+    // Set up watchdog timer to prevent indefinite hanging
+    let start_time = std::time::Instant::now();
+    const WATCHDOG_TIMEOUT: Duration = Duration::from_secs(60); // 1 minute timeout
+    
+    // Connect to the socket with timeout and retry limit
+    let mut stream = {
+        let mut retry_count = 0;
+        const MAX_RETRIES: u32 = 10;
+        const RETRY_DELAY_MS: u64 = 100;
+        
+        loop {
+            match UnixStream::connect(socket_path) {
+                Ok(stream) => break stream,
+                Err(_) => {
+                    retry_count += 1;
+                    if retry_count >= MAX_RETRIES {
+                        return Err(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::ConnectionRefused,
+                            format!("Failed to connect to socket after {} retries", MAX_RETRIES)
+                        )));
+                    }
+                    eprintln!("[helper] Socket connection attempt {} failed, retrying in {}ms...", retry_count, RETRY_DELAY_MS);
+                    thread::sleep(Duration::from_millis(RETRY_DELAY_MS));
+                }
             }
         }
     };
+    
+    // Set socket to non-blocking mode to prevent hanging
+    stream.set_nonblocking(true)?;
     
     // Create channel for communication between event monitor and main thread
     let (tx, rx) = mpsc::channel();
@@ -912,24 +1043,39 @@ fn run_gnome_event_driven() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
     
-    // Main thread: receive events and send to socket
+    // Main thread: receive events and send to socket with timeout
     let mut last_class = String::new();
     
     loop {
-        match rx.recv() {
+        // Check watchdog timeout
+        if start_time.elapsed() > WATCHDOG_TIMEOUT {
+            eprintln!("[helper] Watchdog timeout reached, exiting to prevent hanging");
+            break;
+        }
+        
+        // Use recv_timeout to prevent infinite blocking
+        match rx.recv_timeout(Duration::from_millis(1000)) { // 1 second timeout
             Ok(class) => {
                 if class != last_class {
                     eprintln!("[helper] GNOME window focus changed from '{}' to '{}'", last_class, class);
-                    if stream.write_all(class.as_bytes()).is_ok() && stream.write_all(b"\n").is_ok() {
-                        last_class = class;
-                    } else {
-                        eprintln!("[helper] Failed to write to socket, breaking");
+                    // Use write_all with timeout to prevent hanging
+                    if let Err(e) = stream.write_all(class.as_bytes()) {
+                        eprintln!("[helper] Failed to write to socket: {}, breaking", e);
                         break;
                     }
+                    if let Err(e) = stream.write_all(b"\n") {
+                        eprintln!("[helper] Failed to write newline to socket: {}, breaking", e);
+                        break;
+                    }
+                    last_class = class;
                 }
             }
-            Err(e) => {
-                eprintln!("[helper] Error receiving from GNOME event monitor: {}", e);
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // Timeout occurred, continue loop (this is normal)
+                continue;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                eprintln!("[helper] Event monitor disconnected, breaking");
                 break;
             }
         }
@@ -943,16 +1089,36 @@ fn run_gnome_event_driven() -> Result<(), Box<dyn std::error::Error>> {
 fn run_hyprland_event_driven() -> Result<(), Box<dyn std::error::Error>> {
     let socket_path = "/tmp/touchbar.sock";
     
-    // Connect to the socket
-    let mut stream = loop {
-        match UnixStream::connect(socket_path) {
-            Ok(stream) => break stream,
-            Err(_) => {
-                thread::sleep(Duration::from_millis(100));
-                continue;
+    // Set up watchdog timer to prevent indefinite hanging
+    let start_time = std::time::Instant::now();
+    const WATCHDOG_TIMEOUT: Duration = Duration::from_secs(60); // 1 minute timeout
+    
+    // Connect to the socket with timeout and retry limit
+    let mut stream = {
+        let mut retry_count = 0;
+        const MAX_RETRIES: u32 = 10;
+        const RETRY_DELAY_MS: u64 = 100;
+        
+        loop {
+            match UnixStream::connect(socket_path) {
+                Ok(stream) => break stream,
+                Err(_) => {
+                    retry_count += 1;
+                    if retry_count >= MAX_RETRIES {
+                        return Err(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::ConnectionRefused,
+                            format!("Failed to connect to socket after {} retries", MAX_RETRIES)
+                        )));
+                    }
+                    eprintln!("[helper] Socket connection attempt {} failed, retrying in {}ms...", retry_count, RETRY_DELAY_MS);
+                    thread::sleep(Duration::from_millis(RETRY_DELAY_MS));
+                }
             }
         }
     };
+    
+    // Set socket to non-blocking mode to prevent hanging
+    stream.set_nonblocking(true)?;
     
     // Create channel for communication between event monitor and main thread
     let (tx, rx) = mpsc::channel();
@@ -968,24 +1134,39 @@ fn run_hyprland_event_driven() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
     
-    // Main thread: receive events and send to socket
+    // Main thread: receive events and send to socket with timeout
     let mut last_class = String::new();
     
     loop {
-        match rx.recv() {
+        // Check watchdog timeout
+        if start_time.elapsed() > WATCHDOG_TIMEOUT {
+            eprintln!("[helper] Watchdog timeout reached, exiting to prevent hanging");
+            break;
+        }
+        
+        // Use recv_timeout to prevent infinite blocking
+        match rx.recv_timeout(Duration::from_millis(1000)) { // 1 second timeout
             Ok(class) => {
                 if class != last_class {
                     eprintln!("[helper] Hyprland window focus changed from '{}' to '{}'", last_class, class);
-                    if stream.write_all(class.as_bytes()).is_ok() && stream.write_all(b"\n").is_ok() {
-                        last_class = class;
-                    } else {
-                        eprintln!("[helper] Failed to write to socket, breaking");
+                    // Use write_all with timeout to prevent hanging
+                    if let Err(e) = stream.write_all(class.as_bytes()) {
+                        eprintln!("[helper] Failed to write to socket: {}, breaking", e);
                         break;
                     }
+                    if let Err(e) = stream.write_all(b"\n") {
+                        eprintln!("[helper] Failed to write newline to socket: {}, breaking", e);
+                        break;
+                    }
+                    last_class = class;
                 }
             }
-            Err(e) => {
-                eprintln!("[helper] Error receiving from Hyprland event monitor: {}", e);
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // Timeout occurred, continue loop (this is normal)
+                continue;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                eprintln!("[helper] Event monitor disconnected, breaking");
                 break;
             }
         }
@@ -999,16 +1180,36 @@ fn run_hyprland_event_driven() -> Result<(), Box<dyn std::error::Error>> {
 fn run_niri_event_driven() -> Result<(), Box<dyn std::error::Error>> {
     let socket_path = "/tmp/touchbar.sock";
     
-    // Connect to the socket
-    let mut stream = loop {
-        match UnixStream::connect(socket_path) {
-            Ok(stream) => break stream,
-            Err(_) => {
-                thread::sleep(Duration::from_millis(100));
-                continue;
+    // Set up watchdog timer to prevent indefinite hanging
+    let start_time = std::time::Instant::now();
+    const WATCHDOG_TIMEOUT: Duration = Duration::from_secs(60); // 1 minute timeout
+    
+    // Connect to the socket with timeout and retry limit
+    let mut stream = {
+        let mut retry_count = 0;
+        const MAX_RETRIES: u32 = 10;
+        const RETRY_DELAY_MS: u64 = 100;
+        
+        loop {
+            match UnixStream::connect(socket_path) {
+                Ok(stream) => break stream,
+                Err(_) => {
+                    retry_count += 1;
+                    if retry_count >= MAX_RETRIES {
+                        return Err(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::ConnectionRefused,
+                            format!("Failed to connect to socket after {} retries", MAX_RETRIES)
+                        )));
+                    }
+                    eprintln!("[helper] Socket connection attempt {} failed, retrying in {}ms...", retry_count, RETRY_DELAY_MS);
+                    thread::sleep(Duration::from_millis(RETRY_DELAY_MS));
+                }
             }
         }
     };
+    
+    // Set socket to non-blocking mode to prevent hanging
+    stream.set_nonblocking(true)?;
     
     // Create channel for communication between event monitor and main thread
     let (tx, rx) = mpsc::channel();
@@ -1024,24 +1225,39 @@ fn run_niri_event_driven() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
     
-    // Main thread: receive events and send to socket
+    // Main thread: receive events and send to socket with timeout
     let mut last_class = String::new();
     
     loop {
-        match rx.recv() {
+        // Check watchdog timeout
+        if start_time.elapsed() > WATCHDOG_TIMEOUT {
+            eprintln!("[helper] Watchdog timeout reached, exiting to prevent hanging");
+            break;
+        }
+        
+        // Use recv_timeout to prevent infinite blocking
+        match rx.recv_timeout(Duration::from_millis(1000)) { // 1 second timeout
             Ok(class) => {
                 if class != last_class {
                     eprintln!("[helper] Niri window focus changed from '{}' to '{}'", last_class, class);
-                    if stream.write_all(class.as_bytes()).is_ok() && stream.write_all(b"\n").is_ok() {
-                        last_class = class;
-                    } else {
-                        eprintln!("[helper] Failed to write to socket, breaking");
+                    // Use write_all with timeout to prevent hanging
+                    if let Err(e) = stream.write_all(class.as_bytes()) {
+                        eprintln!("[helper] Failed to write to socket: {}, breaking", e);
                         break;
                     }
+                    if let Err(e) = stream.write_all(b"\n") {
+                        eprintln!("[helper] Failed to write newline to socket: {}, breaking", e);
+                        break;
+                    }
+                    last_class = class;
                 }
             }
-            Err(e) => {
-                eprintln!("[helper] Error receiving from Niri event monitor: {}", e);
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // Timeout occurred, continue loop (this is normal)
+                continue;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                eprintln!("[helper] Event monitor disconnected, breaking");
                 break;
             }
         }
@@ -1055,16 +1271,36 @@ fn run_niri_event_driven() -> Result<(), Box<dyn std::error::Error>> {
 fn run_x11_event_driven() -> Result<(), Box<dyn std::error::Error>> {
     let socket_path = "/tmp/touchbar.sock";
     
-    // Connect to the socket
-    let mut stream = loop {
-        match UnixStream::connect(socket_path) {
-            Ok(stream) => break stream,
-            Err(_) => {
-                thread::sleep(Duration::from_millis(100));
-                continue;
+    // Set up watchdog timer to prevent indefinite hanging
+    let start_time = std::time::Instant::now();
+    const WATCHDOG_TIMEOUT: Duration = Duration::from_secs(60); // 1 minute timeout
+    
+    // Connect to the socket with timeout and retry limit
+    let mut stream = {
+        let mut retry_count = 0;
+        const MAX_RETRIES: u32 = 10;
+        const RETRY_DELAY_MS: u64 = 100;
+        
+        loop {
+            match UnixStream::connect(socket_path) {
+                Ok(stream) => break stream,
+                Err(_) => {
+                    retry_count += 1;
+                    if retry_count >= MAX_RETRIES {
+                        return Err(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::ConnectionRefused,
+                            format!("Failed to connect to socket after {} retries", MAX_RETRIES)
+                        )));
+                    }
+                    eprintln!("[helper] Socket connection attempt {} failed, retrying in {}ms...", retry_count, RETRY_DELAY_MS);
+                    thread::sleep(Duration::from_millis(RETRY_DELAY_MS));
+                }
             }
         }
     };
+    
+    // Set socket to non-blocking mode to prevent hanging
+    stream.set_nonblocking(true)?;
     
     // Initialize X11 monitor
     let mut monitor = X11WindowMonitor::new()?;
@@ -1079,30 +1315,46 @@ fn run_x11_event_driven() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("[helper] Initial active window class: {}", last_class);
     
     // Send initial class
-    if stream.write_all(last_class.as_bytes()).is_ok() && stream.write_all(b"\n").is_ok() {
-        eprintln!("[helper] Sent initial window class: {}", last_class);
+    if let Err(e) = stream.write_all(last_class.as_bytes()) {
+        eprintln!("[helper] Failed to write initial class to socket: {}, breaking", e);
+        return Ok(());
+    }
+    if let Err(e) = stream.write_all(b"\n") {
+        eprintln!("[helper] Failed to write initial newline to socket: {}, breaking", e);
+        return Ok(());
     }
     
-    // Event loop
+    // Event loop with timeout protection
     loop {
-        match monitor.wait_for_focus_change() {
+        // Check watchdog timeout
+        if start_time.elapsed() > WATCHDOG_TIMEOUT {
+            eprintln!("[helper] Watchdog timeout reached, exiting to prevent hanging");
+            break;
+        }
+        
+        // Use a timeout-based approach instead of blocking wait_for_event
+        match monitor.wait_for_focus_change_with_timeout(Duration::from_millis(1000)) { // 1 second timeout
             Ok(Some(new_class)) => {
                 if new_class != last_class {
                     eprintln!("[helper] Window focus changed from '{}' to '{}'", last_class, new_class);
-                    if stream.write_all(new_class.as_bytes()).is_ok() && stream.write_all(b"\n").is_ok() {
-                        last_class = new_class;
-                    } else {
-                        eprintln!("[helper] Failed to write to socket, breaking");
+                    if let Err(e) = stream.write_all(new_class.as_bytes()) {
+                        eprintln!("[helper] Failed to write to socket: {}, breaking", e);
                         break;
                     }
+                    if let Err(e) = stream.write_all(b"\n") {
+                        eprintln!("[helper] Failed to write newline to socket: {}, breaking", e);
+                        break;
+                    }
+                    last_class = new_class;
                 }
             }
             Ok(None) => {
                 // No focus change, continue waiting
                 // This can happen when switching to an empty workspace
+                continue;
             }
             Err(e) => {
-                eprintln!("[helper] Error waiting for X11 events: {}", e);
+                eprintln!("[helper] Error waiting for X11 events: {}, breaking", e);
                 break;
             }
         }

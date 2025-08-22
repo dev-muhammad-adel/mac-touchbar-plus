@@ -671,7 +671,7 @@ impl FunctionLayer {
                     if !complete_redraw {
                         c.set_source_rgb(0.0, 0.0, 0.0);
                         c.rectangle(left_edge, bot - radius, this_button_width, top - bot + radius * 2.0);
-                        c.fill().unwrap();
+                        safe_cairo_fill(&c)?;
                     }
                     if (button.action != Key::Unknown &&
                        button.action != Key::Macro1 &&
@@ -870,7 +870,7 @@ impl LibinputInterface for Interface {
             .write(mode == O_WRONLY || mode == O_RDWR)
             .open(path)
             .map(|file| file.into())
-            .map_err(|err| err.raw_os_error().unwrap())
+            .map_err(|err| err.raw_os_error().unwrap_or(-1))
     }
     fn close_restricted(&mut self, fd: OwnedFd) {
         _ = File::from(fd);
@@ -881,7 +881,7 @@ impl LibinputInterface for Interface {
 
 
 fn emit<F>(uinput: &mut UInputHandle<F>, ty: EventKind, code: u16, value: i32) where F: AsRawFd {
-    uinput.write(&[input_event {
+    if let Err(e) = uinput.write(&[input_event {
         value: value,
         type_: ty as u16,
         code: code,
@@ -889,7 +889,9 @@ fn emit<F>(uinput: &mut UInputHandle<F>, ty: EventKind, code: u16, value: i32) w
             tv_sec: 0,
             tv_usec: 0
         }
-    }]).unwrap();
+    }]) {
+        eprintln!("[main] Failed to emit uinput event: {}", e);
+    }
 }
 
 pub fn toggle_key<F>(uinput: &mut UInputHandle<F>, code: Key, value: i32) where F: AsRawFd {
@@ -939,8 +941,19 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
     // Setup signal handlers for graceful shutdown
     setup_signal_handlers();
     let (height, width) = drm.mode().size();
-    let (db_width, db_height) = drm.fb_info().expect("Failed to get framebuffer info").size();
-    let mut uinput = UInputHandle::new(OpenOptions::new().write(true).open("/dev/uinput").expect("Failed to open /dev/uinput"));
+    
+    // Safe framebuffer info retrieval
+    let fb_info = drm.fb_info()
+        .map_err(|e| MainError::Drm(e.into()))?;
+    let (db_width, db_height) = fb_info.size();
+    
+    // Safe uinput device creation
+    let uinput_file = OpenOptions::new()
+        .write(true)
+        .open("/dev/uinput")
+        .map_err(|e| MainError::Input(e))?;
+    let mut uinput = UInputHandle::new(uinput_file);
+    
     let mut backlight = BacklightManager::new();
     let mut last_redraw_minute = Local::now().minute();
     let mut cfg_mgr = ConfigManager::new();
@@ -961,7 +974,10 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
 
     // Privilege dropping removed - run with appropriate permissions
 
-    let mut surface = ImageSurface::create(Format::ARgb32, db_width as i32, db_height as i32).expect("Failed to create image surface");
+    // Safe surface creation
+    let mut surface = ImageSurface::create(Format::ARgb32, db_width as i32, db_height as i32)
+        .map_err(|e| MainError::Cairo(format!("Failed to create image surface: {}", e)))?;
+    
     // Start with Custom2 layer since user starts as not logged in
     let mut active_layer = LayerKey::Custom2;
     let mut last_layer = active_layer.clone();
@@ -969,16 +985,27 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
 
     let mut input_tb = Libinput::new_with_udev(Interface);
     let mut input_main = Libinput::new_with_udev(Interface);
-    input_tb.udev_assign_seat("seat-touchbar").expect("Failed to assign touch bar seat");
-    input_main.udev_assign_seat("seat0").expect("Failed to assign main seat");
-    let epoll = Epoll::new(EpollCreateFlags::empty()).expect("Failed to create epoll instance");
+    
+    // Safe seat assignment
+    input_tb.udev_assign_seat("seat-touchbar")
+        .map_err(|_| MainError::Input(std::io::Error::new(std::io::ErrorKind::Other, "Failed to assign touch bar seat")))?;
+    input_main.udev_assign_seat("seat0")
+        .map_err(|_| MainError::Input(std::io::Error::new(std::io::ErrorKind::Other, "Failed to assign main seat")))?;
+    
+    // Safe epoll creation
+    let epoll = Epoll::new(EpollCreateFlags::empty())
+        .map_err(|e| MainError::Epoll(e))?;
+    
     safe_epoll_add(&epoll, &input_main.as_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 0))?;
     safe_epoll_add(&epoll, &input_tb.as_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 1))?;
     safe_epoll_add(&epoll, &cfg_mgr.fd(), EpollEvent::new(EpollFlags::EPOLLIN, 2))?;
+    
     // --- eventfd integration ---
-    let event_fd = Arc::new(eventfd(0, EfdFlags::EFD_NONBLOCK).expect("Failed to create eventfd"));
+    let event_fd = Arc::new(eventfd(0, EfdFlags::EFD_NONBLOCK)
+        .map_err(|e| MainError::Epoll(e))?);
     safe_epoll_add(&epoll, &*event_fd, EpollEvent::new(EpollFlags::EPOLLIN, 3))?;
     // --- end eventfd integration ---
+    
     uinput.set_evbit(EventKind::Key).map_err(|e| MainError::Input(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
     for layer in layers.values() {
         // Register buttons from regular layer.buttons
@@ -1265,13 +1292,17 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                         println!("[main] Removing helper listener fd: {}", fd);
                                     }
                                     let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
-                                    epoll.delete(listener_fd_obj.as_fd()).unwrap();
+                                    if let Err(e) = safe_epoll_delete(&epoll, &listener_fd_obj) {
+                                        eprintln!("[main] Failed to remove helper listener from epoll: {}", e);
+                                    }
                                 }
                                 if let Some(stream) = helper_stream.take() {
                                     if DEBUG_LOGGING {
                                         println!("[main] Removing helper stream from epoll");
                                     }
-                                    epoll.delete(&stream).unwrap();
+                                    if let Err(e) = safe_epoll_delete(&epoll, &stream) {
+                                        eprintln!("[main] Failed to remove helper stream from epoll: {}", e);
+                                    }
                                     helper_reader = None;
                                 }
                                 // VLC helper will be stopped when VLC window loses focus
@@ -1313,11 +1344,19 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                         if DEBUG_LOGGING {
                             println!("[main] Helper connected to socket successfully");
                         }
-                        epoll.add(&stream, EpollEvent::new(EpollFlags::EPOLLIN, 5)).unwrap();
-                        helper_reader = Some(BufReader::new(stream.try_clone().unwrap()));
-                        helper_stream = Some(stream);
-                        if DEBUG_LOGGING {
-                            println!("[main] Helper stream added to epoll and stored");
+                        if let Err(e) = safe_epoll_add(&epoll, &stream, EpollEvent::new(EpollFlags::EPOLLIN, 5)) {
+                            eprintln!("[main] Failed to add helper stream to epoll: {}", e);
+                            continue;
+                        }
+                        if let Ok(stream_clone) = safe_stream_try_clone(&stream) {
+                            helper_reader = Some(BufReader::new(stream_clone));
+                            helper_stream = Some(stream);
+                            if DEBUG_LOGGING {
+                                println!("[main] Helper stream added to epoll and stored");
+                            }
+                        } else {
+                            eprintln!("[main] Failed to clone helper stream");
+                            continue;
                         }
                         
                         // Stop listening for new connections
@@ -1326,7 +1365,9 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                 println!("[main] Removing helper listener fd: {} from epoll", fd);
                             }
                             let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
-                            epoll.delete(listener_fd_obj.as_fd()).unwrap();
+                            if let Err(e) = safe_epoll_delete(&epoll, &listener_fd_obj) {
+                                eprintln!("[main] Failed to remove helper listener from epoll: {}", e);
+                            }
                         }
                     } else {
                         if DEBUG_LOGGING {
@@ -1345,7 +1386,9 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                    println!("[main] Helper disconnected (EOF)");
                                    if let Some(stream) = helper_stream.take() {
                                        println!("[main] Removing helper stream from epoll");
-                                       epoll.delete(&stream).unwrap();
+                                       if let Err(e) = safe_epoll_delete(&epoll, &stream) {
+                                           eprintln!("[main] Failed to remove helper stream from epoll: {}", e);
+                                       }
                                    }
                                    helper_reader = None;
                                    break;
@@ -1371,8 +1414,11 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                    if let Some(user) = &current_user {
                                                        if let Some(fd) = vlc_helper_manager.start(user, current_session.as_ref().and_then(|s| s.leader).unwrap_or(0)) {
                                                            let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
-                                                           epoll.add(listener_fd_obj.as_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 6)).unwrap();
-                                                           vlc_helper_listener_fd = Some(listener_fd_obj.into_raw_fd());
+                                                           if let Err(e) = safe_epoll_add(&epoll, &listener_fd_obj, EpollEvent::new(EpollFlags::EPOLLIN, 6)) {
+                                                               eprintln!("[main] Failed to add VLC helper listener to epoll: {}", e);
+                                                           } else {
+                                                               vlc_helper_listener_fd = Some(listener_fd_obj.into_raw_fd());
+                                                           }
                                                        }
                                                    } else {
                                                        println!("[main] No current user available for VLC helper");
@@ -1381,12 +1427,16 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                    // VLC window lost focus - stop VLC helper
                                                    println!("[main] VLC window lost focus, stopping VLC helper");
                                                    if let Some(stream) = vlc_helper_stream.take() {
-                                                       epoll.delete(&stream).unwrap();
+                                                       if let Err(e) = safe_epoll_delete(&epoll, &stream) {
+                                                           eprintln!("[main] Failed to remove VLC stream from epoll: {}", e);
+                                                       }
                                                    }
                                                    vlc_helper_reader = None;
                                                    if let Some(fd) = vlc_helper_listener_fd.take() {
                                                        let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
-                                                       epoll.delete(listener_fd_obj.as_fd()).unwrap();
+                                                       if let Err(e) = safe_epoll_delete(&epoll, &listener_fd_obj) {
+                                                           eprintln!("[main] Failed to remove VLC listener from epoll: {}", e);
+                                                       }
                                                    }
                                                    vlc_helper_manager.stop();
                                                    // Clear VLC drag position when losing focus
@@ -1404,12 +1454,16 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                    // Browser window lost focus - stop browser helper
                                                    println!("[main] Browser window lost focus, stopping browser helper");
                                                    if let Some(stream) = browser_helper_stream.take() {
-                                                       epoll.delete(&stream).unwrap();
+                                                       if let Err(e) = safe_epoll_delete(&epoll, &stream) {
+                                                           eprintln!("[main] Failed to remove browser helper stream from epoll: {}", e);
+                                                       }
                                                    }
                                                    browser_helper_reader = None;
                                                    if let Some(fd) = browser_helper_listener_fd.take() {
                                                        let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
-                                                       epoll.delete(listener_fd_obj.as_fd()).unwrap();
+                                                       if let Err(e) = safe_epoll_delete(&epoll, &listener_fd_obj) {
+                                                           eprintln!("[main] Failed to remove browser helper listener from epoll: {}", e);
+                                                       }
                                                    }
                                                    browser_helper_manager.stop();
                                                } else if !browser_window_focused && new_browser_focused {
@@ -1418,8 +1472,11 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                    if let Some(user) = &current_user {
                                                        if let Some(fd) = browser_helper_manager.start(user, current_session.as_ref().and_then(|s| s.leader).unwrap_or(0)) {
                                                            let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
-                                                           epoll.add(listener_fd_obj.as_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 8)).unwrap();
-                                                           browser_helper_listener_fd = Some(listener_fd_obj.into_raw_fd());
+                                                           if let Err(e) = safe_epoll_add(&epoll, &listener_fd_obj, EpollEvent::new(EpollFlags::EPOLLIN, 8)) {
+                                                               eprintln!("[main] Failed to add browser helper listener to epoll: {}", e);
+                                                           } else {
+                                                               browser_helper_listener_fd = Some(listener_fd_obj.into_raw_fd());
+                                                           }
                                                        }
                                                    } else {
                                                        println!("[main] No current user available for browser helper");
@@ -1437,12 +1494,16 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                    
                                                    // Stop existing helper
                                                    if let Some(stream) = browser_helper_stream.take() {
-                                                       epoll.delete(&stream).unwrap();
+                                                       if let Err(e) = safe_epoll_delete(&epoll, &stream) {
+                                                           eprintln!("[main] Failed to remove browser helper stream from epoll: {}", e);
+                                                       }
                                                    }
                                                    browser_helper_reader = None;
                                                    if let Some(fd) = browser_helper_listener_fd.take() {
                                                        let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
-                                                       epoll.delete(listener_fd_obj.as_fd()).unwrap();
+                                                       if let Err(e) = safe_epoll_delete(&epoll, &listener_fd_obj) {
+                                                           eprintln!("[main] Failed to remove browser helper listener from epoll: {}", e);
+                                                       }
                                                    }
                                                    browser_helper_manager.stop();
                                                    
@@ -1450,8 +1511,11 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                    if let Some(user) = &current_user {
                                                        if let Some(fd) = browser_helper_manager.start(user, current_session.as_ref().and_then(|s| s.leader).unwrap_or(0)) {
                                                            let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
-                                                           epoll.add(listener_fd_obj.as_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 8)).unwrap();
-                                                           browser_helper_listener_fd = Some(listener_fd_obj.into_raw_fd());
+                                                           if let Err(e) = safe_epoll_add(&epoll, &listener_fd_obj, EpollEvent::new(EpollFlags::EPOLLIN, 8)) {
+                                                               eprintln!("[main] Failed to add browser helper listener to epoll: {}", e);
+                                                           } else {
+                                                               browser_helper_listener_fd = Some(listener_fd_obj.into_raw_fd());
+                                                           }
                                                        }
                                                    } else {
                                                        println!("[main] No current user available for browser helper");
@@ -1476,7 +1540,9 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                },
                                                                Err(_e) => {
                                     if let Some(stream) = helper_stream.take() {
-                                        epoll.delete(&stream).unwrap();
+                                        if let Err(e) = safe_epoll_delete(&epoll, &stream) {
+                                            eprintln!("[main] Failed to remove helper stream from epoll: {}", e);
+                                        }
                                     }
                                     helper_reader = None;
                                     break;
@@ -1502,7 +1568,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                             // Stop listening for new connections
                             if let Some(fd) = vlc_helper_listener_fd.take() {
                                 let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
-                                if let Err(e) = epoll.delete(listener_fd_obj.as_fd()) {
+                                if let Err(e) = safe_epoll_delete(&epoll, &listener_fd_obj) {
                                     eprintln!("[main] Failed to remove VLC listener from epoll: {}", e);
                                 }
                             }
@@ -1519,7 +1585,9 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                Ok(0) => { // EOF
                                    println!("[main] VLC helper disconnected.");
                                    if let Some(stream) = vlc_helper_stream.take() {
-                                       epoll.delete(&stream).unwrap();
+                                       if let Err(e) = safe_epoll_delete(&epoll, &stream) {
+                                           eprintln!("[main] Failed to remove VLC stream from epoll: {}", e);
+                                       }
                                    }
                                    vlc_helper_reader = None;
                                    break;
@@ -1579,7 +1647,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                Err(e) => {
                                    eprintln!("[main] VLC helper stream error: {}", e);
                                    if let Some(stream) = vlc_helper_stream.take() {
-                                       if let Err(e) = epoll.delete(&stream) {
+                                       if let Err(e) = safe_epoll_delete(&epoll, &stream) {
                                            eprintln!("[main] Failed to remove VLC stream from epoll: {}", e);
                                        }
                                    }
@@ -1592,7 +1660,10 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                 }
                 8 => { // Browser helper listener event
                     if let Some(mut stream) = browser_helper_manager.accept_connection() {
-                        stream.set_nonblocking(true).expect("Failed to set browser stream non-blocking");
+                        if let Err(e) = safe_stream_set_nonblocking(&stream, true) {
+                            eprintln!("[main] Failed to set browser stream non-blocking: {}", e);
+                            continue;
+                        }
                         println!("[main] Browser helper connected to socket.");
                         
                         // Send browser type to the helper as the first message
@@ -1606,13 +1677,23 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                             }
                         }
                         
-                        epoll.add(&stream, EpollEvent::new(EpollFlags::EPOLLIN, 9)).unwrap();
-                        browser_helper_reader = Some(BufReader::new(stream.try_clone().unwrap()));
-                        browser_helper_stream = Some(stream);
+                        if let Err(e) = safe_epoll_add(&epoll, &stream, EpollEvent::new(EpollFlags::EPOLLIN, 9)) {
+                            eprintln!("[main] Failed to add browser helper stream to epoll: {}", e);
+                            continue;
+                        }
+                        if let Ok(stream_clone) = safe_stream_try_clone(&stream) {
+                            browser_helper_reader = Some(BufReader::new(stream_clone));
+                            browser_helper_stream = Some(stream);
+                        } else {
+                            eprintln!("[main] Failed to clone browser helper stream");
+                            continue;
+                        }
                         // Stop listening for new connections
                         if let Some(fd) = browser_helper_listener_fd.take() {
                             let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
-                            epoll.delete(listener_fd_obj.as_fd()).unwrap();
+                            if let Err(e) = safe_epoll_delete(&epoll, &listener_fd_obj) {
+                                eprintln!("[main] Failed to remove browser helper listener from epoll: {}", e);
+                            }
                         }
                     }
                 }
@@ -1624,7 +1705,9 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                Ok(0) => { // EOF
                                    println!("[main] Browser helper disconnected.");
                                    if let Some(stream) = browser_helper_stream.take() {
-                                       epoll.delete(&stream).unwrap();
+                                       if let Err(e) = safe_epoll_delete(&epoll, &stream) {
+                                           eprintln!("[main] Failed to remove browser helper stream from epoll: {}", e);
+                                       }
                                    }
                                    browser_helper_reader = None;
                                    break;
@@ -1676,7 +1759,9 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                },
                                                                Err(_e) => {
                                     if let Some(stream) = browser_helper_stream.take() {
-                                        epoll.delete(&stream).unwrap();
+                                        if let Err(e) = safe_epoll_delete(&epoll, &stream) {
+                                            eprintln!("[main] Failed to remove browser helper stream from epoll: {}", e);
+                                        }
                                     }
                                     browser_helper_reader = None;
                                     break;
@@ -2127,7 +2212,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                     continue;
                                 }
                                 "media" => {
-                                    if let Some(split) = &mut layers.get_mut(layer).expect("Layer not found").split {
+                                    if let Some(split) = &mut get_active_layer_mut(&mut layers, *layer)?.split {
                                         let button = &mut split.media[*idx];
                                         if button.action == Key::Unknown {
                                             continue;
@@ -2136,7 +2221,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                     }
                                 }
                                 "flat" => {
-                                    let button = &mut layers.get_mut(layer).expect("Layer not found").buttons[*idx];
+                                    let button = &mut get_active_layer_mut(&mut layers, *layer)?.buttons[*idx];
                                     if button.action == Key::Unknown {
                                         continue;
                                     }
@@ -2289,10 +2374,13 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                         println!("[main] Main helper started successfully, fd: {}", fd);
                     }
                     let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
-                    epoll.add(listener_fd_obj.as_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 4)).unwrap();
-                    helper_listener_fd = Some(listener_fd_obj.into_raw_fd()); // Store the raw fd
-                    if DEBUG_LOGGING {
-                        println!("[main] Added helper listener to epoll with fd: {}", fd);
+                    if let Err(e) = safe_epoll_add(&epoll, &listener_fd_obj, EpollEvent::new(EpollFlags::EPOLLIN, 4)) {
+                        eprintln!("[main] Failed to add helper listener to epoll: {}", e);
+                    } else {
+                        helper_listener_fd = Some(listener_fd_obj.into_raw_fd()); // Store the raw fd
+                        if DEBUG_LOGGING {
+                            println!("[main] Added helper listener to epoll with fd: {}", fd);
+                        }
                     }
                 } else {
                     println!("[main] ERROR: Failed to start main helper for user: {}", user);
