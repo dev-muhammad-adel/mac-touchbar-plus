@@ -2634,6 +2634,7 @@ dependencies = [
  "serde",
  "serde_json",
  "swayipc",
+ "thiserror",
  "tokio",
  "x11rb",
  "zbus",

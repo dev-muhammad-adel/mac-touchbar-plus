@@ -38,6 +38,7 @@ swayipc = "2.0"
 hyprland = "0.3"
 ctrlc = "3.4"
 lazy_static = "1.4"
+thiserror = "1.0"
 
 [build-dependencies]
 pkg-config = "0.3"

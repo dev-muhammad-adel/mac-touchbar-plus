@@ -45,6 +45,153 @@ use view::browser_screen::BrowserAction;
 mod utils;
 use crate::utils::button_images::{self, ICON_SIZE};
 
+// Error handling types and functions
+#[derive(Debug, thiserror::Error)]
+pub enum MainError {
+    #[error("DRM error: {0}")]
+    Drm(#[from] anyhow::Error),
+    #[error("Epoll error: {0}")]
+    Epoll(#[from] nix::Error),
+    #[error("Input error: {0}")]
+    Input(#[from] std::io::Error),
+    #[error("Cairo error: {0}")]
+    Cairo(String),
+    #[error("Configuration error: {0}")]
+    Config(String),
+    #[error("Helper error: {0}")]
+    Helper(String),
+    #[error("Layer not found: {0:?}")]
+    LayerNotFound(LayerKey),
+    #[error("Touch slot not found: {0}")]
+    TouchSlotNotFound(u32),
+    #[error("Pending layer not found")]
+    PendingLayerNotFound,
+}
+
+type MainResult<T> = Result<T, MainError>;
+
+// Forward declarations for types used in error handling
+#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
+pub enum LayerKey {
+    Media,
+    Fn,
+    Custom2,
+    Custom3,
+}
+
+// Error handling helper functions
+fn safe_epoll_add(epoll: &Epoll, fd: &dyn AsFd, event: EpollEvent) -> MainResult<()> {
+    epoll.add(fd, event)
+        .map_err(|e| MainError::Epoll(e))
+        .map_err(|e| {
+            eprintln!("[main] Failed to add fd to epoll: {}", e);
+            e
+        })
+}
+
+fn safe_epoll_delete(epoll: &Epoll, fd: &dyn AsFd) -> MainResult<()> {
+    epoll.delete(fd)
+        .map_err(|e| MainError::Epoll(e))
+        .map_err(|e| {
+            eprintln!("[main] Failed to remove fd from epoll: {}", e);
+            e
+        })
+}
+
+fn safe_cairo_context(surface: &Surface) -> MainResult<Context> {
+    Context::new(surface)
+        .map_err(|e| MainError::Cairo(format!("Failed to create Cairo context: {}", e)))
+}
+
+fn safe_cairo_text_extents(c: &Context, text: &str) -> MainResult<cairo::TextExtents> {
+    c.text_extents(text)
+        .map_err(|e| MainError::Cairo(format!("Failed to get text extents: {}", e)))
+}
+
+fn safe_cairo_show_text(c: &Context, text: &str) -> MainResult<()> {
+    c.show_text(text)
+        .map_err(|e| MainError::Cairo(format!("Failed to show text: {}", e)))
+}
+
+fn safe_cairo_paint(c: &Context) -> MainResult<()> {
+    c.paint()
+        .map_err(|e| MainError::Cairo(format!("Failed to paint: {}", e)))
+}
+
+fn safe_cairo_fill(c: &Context) -> MainResult<()> {
+    c.fill()
+        .map_err(|e| MainError::Cairo(format!("Failed to fill: {}", e)))
+}
+
+fn safe_cairo_set_source_surface(c: &Context, surface: &Surface, x: f64, y: f64) -> MainResult<()> {
+    c.set_source_surface(surface, x, y)
+        .map_err(|e| MainError::Cairo(format!("Failed to set source surface: {}", e)))
+}
+
+fn safe_cairo_render_document(renderer: &CairoRenderer, c: &Context, rect: &Rectangle) -> MainResult<()> {
+    renderer.render_document(c, rect)
+        .map_err(|e| MainError::Cairo(format!("Failed to render document: {}", e)))
+}
+
+fn safe_surface_data(surface: &mut ImageSurface) -> MainResult<Vec<u8>> {
+    surface.data()
+        .map_err(|e| MainError::Cairo(format!("Failed to get surface data: {}", e)))
+        .map(|data| data.to_vec())
+}
+
+fn safe_drm_map(drm: &mut DrmBackend) -> MainResult<DumbMapping> {
+    drm.map()
+        .map_err(|e| MainError::Drm(e.into()))
+}
+
+fn safe_drm_dirty(drm: &mut DrmBackend, clips: &[ClipRect]) -> MainResult<()> {
+    drm.dirty(clips)
+        .map_err(|e| MainError::Drm(e.into()))
+}
+
+fn safe_stream_try_clone(stream: &UnixStream) -> MainResult<UnixStream> {
+    stream.try_clone()
+        .map_err(|e| MainError::Input(e))
+}
+
+fn safe_stream_set_nonblocking(stream: &UnixStream, nonblocking: bool) -> MainResult<()> {
+    stream.set_nonblocking(nonblocking)
+        .map_err(|e| MainError::Input(e))
+}
+
+fn safe_epoll_wait(epoll: &Epoll, events: &mut [EpollEvent], timeout: isize) -> MainResult<usize> {
+    epoll.wait(events, timeout)
+        .map_err(|e| MainError::Epoll(e))
+}
+
+fn safe_input_dispatch(input: &mut Libinput) -> MainResult<()> {
+    input.dispatch()
+        .map_err(|e| MainError::Input(e))
+}
+
+// Helper function for safe layer access
+fn get_active_layer_mut(layers: &mut HashMap<LayerKey, FunctionLayer>, active_layer: LayerKey) -> MainResult<&mut FunctionLayer> {
+    layers.get_mut(&active_layer)
+        .ok_or_else(|| MainError::LayerNotFound(active_layer))
+}
+
+fn get_active_layer(layers: &HashMap<LayerKey, FunctionLayer>, active_layer: LayerKey) -> MainResult<&FunctionLayer> {
+    layers.get(&active_layer)
+        .ok_or_else(|| MainError::LayerNotFound(active_layer))
+}
+
+// Helper function for safe touch slot access
+fn get_touch_slot<'a>(touches: &'a HashMap<u32, (LayerKey, &'static str, usize)>, slot: u32) -> MainResult<&'a (LayerKey, &'static str, usize)> {
+    touches.get(&slot)
+        .ok_or_else(|| MainError::TouchSlotNotFound(slot))
+}
+
+// Helper function for safe pending layer access
+fn get_pending_layer(pending_layer: &mut Option<LayerKey>) -> MainResult<LayerKey> {
+    pending_layer.take()
+        .ok_or(MainError::PendingLayerNotFound)
+}
+
 // Add log level control at the top
 // Set to true to enable verbose debug logging, false for production (much less resource usage)
 const DEBUG_LOGGING: bool = false; // Set to false to disable verbose logging
@@ -93,6 +240,7 @@ fn setup_signal_handlers() {
     }
 }
 use crate::display::display::DrmBackend;
+use drm::control::dumbbuffer::DumbMapping;
 use display::animation::Animation;
 use display::backlight::BacklightManager;
 use display::pixel_shift::{PixelShiftManager, PIXEL_SHIFT_WIDTH_PX};
@@ -111,14 +259,6 @@ pub mod display {
 pub mod view;
 pub mod services;
 pub mod helper;
-
-#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
-pub enum LayerKey {
-    Media,
-    Fn,
-    Custom2,
-    Custom3,
-}
 
 use crate::helper::manager::{HelperManager, VlcHelperManager, BrowserHelperManager};
 
@@ -237,35 +377,34 @@ impl Button {
             fraction: None,
         }
     }
-    fn render(&self, c: &Context, height: i32, button_left_edge: f64, button_width: u64, y_shift: f64) {
+    fn render(&self, c: &Context, height: i32, button_left_edge: f64, button_width: u64, y_shift: f64) -> MainResult<()> {
         match &self.image {
             button_images::ButtonImage::Text(text) => {
-                let extents = c.text_extents(text).unwrap();
+                let extents = safe_cairo_text_extents(c, text)?;
                 c.move_to(
                     button_left_edge + (button_width as f64 / 2.0 - extents.width() / 2.0).round(),
                     y_shift + (height as f64 / 2.0 + extents.height() / 2.0).round()
                 );
-                c.show_text(text).unwrap();
+                safe_cairo_show_text(c, text)?;
             },
             button_images::ButtonImage::Svg(svg) => {
                 let renderer = CairoRenderer::new(&svg);
                 let x = button_left_edge + (button_width as f64 / 2.0 - (ICON_SIZE / 2) as f64).round();
                 let y = y_shift + ((height as f64 - ICON_SIZE as f64) / 2.0).round();
 
-                renderer.render_document(c,
-                    &Rectangle::new(x, y, ICON_SIZE as f64, ICON_SIZE as f64)
-                ).unwrap();
+                safe_cairo_render_document(&renderer, c, &Rectangle::new(x, y, ICON_SIZE as f64, ICON_SIZE as f64))?;
             }
             button_images::ButtonImage::Bitmap(surf) => {
                 let x = button_left_edge + (button_width as f64 / 2.0 - (ICON_SIZE / 2) as f64).round();
                 let y = y_shift + ((height as f64 - ICON_SIZE as f64) / 2.0).round();
-                c.set_source_surface(surf, x, y).unwrap();
+                safe_cairo_set_source_surface(c, surf, x, y)?;
                 c.rectangle(x, y, ICON_SIZE as f64, ICON_SIZE as f64);
-                c.fill().unwrap();
+                safe_cairo_fill(c)?;
             }
             _ => {
             }
         }
+        Ok(())
     }
     fn set_active<F>(&mut self, uinput: &mut UInputHandle<F>, active: bool) where F: AsRawFd {
         if self.active != active {
@@ -309,10 +448,10 @@ impl FunctionLayer {
             }),
         }
     }
-    fn draw(&mut self, config: &Config, width: i32, height: i32, surface: &Surface, pixel_shift: (f64, f64), complete_redraw: bool, modules_only_redraw: bool, session_state: Option<&SessionState>, layer_index: Option<LayerKey>, app_layer3_slide_progress: f64, current_window_class: Option<&str>, mut app_ui_manager: Option<&mut AppUiManager>, vlc_drag_position: Option<f64>) -> Vec<ClipRect> {
+    fn draw(&mut self, config: &Config, width: i32, height: i32, surface: &Surface, pixel_shift: (f64, f64), complete_redraw: bool, modules_only_redraw: bool, session_state: Option<&SessionState>, layer_index: Option<LayerKey>, app_layer3_slide_progress: f64, current_window_class: Option<&str>, mut app_ui_manager: Option<&mut AppUiManager>, vlc_drag_position: Option<f64>) -> MainResult<Vec<ClipRect>> {
         match &mut self.split {
             Some(split) => {
-                let c = Context::new(&surface).unwrap();
+                let c = safe_cairo_context(&surface)?;
                 let mut modified_regions = if complete_redraw {
                     vec![ClipRect::new(0, 0, height as u16, width as u16)]
                 } else {
@@ -346,12 +485,12 @@ impl FunctionLayer {
                 let (pixel_shift_x, _pixel_shift_y) = pixel_shift;
                 if complete_redraw {
                     c.set_source_rgb(0.0, 0.0, 0.0);
-                    c.paint().unwrap();
+                    safe_cairo_paint(&c)?;
                 } else if modules_only_redraw {
                     // Only clear the modules area for modules-only redraw
                     c.set_source_rgb(0.0, 0.0, 0.0);
                     c.rectangle(pixel_shift_x + (pixel_shift_width / 2) as f64, bot - radius, modules_width, top - bot + radius * 2.0);
-                    c.fill().unwrap();
+                    safe_cairo_fill(&c)?;
                 }
                 if config.font_renderer.to_lowercase() == "cairo" {
                     c.select_font_face(&config.font_style_cairo, if config.italic_cairo {FontSlant::Italic} else {FontSlant::Normal}, if config.bold_cairo {FontWeight::Bold} else {FontWeight::Normal});
@@ -365,7 +504,7 @@ impl FunctionLayer {
                 let left_edge = pixel_shift_x + (pixel_shift_width / 2) as f64;
                 c.set_source_rgb(0.0, 0.0, 0.0);
                 c.rectangle(left_edge, bot - radius, modules_width, top - bot + radius * 2.0);
-                c.fill().unwrap();
+                safe_cairo_fill(&c)?;
                 
                 // Use new session state
                 match session_state {
@@ -443,11 +582,11 @@ impl FunctionLayer {
                     );
                 }
                 
-                modified_regions
+                Ok(modified_regions)
             }
         
             None => {
-                let c = Context::new(&surface).unwrap();
+                let c = safe_cairo_context(&surface)?;
                 let mut modified_regions = if complete_redraw {
                     vec![ClipRect::new(0, 0, height as u16, width as u16)]
                 } else {
@@ -470,7 +609,7 @@ impl FunctionLayer {
                 if let Some(LayerKey::Custom3) = layer_index {
                     // If progress is 0.0, skip drawing (prevents flicker)
                     if app_layer3_slide_progress == 0.0 {
-                        return modified_regions;
+                        return Ok(modified_regions);
                     }
                     // Slide in: progress 0.0 (off right) to 1.0 (onscreen)
                     // Slide out: progress 1.0 (onscreen) to 0.0 (off left)
@@ -504,7 +643,7 @@ impl FunctionLayer {
                 let (pixel_shift_x, pixel_shift_y) = pixel_shift;
                 if complete_redraw {
                     c.set_source_rgb(0.0, 0.0, 0.0);
-                    c.paint().unwrap();
+                    safe_cairo_paint(&c)?;
                 }
                 if config.font_renderer.to_lowercase() == "cairo" {
                     c.select_font_face(&config.font_style_cairo, if config.italic_cairo {FontSlant::Italic} else {FontSlant::Normal}, if config.bold_cairo {FontWeight::Bold} else {FontWeight::Normal});
@@ -576,10 +715,10 @@ impl FunctionLayer {
                     );
                     c.close_path();
 
-                    c.fill().unwrap();
+                    safe_cairo_fill(&c)?;
                     }
                     c.set_source_rgb(1.0, 1.0, 1.0);
-                    button.render(&c, height, left_edge, this_button_width.ceil() as u64, pixel_shift_y);
+                    button.render(&c, height, left_edge, this_button_width.ceil() as u64, pixel_shift_y)?;
 
                     button.changed = false;
 
@@ -596,7 +735,7 @@ impl FunctionLayer {
                         left_edge += gap;
                     }
                 }
-                modified_regions
+                Ok(modified_regions)
             }
 
 
@@ -796,7 +935,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn real_main(drm: &mut DrmBackend) -> Result<()> {
+async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
     // Setup signal handlers for graceful shutdown
     setup_signal_handlers();
     let (height, width) = drm.mode().size();
@@ -833,23 +972,23 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
     input_tb.udev_assign_seat("seat-touchbar").expect("Failed to assign touch bar seat");
     input_main.udev_assign_seat("seat0").expect("Failed to assign main seat");
     let epoll = Epoll::new(EpollCreateFlags::empty()).expect("Failed to create epoll instance");
-    epoll.add(input_main.as_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 0)).unwrap();
-    epoll.add(input_tb.as_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 1)).unwrap();
-    epoll.add(cfg_mgr.fd(), EpollEvent::new(EpollFlags::EPOLLIN, 2)).unwrap();
+    safe_epoll_add(&epoll, &input_main.as_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 0))?;
+    safe_epoll_add(&epoll, &input_tb.as_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 1))?;
+    safe_epoll_add(&epoll, &cfg_mgr.fd(), EpollEvent::new(EpollFlags::EPOLLIN, 2))?;
     // --- eventfd integration ---
     let event_fd = Arc::new(eventfd(0, EfdFlags::EFD_NONBLOCK).expect("Failed to create eventfd"));
-    epoll.add(&*event_fd, EpollEvent::new(EpollFlags::EPOLLIN, 3)).unwrap();
+    safe_epoll_add(&epoll, &*event_fd, EpollEvent::new(EpollFlags::EPOLLIN, 3))?;
     // --- end eventfd integration ---
-    uinput.set_evbit(EventKind::Key).unwrap();
+    uinput.set_evbit(EventKind::Key).map_err(|e| MainError::Input(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
     for layer in layers.values() {
         // Register buttons from regular layer.buttons
         for button in &layer.buttons {
-            uinput.set_keybit(button.action).unwrap();
+            uinput.set_keybit(button.action).map_err(|e| MainError::Input(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
         }
         // Register buttons from split layout media section
         if let Some(split) = &layer.split {
             for button in &split.media {
-                uinput.set_keybit(button.action).unwrap();
+                uinput.set_keybit(button.action).map_err(|e| MainError::Input(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
             }
         }
     }
@@ -868,8 +1007,8 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
         },
         ff_effects_max: 0,
         name: dev_name_c
-    }).unwrap();
-    uinput.dev_create().expect("Failed to create uinput device");
+    }).map_err(|e| MainError::Input(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+    uinput.dev_create().map_err(|e| MainError::Input(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
 
     let mut digitizer: Option<InputDevice> = None;
     let mut touches = HashMap::new();
@@ -938,7 +1077,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
             next_timeout_ms = min(next_timeout_ms, 16);
         }
         let current_minute = Local::now().minute();
-        for button in &mut layers.get_mut(&active_layer).expect("Active layer not found").buttons {
+        for button in &mut get_active_layer_mut(&mut layers, active_layer)?.buttons {
             if (button.action == Key::Time) && (current_minute != last_redraw_minute) {
                 needs_complete_redraw = true;
                 last_redraw_minute = current_minute;
@@ -968,15 +1107,15 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
         }
         // After slide-out animation, switch to pending layer if needed
         if !app_layer3_slide_anim.is_animating_out() && pending_layer.is_some() {
-            active_layer = pending_layer.take().expect("Pending layer not found").clone();
+            active_layer = get_pending_layer(&mut pending_layer)?;
             last_layer = active_layer.clone();
             needs_complete_redraw = true;
         }
         // --- Restore any_changed variable for redraw logic ---
-        let any_changed = if let Some(split) = &layers.get(&active_layer).expect("Active layer not found").split {
+        let any_changed = if let Some(split) = &get_active_layer(&layers, active_layer)?.split {
             split.media.iter().any(|b| b.changed)
         } else {
-            layers.get(&active_layer).expect("Active layer not found").buttons.iter().any(|b| b.changed)
+            get_active_layer(&layers, active_layer)?.buttons.iter().any(|b| b.changed)
         };
         
         // Check for browser screen button changes
@@ -1025,12 +1164,12 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
             
             // Draw only the current active layer (layer 3 during slide-out)
             // VLC drag position is handled in the drawing functions
-            let clips = layers.get_mut(&active_layer).expect("Active layer not found").draw(&cfg, width as i32, height as i32, &surface, shift, needs_complete_redraw, false, session_for_draw, Some(active_layer.clone()), app_layer3_slide_progress, current_window_class.as_deref(), Some(&mut app_ui_manager), vlc_drag_position);
+            let clips = get_active_layer_mut(&mut layers, active_layer)?.draw(&cfg, width as i32, height as i32, &surface, shift, needs_complete_redraw, false, session_for_draw, Some(active_layer.clone()), app_layer3_slide_progress, current_window_class.as_deref(), Some(&mut app_ui_manager), vlc_drag_position)?;
             
             // Performance optimization: Batch DRM operations
-            let data = surface.data().expect("Failed to get surface data");
-            drm.map().expect("Failed to map DRM buffer").as_mut()[..data.len()].copy_from_slice(&data);
-            drm.dirty(&clips).expect("Failed to mark DRM buffer as dirty");
+            let data = safe_surface_data(&mut surface)?;
+            safe_drm_map(drm)?.as_mut()[..data.len()].copy_from_slice(&data);
+            safe_drm_dirty(drm, &clips)?;
             
             // Performance monitoring
             let draw_time = start_time.elapsed();
@@ -1062,7 +1201,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
         // Performance optimization: Frame rate limiting
         let frame_start = std::time::Instant::now();
         
-        let n = epoll.wait(&mut events, next_timeout_ms as isize).expect("Epoll wait failed");
+        let n = safe_epoll_wait(&epoll, &mut events, next_timeout_ms as isize)?;
 
         for i in 0..n {
             let event = events[i];
@@ -1550,8 +1689,8 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
             }
         }
         // // After epoll, always process all pending input events:
-        input_tb.dispatch().expect("Failed to dispatch touch bar input");
-        input_main.dispatch().expect("Failed to dispatch main input");
+        safe_input_dispatch(&mut input_tb)?;
+        safe_input_dispatch(&mut input_main)?;
 
         for event in &mut input_tb.clone().chain(input_main.clone()) {
             backlight.process_event(&event);
@@ -1624,7 +1763,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                             let _x = dn.x_transformed(width as u32);
                             let _y = dn.y_transformed(height as u32);
                             println!("[main] Touch down at ({}, {})", _x, _y);
-                            if let Some((group, idx)) = layers.get_mut(&active_layer).expect("Active layer not found").hit_test(_x, width as i32, Some(active_layer.clone())) {
+                            if let Some((group, idx)) = get_active_layer_mut(&mut layers, active_layer)?.hit_test(_x, width as i32, Some(active_layer.clone())) {
                                 match group {
                                     "modules" => {
                                         // Store touch for modules group
@@ -1886,7 +2025,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                     }
                                 
                                     "media" => {
-                                        if let Some(split) = &mut layers.get_mut(&active_layer).expect("Active layer not found").split {
+                                        if let Some(split) = &mut get_active_layer_mut(&mut layers, active_layer)?.split {
                                             let button = &mut split.media[idx];
                                             if button.action == Key::Unknown {
                                                 continue;
@@ -1896,7 +2035,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                         }
                                     }
                                     "flat" => {
-                                        let button = &mut layers.get_mut(&active_layer).expect("Active layer not found").buttons[idx];
+                                        let button = &mut get_active_layer_mut(&mut layers, active_layer)?.buttons[idx];
                                         if button.action == Key::Unknown {
                                             continue;
                                         }
@@ -1917,7 +2056,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                             }
                             let _x = mtn.x_transformed(width as u32);
                             let _y = mtn.y_transformed(height as u32);
-                            let (layer, group, idx) = touches.get(&mtn.seat_slot()).expect("Touch slot not found");
+                            let (layer, group, idx) = get_touch_slot(&touches, mtn.seat_slot())?;
                             println!("[main] Motion event: group={}, idx={}, coords=({}, {})", group, idx, _x, _y);
                             match *group {
                                 "modules" => {
@@ -2010,7 +2149,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                             if !touches.contains_key(&up.seat_slot()) {
                                 continue;
                             }
-                            let (layer, group, idx) = touches.get(&up.seat_slot()).expect("Touch slot not found");
+                            let (layer, group, idx) = get_touch_slot(&touches, up.seat_slot())?;
                             println!("Up: group={}, idx={}", group, idx);
                             match *group {
                                 "modules" => {
@@ -2053,7 +2192,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                     continue;
                                 }
                                 "media" => {
-                                    if let Some(split) = &mut layers.get_mut(layer).expect("Layer not found").split {
+                                    if let Some(split) = &mut get_active_layer_mut(&mut layers, *layer)?.split {
                                         let button = &mut split.media[*idx];
                                         if button.action == Key::Unknown {
                                             continue;
@@ -2062,7 +2201,7 @@ async fn real_main(drm: &mut DrmBackend) -> Result<()> {
                                     }
                                 }
                                 "flat" => {
-                                    let button = &mut layers.get_mut(layer).expect("Layer not found").buttons[*idx];
+                                    let button = &mut get_active_layer_mut(&mut layers, *layer)?.buttons[*idx];
                                     if button.action == Key::Unknown {
                                         continue;
                                     }
