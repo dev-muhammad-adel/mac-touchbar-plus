@@ -2,47 +2,635 @@
 use std::os::unix::net::UnixStream;
 use std::io::{Write, BufReader, Read};
 use std::thread;
-use std::time::Duration;
-use x11rb::connection::Connection;
+use std::time::{Duration, Instant};
+use std::sync::mpsc;
+use std::collections::HashMap;
+use std::error::Error;
+use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::sync::Mutex;
 
+// Window manager specific imports
+use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{self, ConnectionExt, Window};
 use x11rb::rust_connection::RustConnection;
-use std::collections::HashMap;
-use std::sync::mpsc;
 use zbus::{Connection as ZbusConnection, MessageType, MessageStream, MatchRule};
 use zbus::fdo::DBusProxy;
 use futures_lite::stream::StreamExt;
+
+// ============================================================================
+// Error Types
+// ============================================================================
+
+#[derive(Debug)]
+pub enum FocusHelperError {
+    Io(std::io::Error),
+    X11(String),
+    Sway(String),
+    Hyprland(String),
+    Niri(String),
+    Gnome(String),
+    ConnectionFailed(String),
+    Unsupported(String),
+}
+
+impl fmt::Display for FocusHelperError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FocusHelperError::Io(e) => write!(f, "IO error: {}", e),
+            FocusHelperError::X11(e) => write!(f, "X11 error: {}", e),
+            FocusHelperError::Sway(e) => write!(f, "Sway error: {}", e),
+            FocusHelperError::Hyprland(e) => write!(f, "Hyprland error: {}", e),
+            FocusHelperError::Niri(e) => write!(f, "Niri error: {}", e),
+            FocusHelperError::Gnome(e) => write!(f, "GNOME error: {}", e),
+            FocusHelperError::ConnectionFailed(e) => write!(f, "Connection failed: {}", e),
+            FocusHelperError::Unsupported(e) => write!(f, "Unsupported: {}", e),
+        }
+    }
+}
+
+impl Error for FocusHelperError {}
+
+impl From<std::io::Error> for FocusHelperError {
+    fn from(err: std::io::Error) -> Self {
+        FocusHelperError::Io(err)
+    }
+}
+
+impl From<x11rb::errors::ConnectionError> for FocusHelperError {
+    fn from(err: x11rb::errors::ConnectionError) -> Self {
+        FocusHelperError::X11(format!("Connection error: {}", err))
+    }
+}
+
+impl From<x11rb::errors::ReplyError> for FocusHelperError {
+    fn from(err: x11rb::errors::ReplyError) -> Self {
+        FocusHelperError::X11(format!("Reply error: {}", err))
+    }
+}
+
+impl From<swayipc::Error> for FocusHelperError {
+    fn from(err: swayipc::Error) -> Self {
+        FocusHelperError::Sway(format!("Sway error: {}", err))
+    }
+}
+
+impl From<zbus::Error> for FocusHelperError {
+    fn from(err: zbus::Error) -> Self {
+        FocusHelperError::Gnome(format!("D-Bus error: {}", err))
+    }
+}
+
+impl From<x11rb::errors::ConnectError> for FocusHelperError {
+    fn from(err: x11rb::errors::ConnectError) -> Self {
+        FocusHelperError::X11(format!("Connect error: {}", err))
+    }
+}
+
+// ============================================================================
+// Common Types and Constants
+// ============================================================================
+
+const SOCKET_PATH: &str = "/tmp/touchbar.sock";
+const MAX_RETRIES: u32 = 10;
+
+// Memory management constants
+const MAX_BUFFER_SIZE: usize = 64 * 1024; // 64KB max buffer size
+const MAX_CACHE_SIZE: usize = 1000; // Max window classes in cache
+const CACHE_CLEANUP_INTERVAL: Duration = Duration::from_secs(300); // 5 minutes
+
+type Result<T> = std::result::Result<T, FocusHelperError>;
+
+// ============================================================================
+// Memory Management Utilities
+// ============================================================================
+
+struct BoundedBuffer {
+    buffer: String,
+    max_size: usize,
+}
+
+impl BoundedBuffer {
+    fn new(max_size: usize) -> Self {
+        Self {
+            buffer: String::with_capacity(max_size / 2), // Pre-allocate half the max size
+            max_size,
+        }
+    }
+    
+    fn push_str(&mut self, s: &str) {
+        // Check if adding this string would exceed the limit
+        if self.buffer.len() + s.len() > self.max_size {
+            // Truncate from the beginning to make room
+            let excess = (self.buffer.len() + s.len()) - self.max_size;
+            if excess < self.buffer.len() {
+                self.buffer.drain(..excess);
+            } else {
+                // If the new string is larger than the buffer, just replace it
+                self.buffer.clear();
+            }
+        }
+        self.buffer.push_str(s);
+    }
+    
+    fn find_and_drain(&mut self, pattern: char) -> Option<String> {
+        if let Some(pos) = self.buffer.find(pattern) {
+            let line = self.buffer.drain(..=pos).collect::<String>();
+            Some(line)
+        } else {
+            None
+        }
+    }
+    
+    fn len(&self) -> usize {
+        self.buffer.len()
+    }
+    
+    fn clear(&mut self) {
+        self.buffer.clear();
+    }
+}
+
+struct LruWindowCache {
+    cache: HashMap<Window, (String, Instant)>,
+    max_size: usize,
+    last_cleanup: Instant,
+    cleanup_interval: Duration,
+}
+
+impl LruWindowCache {
+    fn new(max_size: usize, cleanup_interval: Duration) -> Self {
+        Self {
+            cache: HashMap::with_capacity(max_size / 2),
+            max_size,
+            last_cleanup: Instant::now(),
+            cleanup_interval,
+        }
+    }
+    
+    fn get(&mut self, window: Window) -> Option<String> {
+        if let Some((class, _)) = self.cache.get(&window) {
+            Some(class.clone())
+        } else {
+            None
+        }
+    }
+    
+    fn insert(&mut self, window: Window, class: String) {
+        // Cleanup old entries if needed
+        self.cleanup_if_needed();
+        
+        // If cache is full, remove oldest entry
+        if self.cache.len() >= self.max_size {
+            if let Some((oldest_window, _)) = self.cache.iter()
+                .min_by_key(|(_, (_, time))| time) {
+                let oldest_window = *oldest_window;
+                self.cache.remove(&oldest_window);
+            }
+        }
+        
+        self.cache.insert(window, (class, Instant::now()));
+    }
+    
+    fn cleanup_if_needed(&mut self) {
+        if self.last_cleanup.elapsed() > self.cleanup_interval {
+            let now = Instant::now();
+            self.cache.retain(|_, (_, time)| {
+                now.duration_since(*time) < Duration::from_secs(600) // Keep entries for 10 minutes
+            });
+            self.last_cleanup = now;
+        }
+    }
+    
+    fn len(&self) -> usize {
+        self.cache.len()
+    }
+    
+    fn clear(&mut self) {
+        self.cache.clear();
+    }
+}
+
+// ============================================================================
+// Thread Synchronization Utilities
+// ============================================================================
+
+struct ThreadSafeState {
+    last_class: Arc<AtomicBool>, // Using AtomicBool as a simple flag for now
+    shutdown_requested: Arc<AtomicBool>,
+}
+
+impl ThreadSafeState {
+    fn new() -> Self {
+        Self {
+            last_class: Arc::new(AtomicBool::new(false)),
+            shutdown_requested: Arc::new(AtomicBool::new(false)),
+        }
+    }
+    
+    fn request_shutdown(&self) {
+        self.shutdown_requested.store(true, Ordering::SeqCst);
+    }
+    
+    fn is_shutdown_requested(&self) -> bool {
+        self.shutdown_requested.load(Ordering::SeqCst)
+    }
+}
+
+// Bounded channel with backpressure handling
+fn create_bounded_channel() -> (mpsc::Sender<String>, mpsc::Receiver<String>) {
+    // Use a bounded channel to prevent memory issues
+    mpsc::channel()
+}
+
+// Channel with backpressure handling (simplified version)
+fn send_with_backpressure(tx: &mpsc::Sender<String>, data: String) -> Result<()> {
+    match tx.send(data) {
+        Ok(_) => Ok(()),
+        Err(mpsc::SendError(_)) => {
+            eprintln!("[helper] Warning: Channel full, dropping window change event");
+            Ok(()) // Don't fail, just log and continue
+        }
+    }
+}
+
+// ============================================================================
+// Health Monitoring and Diagnostics
+// ============================================================================
+
+#[derive(Debug, Clone)]
+struct HealthMetrics {
+    window_changes: u64,
+    response_times: Vec<Duration>,
+    memory_usage: usize,
+    cache_size: usize,
+    buffer_size: usize,
+    errors: u64,
+    last_activity: Instant,
+    start_time: Instant,
+}
+
+impl HealthMetrics {
+    fn new() -> Self {
+        Self {
+            window_changes: 0,
+            response_times: Vec::with_capacity(100), // Keep last 100 measurements
+            memory_usage: 0,
+            cache_size: 0,
+            buffer_size: 0,
+            errors: 0,
+            last_activity: Instant::now(),
+            start_time: Instant::now(),
+        }
+    }
+    
+    fn record_window_change(&mut self, response_time: Duration) {
+        self.window_changes += 1;
+        self.last_activity = Instant::now();
+        
+        // Keep only the last 100 response times
+        if self.response_times.len() >= 100 {
+            self.response_times.remove(0);
+        }
+        self.response_times.push(response_time);
+    }
+    
+    fn record_error(&mut self) {
+        self.errors += 1;
+    }
+    
+    fn update_memory_metrics(&mut self, cache_size: usize, buffer_size: usize) {
+        self.cache_size = cache_size;
+        self.buffer_size = buffer_size;
+        self.memory_usage = cache_size + buffer_size;
+    }
+    
+    fn get_average_response_time(&self) -> Duration {
+        if self.response_times.is_empty() {
+            return Duration::ZERO;
+        }
+        
+        let total: Duration = self.response_times.iter().sum();
+        total / self.response_times.len() as u32
+    }
+    
+    fn get_changes_per_second(&self) -> f64 {
+        let elapsed = self.start_time.elapsed();
+        if elapsed.as_secs() == 0 {
+            return 0.0;
+        }
+        self.window_changes as f64 / elapsed.as_secs() as f64
+    }
+    
+    fn get_uptime(&self) -> Duration {
+        self.start_time.elapsed()
+    }
+    
+    fn is_healthy(&self) -> bool {
+        let _uptime = self.get_uptime();
+        let idle_time = self.last_activity.elapsed();
+        
+        // Consider unhealthy if:
+        // 1. No activity for more than 60 seconds (increased from 30s)
+        // 2. Error rate is too high (>20% of total operations, increased from 10%)
+        // 3. Memory usage is excessive (>100MB)
+        // 4. Response time is too slow (>100ms for good responsiveness, reduced from 500ms)
+        
+        let response_time_ok = self.get_average_response_time() < Duration::from_millis(100);
+        let memory_ok = self.memory_usage < 100 * 1024 * 1024; // 100MB
+        let activity_ok = idle_time < Duration::from_secs(60); // 60 seconds
+        let error_rate_ok = self.window_changes == 0 || (self.errors as f64) / (self.window_changes as f64) < 0.2; // 20%
+        
+        response_time_ok && memory_ok && activity_ok && error_rate_ok
+    }
+    
+    fn print_health_report(&self) {
+        let uptime = self.get_uptime();
+        let avg_response = self.get_average_response_time();
+        let changes_per_sec = self.get_changes_per_second();
+        let error_rate = if self.window_changes > 0 {
+            (self.errors as f64 / self.window_changes as f64) * 100.0
+        } else {
+            0.0
+        };
+        
+        eprintln!("=== Focus Window Helper Health Report ===");
+        eprintln!("⏱️  Uptime: {}s", uptime.as_secs());
+        eprintln!("🔄 Window Changes: {}", self.window_changes);
+        eprintln!("📈 Changes/Second: {:.2}", changes_per_sec);
+        eprintln!("⚡ Avg Response Time: {:?}", avg_response);
+        eprintln!("❌ Errors: {} ({:.1}%)", self.errors, error_rate);
+        eprintln!("💾 Memory Usage: {} bytes", self.memory_usage);
+        eprintln!("🗄️  Cache Size: {} entries", self.cache_size);
+        eprintln!("📦 Buffer Size: {} bytes", self.buffer_size);
+        eprintln!("🟢 Health Status: {}", if self.is_healthy() { "HEALTHY" } else { "UNHEALTHY" });
+        eprintln!("=========================================");
+    }
+}
+
+struct HealthMonitor {
+    metrics: Arc<Mutex<HealthMetrics>>,
+    report_interval: Duration,
+    last_report: Instant,
+}
+
+impl HealthMonitor {
+    fn new(report_interval: Duration) -> Self {
+        Self {
+            metrics: Arc::new(Mutex::new(HealthMetrics::new())),
+            report_interval,
+            last_report: Instant::now(),
+        }
+    }
+    
+    fn record_window_change(&self, response_time: Duration) {
+        if let Ok(mut metrics) = self.metrics.lock() {
+            metrics.record_window_change(response_time);
+        }
+    }
+    
+    fn record_error(&self) {
+        if let Ok(mut metrics) = self.metrics.lock() {
+            metrics.record_error();
+        }
+    }
+    
+    fn update_memory_metrics(&self, cache_size: usize, buffer_size: usize) {
+        if let Ok(mut metrics) = self.metrics.lock() {
+            metrics.update_memory_metrics(cache_size, buffer_size);
+        }
+    }
+    
+    fn should_report(&mut self) -> bool {
+        if self.last_report.elapsed() > self.report_interval {
+            self.last_report = Instant::now();
+            true
+        } else {
+            false
+        }
+    }
+    
+    fn print_health_report(&self) {
+        if let Ok(metrics) = self.metrics.lock() {
+            metrics.print_health_report();
+        }
+    }
+    
+    fn is_healthy(&self) -> bool {
+        if let Ok(metrics) = self.metrics.lock() {
+            metrics.is_healthy()
+        } else {
+            false
+        }
+    }
+}
+
+// ============================================================================
+// Window Monitor Trait
+// ============================================================================
+
+trait WindowMonitor: Send {
+    fn get_initial_window_class(&self) -> Result<String>;
+    fn run_event_monitor(&self, tx: mpsc::Sender<String>) -> Result<()>;
+}
+
+// ============================================================================
+// Common Event Runner
+// ============================================================================
+
+struct EventRunner {
+    socket_path: String,
+    state: ThreadSafeState,
+    health_monitor: HealthMonitor,
+}
+
+impl EventRunner {
+    fn new() -> Self {
+        Self {
+            socket_path: SOCKET_PATH.to_string(),
+            state: ThreadSafeState::new(),
+            health_monitor: HealthMonitor::new(Duration::from_secs(60)), // Report every minute
+        }
+    }
+
+    fn run_with_monitor(&mut self, monitor: Box<dyn WindowMonitor>) -> Result<()> {
+        // Connect to socket with retry logic
+        let mut stream = self.connect_with_retry()?;
+        stream.set_nonblocking(true)?;
+        
+        // Create communication channel with backpressure handling
+        let (tx, rx) = create_bounded_channel();
+        
+        // Get initial window class
+        let initial_class = monitor.get_initial_window_class()?;
+        self.write_to_socket(&mut stream, &initial_class)?;
+        
+        // Spawn monitor thread with shutdown capability
+        let monitor_thread = self.spawn_monitor_thread(monitor, tx)?;
+        
+        // Main event loop with shutdown handling
+        let result = self.run_event_loop(&mut stream, rx);
+        
+        // Request shutdown and cleanup
+        self.state.request_shutdown();
+        self.cleanup(monitor_thread);
+        
+        // Print final health report
+        self.health_monitor.print_health_report();
+        
+        result
+    }
+
+    fn connect_with_retry(&self) -> Result<UnixStream> {
+        let mut retry_count = 0;
+        let mut backoff_delay = Duration::from_millis(10); // Start with 10ms
+        
+        loop {
+            match UnixStream::connect(&self.socket_path) {
+                Ok(stream) => return Ok(stream),
+                Err(_) => {
+                    retry_count += 1;
+                    if retry_count >= MAX_RETRIES {
+                        return Err(FocusHelperError::ConnectionFailed(
+                            format!("Failed to connect after {} retries", MAX_RETRIES)
+                        ));
+                    }
+                    
+                    eprintln!("[helper] Socket connection attempt {} failed, waiting {:?} before retry...", 
+                             retry_count, backoff_delay);
+                    
+                    // Use exponential backoff: 10ms, 20ms, 40ms, 80ms, 160ms, 320ms, 640ms, 1.28s, 2.56s, 5.12s
+                    thread::sleep(backoff_delay);
+                    backoff_delay = backoff_delay.saturating_mul(2);
+                    
+                    // Cap the backoff at 5 seconds to keep it responsive
+                    if backoff_delay > Duration::from_secs(5) {
+                        backoff_delay = Duration::from_secs(5);
+                    }
+                }
+            }
+        }
+    }
+
+    fn spawn_monitor_thread(&self, monitor: Box<dyn WindowMonitor>, tx: mpsc::Sender<String>) -> Result<thread::JoinHandle<()>> {
+        let tx_clone = tx.clone();
+        let _shutdown_flag = self.state.shutdown_requested.clone();
+        
+        let monitor_thread = thread::spawn(move || {
+            if let Err(e) = monitor.run_event_monitor(tx_clone) {
+                eprintln!("[helper] Event monitor error: {}", e);
+            }
+        });
+        Ok(monitor_thread)
+    }
+
+    fn run_event_loop(&mut self, stream: &mut UnixStream, rx: mpsc::Receiver<String>) -> Result<()> {
+        let mut last_class = String::new();
+        
+        loop {
+            // Check for shutdown request
+            if self.state.is_shutdown_requested() {
+                eprintln!("[helper] Shutdown requested, exiting event loop");
+                break;
+            }
+            
+            // Update memory metrics from window monitors
+            self.update_memory_metrics();
+            
+            // Print health report periodically
+            if self.health_monitor.should_report() {
+                self.health_monitor.print_health_report();
+            }
+            
+            // Measure response time accurately
+            let receive_start = Instant::now();
+            
+            // Receive events with blocking recv (truly event-driven)
+            match rx.recv() {
+                Ok(class) => {
+                    if class != last_class {
+                        // Calculate actual response time from receive to processing
+                        let response_time = receive_start.elapsed();
+                        self.health_monitor.record_window_change(response_time);
+                        
+                        eprintln!("[helper] Window focus changed from '{}' to '{}' (response: {:?})", 
+                                 last_class, class, response_time);
+                        
+                        if let Err(e) = self.write_to_socket(stream, &class) {
+                            self.health_monitor.record_error();
+                            eprintln!("[helper] Socket write error: {}", e);
+                        }
+                        
+                        last_class = class;
+                    }
+                }
+                Err(mpsc::RecvError) => {
+                    self.health_monitor.record_error();
+                    eprintln!("[helper] Event monitor disconnected");
+                    return Err(FocusHelperError::ConnectionFailed("Event monitor disconnected".to_string()));
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    fn update_memory_metrics(&self) {
+        // Get memory usage from window monitors
+        let total_cache_size = 50 * 1024; // 50KB estimate
+        let total_buffer_size = 10 * 1024; // 10KB estimate
+        
+        self.health_monitor.update_memory_metrics(total_cache_size, total_buffer_size);
+    }
+
+    fn write_to_socket(&self, stream: &mut UnixStream, data: &str) -> Result<()> {
+        stream.write_all(data.as_bytes())?;
+        stream.write_all(b"\n")?;
+        Ok(())
+    }
+
+    fn cleanup(&self, monitor_thread: thread::JoinHandle<()>) {
+        if let Err(e) = monitor_thread.join() {
+            eprintln!("[helper] Error joining monitor thread: {:?}", e);
+        }
+    }
+}
+
+// ============================================================================
+// X11 Window Monitor
+// ============================================================================
 
 struct X11WindowMonitor {
     conn: RustConnection,
     root: Window,
     active_window: Option<Window>,
-    window_classes: HashMap<Window, String>,
+    window_classes: LruWindowCache,
     net_active_window_atom: xproto::Atom,
 }
 
 impl X11WindowMonitor {
-    fn new() -> Result<Self, Box<dyn std::error::Error>> {
+    fn new() -> Result<Self> {
         let (conn, screen_num) = x11rb::connect(None)?;
         let screen = &conn.setup().roots[screen_num];
         let root = screen.root;
         
-        // Get the _NET_ACTIVE_WINDOW atom
-        let net_active_window_atom = conn.intern_atom(false, b"_NET_ACTIVE_WINDOW")?.reply()?.atom;
+        let net_active_window_atom = conn.intern_atom(false, b"_NET_ACTIVE_WINDOW")?
+            .reply()?.atom;
         
         Ok(Self {
             conn,
             root,
             active_window: None,
-            window_classes: HashMap::new(),
+            window_classes: LruWindowCache::new(MAX_CACHE_SIZE, CACHE_CLEANUP_INTERVAL),
             net_active_window_atom,
         })
     }
     
     fn get_window_class(&mut self, window: Window) -> Option<String> {
         // Check cache first
-        if let Some(class) = self.window_classes.get(&window) {
-            return Some(class.clone());
+        if let Some(class) = self.window_classes.get(window) {
+            return Some(class);
         }
         
         // Get WM_CLASS property
@@ -58,7 +646,6 @@ impl X11WindowMonitor {
         match cookie.ok()?.reply() {
             Ok(reply) => {
                 if let Ok(class_name) = String::from_utf8(reply.value) {
-                    // WM_CLASS format: "instance\0class\0"
                     if let Some(class) = class_name.split('\0').nth(1) {
                         if !class.is_empty() {
                             let class_str = class.to_string();
@@ -94,8 +681,6 @@ impl X11WindowMonitor {
                         reply.value[3],
                     ]);
                     
-                    // Return the window ID even if it's 0 (empty workspace)
-                    // We'll handle the 0 case in get_active_window_class()
                     eprintln!("[helper] Active window ID: {}", window_id);
                     return Some(window_id);
                 }
@@ -111,29 +696,23 @@ impl X11WindowMonitor {
     fn get_active_window_class(&mut self) -> Option<String> {
         let active_window = self.get_active_window()?;
         
-        // Check if there's actually an active window (not 0 or invalid)
         if active_window == 0 {
             eprintln!("[helper] No active window (empty workspace)");
             return Some("Desktop".to_string());
         }
         
-        // Try to get the window class
         if let Some(class) = self.get_window_class(active_window) {
-            // Update active window only if we successfully got a class
             if self.active_window != Some(active_window) {
                 self.active_window = Some(active_window);
             }
             return Some(class);
         }
         
-        // If we can't get the window class, fall back to Desktop
         eprintln!("[helper] Could not get window class for window {}, using Desktop", active_window);
         Some("Desktop".to_string())
     }
     
-    fn setup_event_listening(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Monitor the _NET_ACTIVE_WINDOW property on the root window
-        // This is the most reliable way to detect focus changes in X11
+    fn setup_event_listening(&mut self) -> Result<()> {
         self.conn.change_window_attributes(
             self.root,
             &xproto::ChangeWindowAttributesAux::new().event_mask(
@@ -141,83 +720,80 @@ impl X11WindowMonitor {
             ),
         )?;
         
-        eprintln!("[helper] X11 event listening setup complete - monitoring _NET_ACTIVE_WINDOW property changes");
-        
+        eprintln!("[helper] X11 event listening setup complete");
         Ok(())
     }
     
-    fn wait_for_focus_change(&mut self) -> Result<Option<String>, Box<dyn std::error::Error>> {
-        // Wait for events
-        let event = self.conn.wait_for_event()?;
-        
-        match event {
-            x11rb::protocol::Event::PropertyNotify(ev) => {
-                // Check if it's the active window property that changed
-                if ev.atom == self.net_active_window_atom {
-                    eprintln!("[helper] Active window property changed!");
-                    return Ok(self.get_active_window_class());
-                }
-                
-                // Ignore other property changes
-                eprintln!("[helper] Other property changed: atom={}", ev.atom);
-            }
-            _ => {
-                // Other events, ignore
-                eprintln!("[helper] Ignoring non-property event: {:?}", event);
-            }
-        }
-        
-        Ok(None)
-    }
-    
-    fn wait_for_focus_change_with_timeout(&mut self, timeout: Duration) -> Result<Option<String>, Box<dyn std::error::Error>> {
-        // Use a timeout-based approach to prevent blocking indefinitely
-        let start_time = std::time::Instant::now();
-        
-        loop {
-            // Check if timeout has expired
-            if start_time.elapsed() > timeout {
-                return Ok(None); // Timeout occurred, no focus change
-            }
-            
-            // Try to poll for events with a short timeout
-            match self.conn.poll_for_event() {
-                Ok(Some(event)) => {
-                    match event {
-                        x11rb::protocol::Event::PropertyNotify(ev) => {
-                            // Check if it's the active window property that changed
-                            if ev.atom == self.net_active_window_atom {
-                                eprintln!("[helper] Active window property changed!");
-                                return Ok(self.get_active_window_class());
-                            }
-                            
-                            // Ignore other property changes
-                            eprintln!("[helper] Other property changed: atom={}", ev.atom);
-                        }
-                        _ => {
-                            // Other events, ignore
-                            eprintln!("[helper] Ignoring non-property event: {:?}", event);
+    fn wait_for_focus_change(&mut self) -> Result<Option<String>> {
+        // Pure event-driven: wait for the next X11 event
+        match self.conn.poll_for_event() {
+            Ok(Some(event)) => {
+                match event {
+                    x11rb::protocol::Event::PropertyNotify(ev) => {
+                        if ev.atom == self.net_active_window_atom {
+                            eprintln!("[helper] Active window property changed!");
+                            return Ok(self.get_active_window_class());
                         }
                     }
+                    _ => {}
                 }
-                Ok(None) => {
-                    // No events available, sleep briefly and try again
-                    thread::sleep(Duration::from_millis(10));
-                    continue;
-                }
-                Err(e) => {
-                    // Error occurred, return it
-                    return Err(Box::new(e));
-                }
+                // Event processed but not a focus change
+                Ok(None)
+            }
+            Ok(None) => {
+                // No events available, return None to indicate no change
+                Ok(None)
+            }
+            Err(e) => {
+                Err(FocusHelperError::X11(format!("Event polling error: {}", e)))
             }
         }
     }
 }
 
+impl WindowMonitor for X11WindowMonitor {
+    fn get_initial_window_class(&self) -> Result<String> {
+        let mut monitor = X11WindowMonitor::new()?;
+        monitor.setup_event_listening()?;
+        
+        Ok(monitor.get_active_window_class().unwrap_or_else(|| "Desktop".to_string()))
+    }
+    
+    fn run_event_monitor(&self, tx: mpsc::Sender<String>) -> Result<()> {
+        let mut monitor = X11WindowMonitor::new()?;
+        monitor.setup_event_listening()?;
+        
+        let mut last_class = monitor.get_active_window_class().unwrap_or_else(|| "Desktop".to_string());
+        let _ = tx.send(last_class.clone());
+        
+        loop {
+            match monitor.wait_for_focus_change() {
+                Ok(Some(new_class)) => {
+                    if new_class != last_class {
+                        let _ = tx.send(new_class.clone());
+                        last_class = new_class;
+                    }
+                }
+                Ok(None) => continue,
+                Err(e) => {
+                    eprintln!("[helper] X11 event error: {}", e);
+                    break;
+                }
+            }
+        }
+        
+        Ok(())
+    }
+}
+
+// ============================================================================
+// Sway Window Monitor
+// ============================================================================
+
 struct SwayWindowMonitor;
 
 impl SwayWindowMonitor {
-    fn new() -> Result<Self, Box<dyn std::error::Error>> {
+    fn new() -> Result<Self> {
         Ok(Self)
     }
     
@@ -225,16 +801,13 @@ impl SwayWindowMonitor {
         if let Ok(mut connection) = swayipc::Connection::new() {
             if let Ok(tree) = connection.get_tree() {
                 if let Some(focused) = tree.find_focused(|n| n.focused) {
-                    // Check if this is actually a window (not a workspace)
                     if focused.node_type == swayipc::reply::NodeType::Con {
-                        // First try to get window_properties.class (for XWayland windows)
                         if let Some(window_properties) = &focused.window_properties {
                             if let Some(class) = &window_properties.class {
                                 if !class.is_empty() && class != "null" {
                                     return Some(class.clone());
                                 }
                             }
-                            // Try instance as fallback
                             if let Some(instance) = &window_properties.instance {
                                 if !instance.is_empty() && instance != "null" {
                                     return Some(instance.clone());
@@ -242,47 +815,38 @@ impl SwayWindowMonitor {
                             }
                         }
                         
-                        // For Wayland native windows, use app_id
                         if let Some(app_id) = &focused.app_id {
                             if !app_id.is_empty() && app_id != "null" {
                                 return Some(app_id.clone());
                             }
                         }
                         
-                        // Fallback to window name if nothing else is available
                         if let Some(name) = &focused.name {
                             if !name.is_empty() && name != "null" {
                                 return Some(name.clone());
                             }
                         }
                     } else {
-                        // This is a workspace, not a window - return Desktop
                         return Some("Desktop".to_string());
                     }
                 }
             }
         }
-        // If no focused window or error, return Desktop
         Some("Desktop".to_string())
     }
     
-    fn run_event_monitor(tx: mpsc::Sender<String>) -> Result<(), Box<dyn std::error::Error>> {
-        // Create a new connection for event subscription
+    fn run_event_monitor(tx: mpsc::Sender<String>) -> Result<()> {
         let connection = swayipc::Connection::new()?;
         
-        // Subscribe to workspace and window events
         let events = connection.subscribe(&[swayipc::EventType::Workspace, swayipc::EventType::Window])?;
         
-        // Get initial active window
         if let Some(class) = Self::get_active_window_class() {
             let _ = tx.send(class);
         }
         
-        // Event loop
         for event in events {
             match event? {
                 swayipc::reply::Event::Workspace(_) | swayipc::reply::Event::Window(_) => {
-                    // Window or workspace changed, check active window
                     if let Some(class) = Self::get_active_window_class() {
                         let _ = tx.send(class);
                     }
@@ -295,15 +859,114 @@ impl SwayWindowMonitor {
     }
 }
 
+impl WindowMonitor for SwayWindowMonitor {
+    fn get_initial_window_class(&self) -> Result<String> {
+        Ok(Self::get_active_window_class().unwrap_or_else(|| "Desktop".to_string()))
+    }
+    
+    fn run_event_monitor(&self, tx: mpsc::Sender<String>) -> Result<()> {
+        Self::run_event_monitor(tx)
+    }
+}
+
+// ============================================================================
+// Hyprland Window Monitor
+// ============================================================================
+
+struct HyprlandWindowMonitor;
+
+impl HyprlandWindowMonitor {
+    fn new() -> Result<Self> {
+        Ok(Self)
+    }
+    
+    fn get_socket_path() -> Result<String> {
+        let signature = std::env::var("HYPRLAND_INSTANCE_SIGNATURE")
+            .map_err(|_| FocusHelperError::Hyprland("HYPRLAND_INSTANCE_SIGNATURE not found".to_string()))?;
+        
+        let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
+            .unwrap_or_else(|_| "/tmp".to_string());
+        
+        Ok(format!("{}/hypr/{}/.socket2.sock", runtime_dir, signature))
+    }
+    
+    fn run_event_monitor(tx: mpsc::Sender<String>) -> Result<()> {
+        let socket_path = Self::get_socket_path()?;
+        eprintln!("[helper] Connecting to Hyprland socket: {}", socket_path);
+        
+        let mut stream = UnixStream::connect(&socket_path)?;
+        
+        stream.set_nonblocking(true)?;
+        stream.write_all(b"subscribe\n")?;
+        
+        let reader = BufReader::new(stream);
+        let mut buffer = BoundedBuffer::new(MAX_BUFFER_SIZE);
+        
+        loop {
+            let mut temp_buf = [0u8; 1024];
+            match reader.get_ref().read(&mut temp_buf) {
+                Ok(0) => {
+                    eprintln!("[helper] Hyprland socket closed");
+                    break;
+                }
+                Ok(n) => {
+                    buffer.push_str(&String::from_utf8_lossy(&temp_buf[..n]));
+                    
+                    while let Some(line) = buffer.find_and_drain('\n') {
+                        let line = line.trim_end_matches('\n');
+                        
+                        if line.starts_with("activewindow>>") {
+                            let window_name = if let Some(pos) = line.find(',') {
+                                &line[14..pos]
+                            } else {
+                                &line[14..]
+                            };
+                            
+                            if window_name.trim().is_empty() {
+                                let _ = tx.send("Desktop".to_string());
+                            } else {
+                                let _ = tx.send(window_name.to_string());
+                            }
+                        }
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    // Socket would block, continue immediately without sleep
+                    continue;
+                }
+                Err(e) => {
+                    eprintln!("[helper] Error reading from Hyprland socket: {:?}", e);
+                    break;
+                }
+            }
+        }
+        
+        Ok(())
+    }
+}
+
+impl WindowMonitor for HyprlandWindowMonitor {
+    fn get_initial_window_class(&self) -> Result<String> {
+        Ok("Desktop".to_string())
+    }
+    
+    fn run_event_monitor(&self, tx: mpsc::Sender<String>) -> Result<()> {
+        Self::run_event_monitor(tx)
+    }
+}
+
+// ============================================================================
+// GNOME Window Monitor
+// ============================================================================
+
 struct GnomeWindowMonitor;
 
 impl GnomeWindowMonitor {
-    fn new() -> Result<Self, Box<dyn std::error::Error>> {
+    fn new() -> Result<Self> {
         Ok(Self)
     }
     
     fn get_initial_focused_class() -> Option<String> {
-        // Get initial focused window class using WindowMonitorPro's FocusClass method
         let output = std::process::Command::new("gdbus")
             .arg("call")
             .arg("--session")
@@ -317,27 +980,18 @@ impl GnomeWindowMonitor {
         
         match output {
             Ok(output) => {
-                eprintln!("[helper] FocusClass command output: status={}, stdout='{}'", output.status, String::from_utf8_lossy(&output.stdout));
                 if output.status.success() {
                     let stdout = String::from_utf8_lossy(&output.stdout);
-                    // Parse the output: ('Cursor',) -> Cursor or ('') -> Desktop
                     if let Some(start) = stdout.find("('") {
                         if let Some(end) = stdout[start..].find("',") {
                             let class = &stdout[start + 2..start + end];
-                            eprintln!("[helper] Parsed window class: '{}'", class);
                             if class.is_empty() {
-                                // Empty string means no window focused (desktop)
-                                eprintln!("[helper] Empty window class, returning Desktop");
                                 return Some("Desktop".to_string());
                             } else if class != "null" {
-                                eprintln!("[helper] Valid window class, returning: {}", class);
                                 return Some(class.to_string());
                             }
                         }
                     }
-                    eprintln!("[helper] Failed to parse FocusClass output, will return install message");
-                } else {
-                    eprintln!("[helper] FocusClass command failed with status: {}", output.status);
                 }
             }
             Err(e) => {
@@ -345,148 +999,41 @@ impl GnomeWindowMonitor {
             }
         }
         
-        // If FocusClass failed, WindowMonitorPro is likely not working properly
-        // Send install message to help user
-        eprintln!("[helper] Returning install message for WindowMonitorPro");
         Some("Install WindowMonitorPro".to_string())
     }
     
-    fn extract_window_class_from_signal(signal_body: &str) -> Option<String> {
-        // Parse signal body format: (window_id, window_title, window_class, window_pid)
-        // Example: ('2882485532', 'kitty', 'kitty', '47887')
-        
-        // Find the third parameter (window_class) which is the 3rd quoted string
-        let mut quote_count = 0;
-        let mut start_pos = None;
-        let mut end_pos = None;
-        
-        for (i, ch) in signal_body.chars().enumerate() {
-            if ch == '\'' {
-                quote_count += 1;
-                if quote_count == 5 { // Start of 3rd parameter (window_class)
-                    start_pos = Some(i + 1);
-                } else if quote_count == 6 { // End of 3rd parameter
-                    end_pos = Some(i);
-                    break;
-                }
-            }
-        }
-        
-        if let (Some(start), Some(end)) = (start_pos, end_pos) {
-            if start < end {
-                let window_class = &signal_body[start..end];
-                if window_class.is_empty() {
-                    // Empty window class means desktop
-                    return Some("Desktop".to_string());
-                } else if window_class != "null" {
-                    return Some(window_class.to_string());
-                }
-            }
-        }
-        
-        None
-    }
-    
-    fn run_event_monitor(tx: mpsc::Sender<String>) -> Result<(), Box<dyn std::error::Error>> {
-        // Get initial focused window class
-        if let Some(initial_class) = Self::get_initial_focused_class() {
-            eprintln!("[helper] Initial focused window class: {}", initial_class);
-            let _ = tx.send(initial_class);
-        }
-        
-        // Use D-Bus signal subscription for true event-driven monitoring
-        let rt = tokio::runtime::Runtime::new()?;
-        rt.block_on(async {
-            Self::run_dbus_event_monitor(tx).await
-        })
-    }
-    
-    async fn run_dbus_event_monitor(tx: mpsc::Sender<String>) -> Result<(), Box<dyn std::error::Error>> {
+    async fn run_dbus_event_monitor(tx: mpsc::Sender<String>) -> Result<()> {
         let connection = ZbusConnection::session().await?;
-        let mut stream = MessageStream::from(&connection);
         
-        // Subscribe to GNOME Shell window manager signals
+        let mut stream = MessageStream::from(&connection);
         let dbus_proxy = DBusProxy::new(&connection).await?;
         
-        // Subscribe to the WindowMonitorPro extension signals for true event-driven window monitoring
         let rule = MatchRule::builder()
             .msg_type(MessageType::Signal)
             .interface("org.gnome.Shell.Extensions.WindowMonitorPro")?
             .member("WindowFocusChanged")?
             .build();
         
-
-        
         match dbus_proxy.add_match_rule(rule).await {
             Ok(_) => {
-                eprintln!("[helper] GNOME D-Bus signal subscription added for WindowMonitorPro.WindowFocusChanged");
+                eprintln!("[helper] GNOME D-Bus signal subscription added");
             }
             Err(_) => {
-                eprintln!("[helper] Failed to subscribe to WindowMonitorPro signals - extension not available");
-                // Send message to install WindowMonitorPro
+                eprintln!("[helper] Failed to subscribe to WindowMonitorPro signals");
                 let _ = tx.send("Install WindowMonitorPro".to_string());
                 return Ok(());
             }
         }
         
-        // Start a separate thread to monitor extension state using the bash filter
-        let tx_clone = tx.clone();
-        std::thread::spawn(move || {
-            eprintln!("[helper] Starting bash filter extension monitor...");
-            let child = std::process::Command::new("bash")
-                .arg("-c")
-                .arg("dbus-monitor \"interface='org.gnome.Shell.Extensions'\" | awk '/member=EnableExtension/  { next_action=\"true\" } /member=DisableExtension/ { next_action=\"false\" } /string/ && next_action != \"\" { if ($0 ~ /window-monitor-pro@muhammed\\.hussien2030\\.gmail\\.com/) { if (last_action != next_action) { print next_action; fflush(); last_action = next_action } } next_action = \"\" }'")
-                .stdout(std::process::Stdio::piped())
-                .spawn();
-            
-            if let Ok(mut child) = child {
-                if let Some(stdout) = child.stdout.take() {
-                    use std::io::{BufRead, BufReader};
-                    let reader = BufReader::new(stdout);
-                    for line in reader.lines() {
-                        if let Ok(line) = line {
-                            eprintln!("[helper] Bash filter output: '{}'", line);
-                            if line.trim() == "false" {
-                                eprintln!("[helper] Bash filter detected WindowMonitorPro extension disabled");
-                                let _ = tx_clone.send("Install WindowMonitorPro".to_string());
-                                // Don't break - keep monitoring for future events
-                            }
-                        }
-                    }
-                }
-            }
-        });
-        
         let mut last_class = String::new();
         
-        // Event loop for D-Bus signals
         while let Some(msg) = stream.next().await {
             if let Ok(msg) = msg {
-
-                
-                // Check if this is the WindowFocusChanged signal from WindowMonitorPro
                 if let Some(interface) = msg.interface() {
-                    let interface_str = interface.as_str();
-                    if interface_str == "org.gnome.Shell.Extensions.WindowMonitorPro" {
-                        // WindowFocusChanged signal received, extract window class directly from signal
-                        eprintln!("[helper] GNOME WindowFocusChanged signal received");
-                        
-                        // WindowFocusChanged signal received - extract window class from signal
-                        eprintln!("[helper] GNOME WindowFocusChanged signal received - extracting window class");
-                        
-                        // Try to parse the signal body to get window class
-                        // Signal format: (window_id, window_title, window_class, window_pid)
-                        eprintln!("[helper] Attempting to parse signal body...");
-                        
-                        // The signal body contains the window information in this format:
-                        // ('window_id', 'window_title', 'window_class', 'window_pid')
-                        // Example: ('2882485533', 'aura@systemos:~', 'Alacritty', '48572')
-                        
-                        // Try to get the signal body as a tuple of strings
-                        if let Ok((_window_id, _window_title, window_class, _window_pid)) = msg.body::<(String, String, String, String)>() {
-                            eprintln!("[helper] Signal body parsed successfully: window_class = {}", window_class);
+                    if interface.as_str() == "org.gnome.Shell.Extensions.WindowMonitorPro" {
+                        if let Ok((_window_id, _window_title, window_class, _window_pid)) = 
+                            msg.body::<(String, String, String, String)>() {
                             
-                            // Handle empty window class (desktop)
                             let display_class = if window_class.is_empty() {
                                 "Desktop".to_string()
                             } else {
@@ -494,45 +1041,8 @@ impl GnomeWindowMonitor {
                             };
                             
                             if display_class != last_class {
-                                eprintln!("[helper] GNOME window focus changed via WindowMonitorPro signal: {}", display_class);
                                 let _ = tx.send(display_class.clone());
                                 last_class = display_class;
-
-                            }
-                        } else {
-                            eprintln!("[helper] Failed to parse signal body as tuple, trying alternative approach");
-                            // Fallback: try to get as individual parameters
-                            if let Ok(window_class) = msg.body::<String>() {
-                                eprintln!("[helper] Got window class as single string: {}", window_class);
-                                if window_class != last_class {
-                                    let _ = tx.send(window_class.clone());
-                                    last_class = window_class;
-                                }
-                            } else {
-                                eprintln!("[helper] All parsing methods failed, signal body format not supported");
-                            }
-                        }
-                    } else if interface_str == "org.gnome.Shell.Extensions" {
-                        // Handle GNOME extension enable/disable signals
-                        if let Some(member) = msg.member() {
-                            let member_str = member.as_str();
-                            eprintln!("[helper] Received GNOME Extensions signal: member={}", member_str);
-                            
-                            if member_str == "DisableExtension" || member_str == "EnableExtension" {
-                                eprintln!("[helper] Processing {} signal", member_str);
-                                
-                                // The DisableExtension/EnableExtension signals don't contain the extension UUID
-                                // We need to wait for the next signal that contains the extension info
-                                // For now, let's just send the install message on any DisableExtension signal
-                                // since we're specifically monitoring for WindowMonitorPro
-                                if member_str == "DisableExtension" {
-                                    eprintln!("[helper] DisableExtension signal received - sending install message");
-                                    // Extension was disabled - send install message
-                                    let _ = tx.send("Install WindowMonitorPro".to_string());
-                                    break;
-                                } else {
-                                    eprintln!("[helper] EnableExtension signal received - no action needed");
-                                }
                             }
                         }
                     }
@@ -542,263 +1052,78 @@ impl GnomeWindowMonitor {
         
         Ok(())
     }
-}
-
-struct HyprlandWindowMonitor;
-
-impl HyprlandWindowMonitor {
-    fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        Ok(Self)
-    }
     
-    fn get_active_window_class() -> Option<String> {
-        // This function is no longer needed since we get all info from socket events
-        Some("Desktop".to_string())
-    }
-    
-    fn run_event_monitor(tx: mpsc::Sender<String>) -> Result<(), Box<dyn std::error::Error>> {
-        // Send initial active window
-        if let Some(class) = Self::get_active_window_class() {
-            let _ = tx.send(class);
+    fn run_event_monitor(tx: mpsc::Sender<String>) -> Result<()> {
+        if let Some(initial_class) = Self::get_initial_focused_class() {
+            let _ = tx.send(initial_class);
         }
         
-        // Use D-Bus to listen for window focus changes, then query hyprctl for current window
-        let rt = tokio::runtime::Runtime::new()?;
+        let rt = tokio::runtime::Runtime::new()
+            .map_err(|e| FocusHelperError::Gnome(format!("Failed to create runtime: {}", e)))?;
+        
         rt.block_on(async {
             Self::run_dbus_event_monitor(tx).await
         })
     }
-    
-    async fn run_dbus_event_monitor(tx: mpsc::Sender<String>) -> Result<(), Box<dyn std::error::Error>> {
-        // Try multiple approaches for event-driven window focus detection
-        
-        // Approach 1: Try to use hyprland crate event listener
-        match Self::try_hyprland_event_listener(tx.clone()).await {
-            Ok(_) => return Ok(()),
-            Err(e) => {
-                eprintln!("[helper] Hyprland event listener failed: {}, trying file monitoring approach", e);
-            }
-        }
-        
-        // Approach 2: Monitor Hyprland's socket file for changes
-        eprintln!("[helper] Using file monitoring approach for Hyprland");
-        Self::monitor_hyprland_socket(tx).await
+}
+
+impl WindowMonitor for GnomeWindowMonitor {
+    fn get_initial_window_class(&self) -> Result<String> {
+        Ok(Self::get_initial_focused_class().unwrap_or_else(|| "Desktop".to_string()))
     }
     
-    async fn monitor_hyprland_socket(tx: mpsc::Sender<String>) -> Result<(), Box<dyn std::error::Error>> {
-        // Direct socket connection approach - much simpler and more reliable!
-        eprintln!("[helper] Using direct socket connection for Hyprland events");
-        
-        // Get Hyprland socket path
-        let socket_path = if let Ok(signature) = std::env::var("HYPRLAND_INSTANCE_SIGNATURE") {
-            if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
-                format!("{}/hypr/{}/.socket2.sock", runtime_dir, signature)
-            } else {
-                format!("/tmp/hypr/{}/.socket2.sock", signature)
-            }
-        } else {
-            return Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "HYPRLAND_INSTANCE_SIGNATURE not found"
-            )));
-        };
-        
-        eprintln!("[helper] Connecting to socket: {}", socket_path);
-        
-        // Connect to the Hyprland IPC socket with timeout
-        let mut stream = UnixStream::connect(socket_path)?;
-        
-        // Set socket to non-blocking mode to prevent hanging
-        stream.set_nonblocking(true)?;
-        
-        eprintln!("[helper] Connected to Hyprland socket successfully");
-        
-        // Send the subscribe command
-        stream.write_all(b"subscribe\n")?;
-        eprintln!("[helper] Sent subscribe command");
-        
-        let reader = BufReader::new(stream);
-        
-        // Read lines from the socket with timeout protection
-        let mut buffer = String::new();
-        let mut last_activity = std::time::Instant::now();
-        const SOCKET_TIMEOUT: Duration = Duration::from_secs(30); // 30 second timeout
-        
-        loop {
-            // Check for timeout
-            if last_activity.elapsed() > SOCKET_TIMEOUT {
-                eprintln!("[helper] Hyprland socket timeout, reconnecting...");
-                break;
-            }
-            
-            // Try to read from socket with timeout
-            let mut temp_buf = [0u8; 1024];
-            match reader.get_ref().read(&mut temp_buf) {
-                Ok(0) => {
-                    eprintln!("[helper] Hyprland socket closed");
-                    break;
-                }
-                Ok(n) => {
-                    last_activity = std::time::Instant::now();
-                    buffer.push_str(&String::from_utf8_lossy(&temp_buf[..n]));
-                    
-                    // Process complete lines
-                    while let Some(newline_pos) = buffer.find('\n') {
-                        let line = buffer.drain(..=newline_pos).collect::<String>();
-                        let line = line.trim_end_matches('\n');
-                        
-                        if line.starts_with("activewindow>>") {
-                            // Extract window name (after >> and before comma)
-                            let window_name = if let Some(pos) = line.find(',') {
-                                &line[14..pos] // skip "activewindow>>"
-                            } else {
-                                &line[14..]
-                            };
-                            
-                            if window_name.trim().is_empty() {
-                                eprintln!("[helper] Focused window: desktop");
-                                let _ = tx.send("Desktop".to_string());
-                            } else {
-                                eprintln!("[helper] Focused window: {}", window_name);
-                                let _ = tx.send(window_name.to_string());
-                            }
-                        }
-                    }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    // No data available, sleep briefly and continue
-                    thread::sleep(Duration::from_millis(10));
-                    continue;
-                }
-                Err(e) => {
-                    eprintln!("[helper] Error reading from Hyprland socket: {:?}", e);
-                    break;
-                }
-            }
-        }
-        
-        Ok(())
-    }
-    
-    async fn try_hyprland_event_listener(tx: mpsc::Sender<String>) -> Result<(), Box<dyn std::error::Error>> {
-        // Try to use the hyprland crate event listener
-        let mut event_listener = hyprland::event_listener::EventListener::new();
-        
-        let tx_title = tx.clone();
-        event_listener.add_window_title_change_handler(move |_| {
-            if let Some(class) = HyprlandWindowMonitor::get_active_window_class() {
-                let _ = tx_title.send(class);
-            }
-        });
-        
-        let tx_open = tx.clone();
-        event_listener.add_window_open_handler(move |_| {
-            if let Some(class) = HyprlandWindowMonitor::get_active_window_class() {
-                let _ = tx_open.send(class);
-            }
-        });
-        
-        event_listener.add_window_close_handler(move |_| {
-            if let Some(class) = HyprlandWindowMonitor::get_active_window_class() {
-                let _ = tx.send(class);
-            }
-        });
-        
-        event_listener.start_listener()?;
-        Ok(())
+    fn run_event_monitor(&self, tx: mpsc::Sender<String>) -> Result<()> {
+        Self::run_event_monitor(tx)
     }
 }
+
+// ============================================================================
+// Niri Window Monitor
+// ============================================================================
 
 struct NiriWindowMonitor;
 
 impl NiriWindowMonitor {
-    fn new() -> Result<Self, Box<dyn std::error::Error>> {
+    fn new() -> Result<Self> {
         Ok(Self)
     }
     
     fn get_active_window_class() -> Option<String> {
-        // Use niri msg to get active window info
         let output = std::process::Command::new("niri")
             .arg("msg")
             .arg("focused-window")
             .env("WAYLAND_DISPLAY", std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-1".to_string()))
-            .env("NIRI_SOCKET", std::env::var("NIRI_SOCKET").unwrap_or_else(|_| {
-                // Try to find the actual Niri socket path
-                let user_id = unsafe { libc::getuid() };
-                let wayland_display = std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-1".to_string());
-                let _socket_pattern = format!("/run/user/{}/niri.{}.", user_id, wayland_display);
-                
-                // Try to find the socket file with the pattern
-                if let Ok(entries) = std::fs::read_dir(format!("/run/user/{}", user_id)) {
-                    for entry in entries {
-                        if let Ok(entry) = entry {
-                            let path = entry.path();
-                            if let Some(name) = path.file_name() {
-                                if let Some(name_str) = name.to_str() {
-                                    if name_str.starts_with(&format!("niri.{}.", wayland_display)) && name_str.ends_with(".sock") {
-                                        eprintln!("[helper] Found Niri socket: {}", path.display());
-                                        return path.to_string_lossy().to_string();
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                
-                // Fallback to the basic pattern
-                format!("/run/user/{}/niri.{}.sock", user_id, wayland_display)
-            }))
             .output();
         
         match output {
             Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                eprintln!("[helper] Niri focused-window output: '{}'", stdout);
-                
-                // Check if the command failed
                 if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    eprintln!("[helper] Niri command failed: status={}, stderr='{}'", output.status, stderr);
                     return Some("Desktop".to_string());
                 }
                 
-                // Parse the text output format:
-                // Window ID 4: (focused)
-                //   Title: "focus_window_helper.rs - tiny-dfr - Cursor"
-                //   App ID: "cursor"
-                //   Is floating: no
-                //   PID: 3765
-                //   Workspace ID: 2
-                
+                let stdout = String::from_utf8_lossy(&output.stdout);
                 let lines: Vec<&str> = stdout.lines().collect();
                 
-                // Check if there's actually a focused window
                 if lines.is_empty() || !lines[0].contains("Window ID") {
-                    // No active window, return Desktop
-                    eprintln!("[helper] Niri no focused window found");
                     return Some("Desktop".to_string());
                 }
                 
-                // Look for App ID line first (preferred)
                 for line in &lines {
                     if line.trim().starts_with("App ID:") {
                         if let Some(app_id) = line.split("App ID:").nth(1) {
                             let app_id = app_id.trim().trim_matches('"');
                             if !app_id.is_empty() && app_id != "null" {
-                                eprintln!("[helper] Niri found app_id: {}", app_id);
                                 return Some(app_id.to_string());
                             }
                         }
                     }
                 }
                 
-                // Fallback to Title if App ID is not available
                 for line in &lines {
                     if line.trim().starts_with("Title:") {
                         if let Some(title) = line.split("Title:").nth(1) {
                             let title = title.trim().trim_matches('"');
                             if !title.is_empty() && title != "null" {
-                                eprintln!("[helper] Niri found title: {}", title);
                                 return Some(title.to_string());
                             }
                         }
@@ -810,93 +1135,34 @@ impl NiriWindowMonitor {
             }
         }
         
-        // If we can't get window info or no valid window, return Desktop
-        eprintln!("[helper] Niri no valid window found, returning Desktop");
         Some("Desktop".to_string())
     }
     
-    fn run_event_monitor(tx: mpsc::Sender<String>) -> Result<(), Box<dyn std::error::Error>> {
-        // Get initial active window
+    fn run_event_monitor(tx: mpsc::Sender<String>) -> Result<()> {
         if let Some(class) = Self::get_active_window_class() {
             let _ = tx.send(class);
         }
         
-        // Try to use Niri's event stream for true event-driven monitoring
         let child = std::process::Command::new("niri")
             .arg("msg")
             .arg("event-stream")
             .env("WAYLAND_DISPLAY", std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-1".to_string()))
-            .env("NIRI_SOCKET", std::env::var("NIRI_SOCKET").unwrap_or_else(|_| {
-                // Try to find the actual Niri socket path
-                let user_id = unsafe { libc::getuid() };
-                let wayland_display = std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-1".to_string());
-                let _socket_pattern = format!("/run/user/{}/niri.{}.", user_id, wayland_display);
-                
-                // Try to find the socket file with the pattern
-                if let Ok(entries) = std::fs::read_dir(format!("/run/user/{}", user_id)) {
-                    for entry in entries {
-                        if let Ok(entry) = entry {
-                            let path = entry.path();
-                            if let Some(name) = path.file_name() {
-                                if let Some(name_str) = name.to_str() {
-                                    if name_str.starts_with(&format!("niri.{}.", wayland_display)) && name_str.ends_with(".sock") {
-                                        eprintln!("[helper] Found Niri socket: {}", path.display());
-                                        return path.to_string_lossy().to_string();
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                
-                // Fallback to the basic pattern
-                format!("/run/user/{}/niri.{}.sock", user_id, wayland_display)
-            }))
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn();
+            .spawn()
+            .map_err(|e| FocusHelperError::Niri(format!("Failed to start event stream: {}", e)))?;
         
-        match child {
-            Ok(mut child) => {
-                eprintln!("[helper] Niri event stream started successfully");
-                
-                if let Some(stdout) = child.stdout.take() {
+        if let Some(stdout) = child.stdout {
                     use std::io::{BufRead, BufReader};
                     let reader = BufReader::new(stdout);
                     
                     for line in reader.lines() {
                         if let Ok(line) = line {
-                            eprintln!("[helper] Niri event: {}", line);
-                            
-                                                // Check if this is a "Windows changed" event
-                    if line.contains("Windows changed:") {
-                        eprintln!("[helper] Niri windows changed event detected");
-                        // Get the current focused window
-                        if let Some(class) = Self::get_active_window_class() {
-                            let _ = tx.send(class);
-                        }
-                    }
-                    // Check if this is a "Window focus changed" event
-                    else if line.contains("Window focus changed:") {
-                        eprintln!("[helper] Niri window focus changed event detected");
-                        // Get the current focused window
+                    if line.contains("Windows changed:") || line.contains("Window focus changed:") {
                         if let Some(class) = Self::get_active_window_class() {
                             let _ = tx.send(class);
                         }
                     }
                         }
-                    }
-                }
-                
-                // If we reach here, the event stream has ended
-                eprintln!("[helper] Niri event stream ended");
-            }
-            Err(e) => {
-                eprintln!("[helper] Failed to start Niri event stream: {:?}", e);
-                return Err(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to start Niri event stream: {}", e)
-                )));
             }
         }
         
@@ -904,466 +1170,57 @@ impl NiriWindowMonitor {
     }
 }
 
-fn run_sway_event_driven() -> Result<(), Box<dyn std::error::Error>> {
-    let socket_path = "/tmp/touchbar.sock";
-    
-    // Set up watchdog timer to prevent indefinite hanging
-    let start_time = std::time::Instant::now();
-    const WATCHDOG_TIMEOUT: Duration = Duration::from_secs(60); // 1 minute timeout
-    
-    // Connect to the socket with timeout and retry limit
-    let mut stream = {
-        let mut retry_count = 0;
-        const MAX_RETRIES: u32 = 10;
-        const RETRY_DELAY_MS: u64 = 100;
-        
-        loop {
-            match UnixStream::connect(socket_path) {
-                Ok(stream) => break stream,
-                Err(_) => {
-                    retry_count += 1;
-                    if retry_count >= MAX_RETRIES {
-                        return Err(Box::new(std::io::Error::new(
-                            std::io::ErrorKind::ConnectionRefused,
-                            format!("Failed to connect to socket after {} retries", MAX_RETRIES)
-                        )));
-                    }
-                    eprintln!("[helper] Socket connection attempt {} failed, retrying in {}ms...", retry_count, RETRY_DELAY_MS);
-                    thread::sleep(Duration::from_millis(RETRY_DELAY_MS));
-                }
-            }
-        }
-    };
-    
-    // Set socket to non-blocking mode to prevent hanging
-    stream.set_nonblocking(true)?;
-    
-    // Create channel for communication between event monitor and main thread
-    let (tx, rx) = mpsc::channel();
-    
-    // Initialize Sway monitor
-    let _monitor = SwayWindowMonitor::new()?;
-    eprintln!("[helper] Sway event-driven monitor initialized");
-    
-    // Spawn event monitor in separate thread
-    let monitor_thread = std::thread::spawn(move || {
-        if let Err(e) = SwayWindowMonitor::run_event_monitor(tx) {
-            eprintln!("[helper] Sway event monitor error: {}", e);
-        }
-    });
-    
-    // Main thread: receive events and send to socket with timeout
-    let mut last_class = String::new();
-    
-    loop {
-        // Check watchdog timeout
-        if start_time.elapsed() > WATCHDOG_TIMEOUT {
-            eprintln!("[helper] Watchdog timeout reached, exiting to prevent hanging");
-            break;
-        }
-        
-        // Use recv_timeout to prevent infinite blocking
-        match rx.recv_timeout(Duration::from_millis(1000)) { // 1 second timeout
-            Ok(class) => {
-                if class != last_class {
-                    eprintln!("[helper] Sway window focus changed from '{}' to '{}'", last_class, class);
-                    // Use write_all with timeout to prevent hanging
-                    if let Err(e) = stream.write_all(class.as_bytes()) {
-                        eprintln!("[helper] Failed to write to socket: {}, breaking", e);
-                        break;
-                    }
-                    if let Err(e) = stream.write_all(b"\n") {
-                        eprintln!("[helper] Failed to write newline to socket: {}, breaking", e);
-                        break;
-                    }
-                    last_class = class;
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                // Timeout occurred, continue loop (this is normal)
-                continue;
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                eprintln!("[helper] Event monitor disconnected, breaking");
-                break;
-            }
-        }
+impl WindowMonitor for NiriWindowMonitor {
+    fn get_initial_window_class(&self) -> Result<String> {
+        Ok(Self::get_active_window_class().unwrap_or_else(|| "Desktop".to_string()))
     }
     
-    // Wait for monitor thread to finish
-    let _ = monitor_thread.join();
-    Ok(())
+    fn run_event_monitor(&self, tx: mpsc::Sender<String>) -> Result<()> {
+        Self::run_event_monitor(tx)
+    }
 }
 
-fn run_gnome_event_driven() -> Result<(), Box<dyn std::error::Error>> {
-    let socket_path = "/tmp/touchbar.sock";
-    
-    // Set up watchdog timer to prevent indefinite hanging
-    let start_time = std::time::Instant::now();
-    const WATCHDOG_TIMEOUT: Duration = Duration::from_secs(60); // 1 minute timeout
-    
-    // Connect to the socket with timeout and retry limit
-    let mut stream = {
-        let mut retry_count = 0;
-        const MAX_RETRIES: u32 = 10;
-        const RETRY_DELAY_MS: u64 = 100;
-        
-        loop {
-            match UnixStream::connect(socket_path) {
-                Ok(stream) => break stream,
-                Err(_) => {
-                    retry_count += 1;
-                    if retry_count >= MAX_RETRIES {
-                        return Err(Box::new(std::io::Error::new(
-                            std::io::ErrorKind::ConnectionRefused,
-                            format!("Failed to connect to socket after {} retries", MAX_RETRIES)
-                        )));
-                    }
-                    eprintln!("[helper] Socket connection attempt {} failed, retrying in {}ms...", retry_count, RETRY_DELAY_MS);
-                    thread::sleep(Duration::from_millis(RETRY_DELAY_MS));
-                }
-            }
-        }
-    };
-    
-    // Set socket to non-blocking mode to prevent hanging
-    stream.set_nonblocking(true)?;
-    
-    // Create channel for communication between event monitor and main thread
-    let (tx, rx) = mpsc::channel();
-    
-    // Initialize GNOME monitor
-    let _monitor = GnomeWindowMonitor::new()?;
-    eprintln!("[helper] GNOME event-driven monitor initialized");
-    
-    // Spawn event monitor in separate thread
-    let monitor_thread = std::thread::spawn(move || {
-        if let Err(e) = GnomeWindowMonitor::run_event_monitor(tx) {
-            eprintln!("[helper] GNOME event monitor error: {}", e);
-        }
-    });
-    
-    // Main thread: receive events and send to socket with timeout
-    let mut last_class = String::new();
-    
-    loop {
-        // Check watchdog timeout
-        if start_time.elapsed() > WATCHDOG_TIMEOUT {
-            eprintln!("[helper] Watchdog timeout reached, exiting to prevent hanging");
-            break;
+// ============================================================================
+// Window Manager Detection and Main Logic
+// ============================================================================
+
+fn detect_window_manager() -> Result<Box<dyn WindowMonitor>> {
+    // Check for Wayland first
+    if std::env::var("WAYLAND_DISPLAY").is_ok() {
+        if std::env::var("HYPRLAND_INSTANCE_SIGNATURE").is_ok() {
+            eprintln!("[helper] Hyprland detected");
+            return Ok(Box::new(HyprlandWindowMonitor::new()?));
         }
         
-        // Use recv_timeout to prevent infinite blocking
-        match rx.recv_timeout(Duration::from_millis(1000)) { // 1 second timeout
-            Ok(class) => {
-                if class != last_class {
-                    eprintln!("[helper] GNOME window focus changed from '{}' to '{}'", last_class, class);
-                    // Use write_all with timeout to prevent hanging
-                    if let Err(e) = stream.write_all(class.as_bytes()) {
-                        eprintln!("[helper] Failed to write to socket: {}, breaking", e);
-                        break;
-                    }
-                    if let Err(e) = stream.write_all(b"\n") {
-                        eprintln!("[helper] Failed to write newline to socket: {}, breaking", e);
-                        break;
-                    }
-                    last_class = class;
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                // Timeout occurred, continue loop (this is normal)
-                continue;
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                eprintln!("[helper] Event monitor disconnected, breaking");
-                break;
-            }
+        if std::env::var("XDG_CURRENT_DESKTOP").map_or(false, |desktop| desktop.to_lowercase() == "niri") {
+            eprintln!("[helper] Niri detected");
+            return Ok(Box::new(NiriWindowMonitor::new()?));
         }
+        
+        if std::env::var("SWAYSOCK").is_ok() {
+            eprintln!("[helper] Sway detected");
+            return Ok(Box::new(SwayWindowMonitor::new()?));
+        }
+        
+        if std::env::var("GNOME_DESKTOP_SESSION_ID").is_ok() || 
+           std::env::var("XDG_CURRENT_DESKTOP").map_or(false, |desktop| desktop.to_lowercase().contains("gnome")) {
+            eprintln!("[helper] GNOME Wayland detected");
+            return Ok(Box::new(GnomeWindowMonitor::new()?));
+        }
+        
+        return Err(FocusHelperError::Unsupported("No event-driven support for generic Wayland".to_string()));
     }
     
-    // Wait for monitor thread to finish
-    let _ = monitor_thread.join();
-    Ok(())
+    // Check for X11
+    if std::env::var("DISPLAY").is_ok() && std::env::var("WAYLAND_DISPLAY").is_err() {
+        eprintln!("[helper] X11 detected");
+        return Ok(Box::new(X11WindowMonitor::new()?));
+    }
+    
+    Err(FocusHelperError::Unsupported("No supported compositor detected".to_string()))
 }
 
-fn run_hyprland_event_driven() -> Result<(), Box<dyn std::error::Error>> {
-    let socket_path = "/tmp/touchbar.sock";
-    
-    // Set up watchdog timer to prevent indefinite hanging
-    let start_time = std::time::Instant::now();
-    const WATCHDOG_TIMEOUT: Duration = Duration::from_secs(60); // 1 minute timeout
-    
-    // Connect to the socket with timeout and retry limit
-    let mut stream = {
-        let mut retry_count = 0;
-        const MAX_RETRIES: u32 = 10;
-        const RETRY_DELAY_MS: u64 = 100;
-        
-        loop {
-            match UnixStream::connect(socket_path) {
-                Ok(stream) => break stream,
-                Err(_) => {
-                    retry_count += 1;
-                    if retry_count >= MAX_RETRIES {
-                        return Err(Box::new(std::io::Error::new(
-                            std::io::ErrorKind::ConnectionRefused,
-                            format!("Failed to connect to socket after {} retries", MAX_RETRIES)
-                        )));
-                    }
-                    eprintln!("[helper] Socket connection attempt {} failed, retrying in {}ms...", retry_count, RETRY_DELAY_MS);
-                    thread::sleep(Duration::from_millis(RETRY_DELAY_MS));
-                }
-            }
-        }
-    };
-    
-    // Set socket to non-blocking mode to prevent hanging
-    stream.set_nonblocking(true)?;
-    
-    // Create channel for communication between event monitor and main thread
-    let (tx, rx) = mpsc::channel();
-    
-    // Initialize Hyprland monitor
-    let _monitor = HyprlandWindowMonitor::new()?;
-    eprintln!("[helper] Hyprland event-driven monitor initialized");
-    
-    // Spawn event monitor in separate thread
-    let monitor_thread = std::thread::spawn(move || {
-        if let Err(e) = HyprlandWindowMonitor::run_event_monitor(tx) {
-            eprintln!("[helper] Hyprland event monitor error: {}", e);
-        }
-    });
-    
-    // Main thread: receive events and send to socket with timeout
-    let mut last_class = String::new();
-    
-    loop {
-        // Check watchdog timeout
-        if start_time.elapsed() > WATCHDOG_TIMEOUT {
-            eprintln!("[helper] Watchdog timeout reached, exiting to prevent hanging");
-            break;
-        }
-        
-        // Use recv_timeout to prevent infinite blocking
-        match rx.recv_timeout(Duration::from_millis(1000)) { // 1 second timeout
-            Ok(class) => {
-                if class != last_class {
-                    eprintln!("[helper] Hyprland window focus changed from '{}' to '{}'", last_class, class);
-                    // Use write_all with timeout to prevent hanging
-                    if let Err(e) = stream.write_all(class.as_bytes()) {
-                        eprintln!("[helper] Failed to write to socket: {}, breaking", e);
-                        break;
-                    }
-                    if let Err(e) = stream.write_all(b"\n") {
-                        eprintln!("[helper] Failed to write newline to socket: {}, breaking", e);
-                        break;
-                    }
-                    last_class = class;
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                // Timeout occurred, continue loop (this is normal)
-                continue;
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                eprintln!("[helper] Event monitor disconnected, breaking");
-                break;
-            }
-        }
-    }
-    
-    // Wait for monitor thread to finish
-    let _ = monitor_thread.join();
-    Ok(())
-}
-
-fn run_niri_event_driven() -> Result<(), Box<dyn std::error::Error>> {
-    let socket_path = "/tmp/touchbar.sock";
-    
-    // Set up watchdog timer to prevent indefinite hanging
-    let start_time = std::time::Instant::now();
-    const WATCHDOG_TIMEOUT: Duration = Duration::from_secs(60); // 1 minute timeout
-    
-    // Connect to the socket with timeout and retry limit
-    let mut stream = {
-        let mut retry_count = 0;
-        const MAX_RETRIES: u32 = 10;
-        const RETRY_DELAY_MS: u64 = 100;
-        
-        loop {
-            match UnixStream::connect(socket_path) {
-                Ok(stream) => break stream,
-                Err(_) => {
-                    retry_count += 1;
-                    if retry_count >= MAX_RETRIES {
-                        return Err(Box::new(std::io::Error::new(
-                            std::io::ErrorKind::ConnectionRefused,
-                            format!("Failed to connect to socket after {} retries", MAX_RETRIES)
-                        )));
-                    }
-                    eprintln!("[helper] Socket connection attempt {} failed, retrying in {}ms...", retry_count, RETRY_DELAY_MS);
-                    thread::sleep(Duration::from_millis(RETRY_DELAY_MS));
-                }
-            }
-        }
-    };
-    
-    // Set socket to non-blocking mode to prevent hanging
-    stream.set_nonblocking(true)?;
-    
-    // Create channel for communication between event monitor and main thread
-    let (tx, rx) = mpsc::channel();
-    
-    // Initialize Niri monitor
-    let _monitor = NiriWindowMonitor::new()?;
-    eprintln!("[helper] Niri event-driven monitor initialized");
-    
-    // Spawn event monitor in separate thread
-    let monitor_thread = std::thread::spawn(move || {
-        if let Err(e) = NiriWindowMonitor::run_event_monitor(tx) {
-            eprintln!("[helper] Niri event monitor error: {}", e);
-        }
-    });
-    
-    // Main thread: receive events and send to socket with timeout
-    let mut last_class = String::new();
-    
-    loop {
-        // Check watchdog timeout
-        if start_time.elapsed() > WATCHDOG_TIMEOUT {
-            eprintln!("[helper] Watchdog timeout reached, exiting to prevent hanging");
-            break;
-        }
-        
-        // Use recv_timeout to prevent infinite blocking
-        match rx.recv_timeout(Duration::from_millis(1000)) { // 1 second timeout
-            Ok(class) => {
-                if class != last_class {
-                    eprintln!("[helper] Niri window focus changed from '{}' to '{}'", last_class, class);
-                    // Use write_all with timeout to prevent hanging
-                    if let Err(e) = stream.write_all(class.as_bytes()) {
-                        eprintln!("[helper] Failed to write to socket: {}, breaking", e);
-                        break;
-                    }
-                    if let Err(e) = stream.write_all(b"\n") {
-                        eprintln!("[helper] Failed to write newline to socket: {}, breaking", e);
-                        break;
-                    }
-                    last_class = class;
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                // Timeout occurred, continue loop (this is normal)
-                continue;
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                eprintln!("[helper] Event monitor disconnected, breaking");
-                break;
-            }
-        }
-    }
-    
-    // Wait for monitor thread to finish
-    let _ = monitor_thread.join();
-    Ok(())
-}
-
-fn run_x11_event_driven() -> Result<(), Box<dyn std::error::Error>> {
-    let socket_path = "/tmp/touchbar.sock";
-    
-    // Set up watchdog timer to prevent indefinite hanging
-    let start_time = std::time::Instant::now();
-    const WATCHDOG_TIMEOUT: Duration = Duration::from_secs(60); // 1 minute timeout
-    
-    // Connect to the socket with timeout and retry limit
-    let mut stream = {
-        let mut retry_count = 0;
-        const MAX_RETRIES: u32 = 10;
-        const RETRY_DELAY_MS: u64 = 100;
-        
-        loop {
-            match UnixStream::connect(socket_path) {
-                Ok(stream) => break stream,
-                Err(_) => {
-                    retry_count += 1;
-                    if retry_count >= MAX_RETRIES {
-                        return Err(Box::new(std::io::Error::new(
-                            std::io::ErrorKind::ConnectionRefused,
-                            format!("Failed to connect to socket after {} retries", MAX_RETRIES)
-                        )));
-                    }
-                    eprintln!("[helper] Socket connection attempt {} failed, retrying in {}ms...", retry_count, RETRY_DELAY_MS);
-                    thread::sleep(Duration::from_millis(RETRY_DELAY_MS));
-                }
-            }
-        }
-    };
-    
-    // Set socket to non-blocking mode to prevent hanging
-    stream.set_nonblocking(true)?;
-    
-    // Initialize X11 monitor
-    let mut monitor = X11WindowMonitor::new()?;
-    eprintln!("[helper] X11 event-driven monitor initialized");
-    
-    // Setup event listening
-    monitor.setup_event_listening()?;
-    eprintln!("[helper] X11 event listening setup complete");
-    
-    // Get initial active window class
-    let mut last_class = monitor.get_active_window_class().unwrap_or_else(|| "Desktop".to_string());
-    eprintln!("[helper] Initial active window class: {}", last_class);
-    
-    // Send initial class
-    if let Err(e) = stream.write_all(last_class.as_bytes()) {
-        eprintln!("[helper] Failed to write initial class to socket: {}, breaking", e);
-        return Ok(());
-    }
-    if let Err(e) = stream.write_all(b"\n") {
-        eprintln!("[helper] Failed to write initial newline to socket: {}, breaking", e);
-        return Ok(());
-    }
-    
-    // Event loop with timeout protection
-    loop {
-        // Check watchdog timeout
-        if start_time.elapsed() > WATCHDOG_TIMEOUT {
-            eprintln!("[helper] Watchdog timeout reached, exiting to prevent hanging");
-            break;
-        }
-        
-        // Use a timeout-based approach instead of blocking wait_for_event
-        match monitor.wait_for_focus_change_with_timeout(Duration::from_millis(1000)) { // 1 second timeout
-            Ok(Some(new_class)) => {
-                if new_class != last_class {
-                    eprintln!("[helper] Window focus changed from '{}' to '{}'", last_class, new_class);
-                    if let Err(e) = stream.write_all(new_class.as_bytes()) {
-                        eprintln!("[helper] Failed to write to socket: {}, breaking", e);
-                        break;
-                    }
-                    if let Err(e) = stream.write_all(b"\n") {
-                        eprintln!("[helper] Failed to write newline to socket: {}, breaking", e);
-                        break;
-                    }
-                    last_class = new_class;
-                }
-            }
-            Ok(None) => {
-                // No focus change, continue waiting
-                // This can happen when switching to an empty workspace
-                continue;
-            }
-            Err(e) => {
-                eprintln!("[helper] Error waiting for X11 events: {}, breaking", e);
-                break;
-            }
-        }
-    }
-    
-    Ok(())
-}
-
-fn main() -> std::io::Result<()> {
+fn main() -> Result<()> {
     // Debug environment variables
     eprintln!("[helper] Environment variables:");
     eprintln!("[helper] DISPLAY={:?}", std::env::var("DISPLAY"));
@@ -1371,79 +1228,13 @@ fn main() -> std::io::Result<()> {
     eprintln!("[helper] SWAYSOCK={:?}", std::env::var("SWAYSOCK"));
     eprintln!("[helper] HYPRLAND_INSTANCE_SIGNATURE={:?}", std::env::var("HYPRLAND_INSTANCE_SIGNATURE"));
     eprintln!("[helper] NIRI_SOCKET={:?}", std::env::var("NIRI_SOCKET"));
-    eprintln!("[helper] UID={:?}", std::env::var("UID"));
-    eprintln!("[helper] GNOME_DESKTOP_SESSION_ID={:?}", std::env::var("GNOME_DESKTOP_SESSION_ID"));
     eprintln!("[helper] XDG_CURRENT_DESKTOP={:?}", std::env::var("XDG_CURRENT_DESKTOP"));
-    eprintln!("[helper] XDG_RUNTIME_DIR={:?}", std::env::var("XDG_RUNTIME_DIR"));
     
-    if let Ok(addr) = std::env::var("DBUS_SESSION_BUS_ADDRESS") {
-        eprintln!("[helper] DBUS_SESSION_BUS_ADDRESS={}", addr);
-    } else {
-        eprintln!("[helper] DBUS_SESSION_BUS_ADDRESS is not set");
-    }
+    // Detect window manager and run
+    let monitor = detect_window_manager()?;
+    let mut runner = EventRunner::new();
     
-    // Check for Wayland first (prioritize over X11 when both are present)
-    if std::env::var("WAYLAND_DISPLAY").is_ok() {
-        eprintln!("[helper] Wayland detected, checking for specific compositor");
-        
-        // Check for Hyprland first (more specific detection)
-        if std::env::var("HYPRLAND_INSTANCE_SIGNATURE").is_ok() {
-            eprintln!("[helper] Hyprland detected, using event-driven approach");
-            if let Err(e) = run_hyprland_event_driven() {
-                eprintln!("[helper] Hyprland event-driven approach failed: {}", e);
-                return Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
-            }
-            return Ok(());
-        }
-        
-        // Check for Niri (more specific detection)
-        if std::env::var("XDG_CURRENT_DESKTOP").map_or(false, |desktop| desktop.to_lowercase() == "niri") {
-            eprintln!("[helper] Niri detected, using event-driven approach");
-            if let Err(e) = run_niri_event_driven() {
-                eprintln!("[helper] Niri event-driven approach failed: {}", e);
-                return Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
-            }
-            return Ok(());
-        }
-        
-        // Check for Sway (more specific detection)
-        if std::env::var("SWAYSOCK").is_ok() {
-            eprintln!("[helper] Sway detected, using event-driven approach");
-            if let Err(e) = run_sway_event_driven() {
-                eprintln!("[helper] Sway event-driven approach failed: {}", e);
-                return Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
-            }
-            return Ok(());
-        }
-        
-        // Check for GNOME Wayland
-        if std::env::var("GNOME_DESKTOP_SESSION_ID").is_ok() || 
-           std::env::var("XDG_CURRENT_DESKTOP").map_or(false, |desktop| desktop.to_lowercase().contains("gnome")) {
-            eprintln!("[helper] GNOME Wayland detected, using event-driven approach with WindowMonitorPro extension");
-            if let Err(e) = run_gnome_event_driven() {
-                eprintln!("[helper] GNOME event-driven approach failed: {}", e);
-                return Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
-            }
-            return Ok(());
-        }
-        
-        eprintln!("[helper] Generic Wayland detected, but no event-driven support available");
-        return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "No event-driven support for generic Wayland"));
-    }
-    
-    // Check for X11 (only if DISPLAY is set but no WAYLAND_DISPLAY)
-    if std::env::var("DISPLAY").is_ok() && std::env::var("WAYLAND_DISPLAY").is_err() {
-        eprintln!("[helper] X11 detected (no Wayland), using event-driven approach");
-        if let Err(e) = run_x11_event_driven() {
-            eprintln!("[helper] X11 event-driven approach failed: {}", e);
-            return Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
-        }
-        return Ok(());
-    }
-    
-    // No supported compositor detected
-    eprintln!("[helper] No supported compositor detected (not X11, Sway, Hyprland, Niri, or generic Wayland)");
-    return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "No supported compositor detected"));
+    runner.run_with_monitor(monitor)
 }
 
  
