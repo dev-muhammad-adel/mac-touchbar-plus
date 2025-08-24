@@ -29,8 +29,4 @@ pkgs.mkShell {
     libxml2
     pango
   ];
-
-  # shellHook = ''
-  # exec nu
-  # '';
 } 

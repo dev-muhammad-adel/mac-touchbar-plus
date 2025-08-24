@@ -150,7 +150,7 @@ impl HelperManager {
         // Get environment variables using the bash script approach
         let env_vars = get_env_from_session(user, leader_pid);
 
-        let helper_path = "tiny-dfr-focus-window-helper";
+        let helper_path = "/usr/bin/tiny-dfr-focus-window-helper";
 
         // Check if helper binary exists
         if !std::path::Path::new(helper_path).exists() {
@@ -567,7 +567,7 @@ impl VlcHelperManager {
             println!("[main]   {}={}", key, value);
         }
 
-        let helper_path = "tiny-dfr-vlc-helper";
+        let helper_path = "/usr/bin/tiny-dfr-vlc-helper";
 
         // Check if helper binary exists
         if !std::path::Path::new(helper_path).exists() {
@@ -936,7 +936,7 @@ impl BrowserHelperManager {
             println!("[main]   {}={}", key, value);
         }
 
-        let helper_path = "tiny-dfr-browser-helper";
+        let helper_path = "/usr/bin/tiny-dfr-browser-helper";
 
         // Check if helper binary exists
         if !std::path::Path::new(helper_path).exists() {
@@ -1263,15 +1263,6 @@ fn get_env_from_session(_user: &str, leader_pid: u32) -> HashMap<String, String>
         }
     }
 
-    // env.insert("WAYLAND_DISPLAY".to_string(), "wayland-1".to_string());
-    // env.insert(
-    //     "NIRI_SOCKET".to_string(),
-    //     "/run/user/1000/niri.wayland-1.2009.sock".to_string(),
-    // );
-    // env.insert(
-    //     "DBUS_SESSION_BUS_ADDRESS".to_string(),
-    //     "unix:path=/run/user/1000/bus".to_string(),
-    // );
     // Fallback: If we have XDG_RUNTIME_DIR but no WAYLAND_DISPLAY, check for wayland socket
     if !env.contains_key("WAYLAND_DISPLAY") && env.contains_key("XDG_RUNTIME_DIR") {
         if let Some(xdg_runtime) = env.get("XDG_RUNTIME_DIR") {
