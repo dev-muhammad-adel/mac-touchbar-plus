@@ -1,8 +1,0 @@
-[formatter.rust]
-command = "rustfmt"
-options = [ "--edition", "2021" ]
-includes = ["*.rs"]
-
-[formatter.markdown]
-command = "cbfmt"
-includes = ["*.md"]
