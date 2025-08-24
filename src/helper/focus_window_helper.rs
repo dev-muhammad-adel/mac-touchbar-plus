@@ -1,6 +1,6 @@
 //! Helper binary for tiny-dfr, providing auxiliary functionality.
 use std::os::unix::net::UnixStream;
-use std::io::{Write, BufReader, Read};
+use std::io::Write;
 use std::thread;
 use std::time::{Duration, Instant};
 use std::sync::mpsc;
@@ -9,7 +9,6 @@ use std::error::Error;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::sync::Mutex;
 
 // Window manager specific imports
 use x11rb::connection::Connection;
@@ -96,7 +95,6 @@ const SOCKET_PATH: &str = "/tmp/touchbar.sock";
 const MAX_RETRIES: u32 = 10;
 
 // Memory management constants
-const MAX_BUFFER_SIZE: usize = 64 * 1024; // 64KB max buffer size
 const MAX_CACHE_SIZE: usize = 1000; // Max window classes in cache
 const CACHE_CLEANUP_INTERVAL: Duration = Duration::from_secs(300); // 5 minutes
 
@@ -106,51 +104,7 @@ type Result<T> = std::result::Result<T, FocusHelperError>;
 // Memory Management Utilities
 // ============================================================================
 
-struct BoundedBuffer {
-    buffer: String,
-    max_size: usize,
-}
 
-impl BoundedBuffer {
-    fn new(max_size: usize) -> Self {
-        Self {
-            buffer: String::with_capacity(max_size / 2), // Pre-allocate half the max size
-            max_size,
-        }
-    }
-    
-    fn push_str(&mut self, s: &str) {
-        // Check if adding this string would exceed the limit
-        if self.buffer.len() + s.len() > self.max_size {
-            // Truncate from the beginning to make room
-            let excess = (self.buffer.len() + s.len()) - self.max_size;
-            if excess < self.buffer.len() {
-                self.buffer.drain(..excess);
-            } else {
-                // If the new string is larger than the buffer, just replace it
-                self.buffer.clear();
-            }
-        }
-        self.buffer.push_str(s);
-    }
-    
-    fn find_and_drain(&mut self, pattern: char) -> Option<String> {
-        if let Some(pos) = self.buffer.find(pattern) {
-            let line = self.buffer.drain(..=pos).collect::<String>();
-            Some(line)
-        } else {
-            None
-        }
-    }
-    
-    fn len(&self) -> usize {
-        self.buffer.len()
-    }
-    
-    fn clear(&mut self) {
-        self.buffer.clear();
-    }
-}
 
 struct LruWindowCache {
     cache: HashMap<Window, (String, Instant)>,
@@ -255,176 +209,7 @@ fn send_with_backpressure(tx: &mpsc::Sender<String>, data: String) -> Result<()>
     }
 }
 
-// ============================================================================
-// Health Monitoring and Diagnostics
-// ============================================================================
 
-#[derive(Debug, Clone)]
-struct HealthMetrics {
-    window_changes: u64,
-    response_times: Vec<Duration>,
-    memory_usage: usize,
-    cache_size: usize,
-    buffer_size: usize,
-    errors: u64,
-    last_activity: Instant,
-    start_time: Instant,
-}
-
-impl HealthMetrics {
-    fn new() -> Self {
-        Self {
-            window_changes: 0,
-            response_times: Vec::with_capacity(100), // Keep last 100 measurements
-            memory_usage: 0,
-            cache_size: 0,
-            buffer_size: 0,
-            errors: 0,
-            last_activity: Instant::now(),
-            start_time: Instant::now(),
-        }
-    }
-    
-    fn record_window_change(&mut self, response_time: Duration) {
-        self.window_changes += 1;
-        self.last_activity = Instant::now();
-        
-        // Keep only the last 100 response times
-        if self.response_times.len() >= 100 {
-            self.response_times.remove(0);
-        }
-        self.response_times.push(response_time);
-    }
-    
-    fn record_error(&mut self) {
-        self.errors += 1;
-    }
-    
-    fn update_memory_metrics(&mut self, cache_size: usize, buffer_size: usize) {
-        self.cache_size = cache_size;
-        self.buffer_size = buffer_size;
-        self.memory_usage = cache_size + buffer_size;
-    }
-    
-    fn get_average_response_time(&self) -> Duration {
-        if self.response_times.is_empty() {
-            return Duration::ZERO;
-        }
-        
-        let total: Duration = self.response_times.iter().sum();
-        total / self.response_times.len() as u32
-    }
-    
-    fn get_changes_per_second(&self) -> f64 {
-        let elapsed = self.start_time.elapsed();
-        if elapsed.as_secs() == 0 {
-            return 0.0;
-        }
-        self.window_changes as f64 / elapsed.as_secs() as f64
-    }
-    
-    fn get_uptime(&self) -> Duration {
-        self.start_time.elapsed()
-    }
-    
-    fn is_healthy(&self) -> bool {
-        let _uptime = self.get_uptime();
-        let idle_time = self.last_activity.elapsed();
-        
-        // Consider unhealthy if:
-        // 1. No activity for more than 60 seconds (increased from 30s)
-        // 2. Error rate is too high (>20% of total operations, increased from 10%)
-        // 3. Memory usage is excessive (>100MB)
-        // 4. Response time is too slow (>100ms for good responsiveness, reduced from 500ms)
-        
-        let response_time_ok = self.get_average_response_time() < Duration::from_millis(100);
-        let memory_ok = self.memory_usage < 100 * 1024 * 1024; // 100MB
-        let activity_ok = idle_time < Duration::from_secs(60); // 60 seconds
-        let error_rate_ok = self.window_changes == 0 || (self.errors as f64) / (self.window_changes as f64) < 0.2; // 20%
-        
-        response_time_ok && memory_ok && activity_ok && error_rate_ok
-    }
-    
-    fn print_health_report(&self) {
-        let uptime = self.get_uptime();
-        let avg_response = self.get_average_response_time();
-        let changes_per_sec = self.get_changes_per_second();
-        let error_rate = if self.window_changes > 0 {
-            (self.errors as f64 / self.window_changes as f64) * 100.0
-        } else {
-            0.0
-        };
-        
-        eprintln!("=== Focus Window Helper Health Report ===");
-        eprintln!("⏱️  Uptime: {}s", uptime.as_secs());
-        eprintln!("🔄 Window Changes: {}", self.window_changes);
-        eprintln!("📈 Changes/Second: {:.2}", changes_per_sec);
-        eprintln!("⚡ Avg Response Time: {:?}", avg_response);
-        eprintln!("❌ Errors: {} ({:.1}%)", self.errors, error_rate);
-        eprintln!("💾 Memory Usage: {} bytes", self.memory_usage);
-        eprintln!("🗄️  Cache Size: {} entries", self.cache_size);
-        eprintln!("📦 Buffer Size: {} bytes", self.buffer_size);
-        eprintln!("🟢 Health Status: {}", if self.is_healthy() { "HEALTHY" } else { "UNHEALTHY" });
-        eprintln!("=========================================");
-    }
-}
-
-struct HealthMonitor {
-    metrics: Arc<Mutex<HealthMetrics>>,
-    report_interval: Duration,
-    last_report: Instant,
-}
-
-impl HealthMonitor {
-    fn new(report_interval: Duration) -> Self {
-        Self {
-            metrics: Arc::new(Mutex::new(HealthMetrics::new())),
-            report_interval,
-            last_report: Instant::now(),
-        }
-    }
-    
-    fn record_window_change(&self, response_time: Duration) {
-        if let Ok(mut metrics) = self.metrics.lock() {
-            metrics.record_window_change(response_time);
-        }
-    }
-    
-    fn record_error(&self) {
-        if let Ok(mut metrics) = self.metrics.lock() {
-            metrics.record_error();
-        }
-    }
-    
-    fn update_memory_metrics(&self, cache_size: usize, buffer_size: usize) {
-        if let Ok(mut metrics) = self.metrics.lock() {
-            metrics.update_memory_metrics(cache_size, buffer_size);
-        }
-    }
-    
-    fn should_report(&mut self) -> bool {
-        if self.last_report.elapsed() > self.report_interval {
-            self.last_report = Instant::now();
-            true
-        } else {
-            false
-        }
-    }
-    
-    fn print_health_report(&self) {
-        if let Ok(metrics) = self.metrics.lock() {
-            metrics.print_health_report();
-        }
-    }
-    
-    fn is_healthy(&self) -> bool {
-        if let Ok(metrics) = self.metrics.lock() {
-            metrics.is_healthy()
-        } else {
-            false
-        }
-    }
-}
 
 // ============================================================================
 // Window Monitor Trait
@@ -442,7 +227,6 @@ trait WindowMonitor: Send {
 struct EventRunner {
     socket_path: String,
     state: ThreadSafeState,
-    health_monitor: HealthMonitor,
 }
 
 impl EventRunner {
@@ -450,14 +234,13 @@ impl EventRunner {
         Self {
             socket_path: SOCKET_PATH.to_string(),
             state: ThreadSafeState::new(),
-            health_monitor: HealthMonitor::new(Duration::from_secs(60)), // Report every minute
         }
     }
 
     fn run_with_monitor(&mut self, monitor: Box<dyn WindowMonitor>) -> Result<()> {
         // Connect to socket with retry logic
         let mut stream = self.connect_with_retry()?;
-        stream.set_nonblocking(true)?;
+        // Keep socket blocking for pure event-driven behavior
         
         // Create communication channel with backpressure handling
         let (tx, rx) = create_bounded_channel();
@@ -475,9 +258,6 @@ impl EventRunner {
         // Request shutdown and cleanup
         self.state.request_shutdown();
         self.cleanup(monitor_thread);
-        
-        // Print final health report
-        self.health_monitor.print_health_report();
         
         result
     }
@@ -535,30 +315,14 @@ impl EventRunner {
                 break;
             }
             
-            // Update memory metrics from window monitors
-            self.update_memory_metrics();
-            
-            // Print health report periodically
-            if self.health_monitor.should_report() {
-                self.health_monitor.print_health_report();
-            }
-            
-            // Measure response time accurately
-            let receive_start = Instant::now();
-            
-            // Receive events with blocking recv (truly event-driven)
+            // Use pure blocking recv - no polling
             match rx.recv() {
                 Ok(class) => {
                     if class != last_class {
-                        // Calculate actual response time from receive to processing
-                        let response_time = receive_start.elapsed();
-                        self.health_monitor.record_window_change(response_time);
-                        
-                        eprintln!("[helper] Window focus changed from '{}' to '{}' (response: {:?})", 
-                                 last_class, class, response_time);
+                        eprintln!("[helper] Window focus changed from '{}' to '{}'", 
+                                 last_class, class);
                         
                         if let Err(e) = self.write_to_socket(stream, &class) {
-                            self.health_monitor.record_error();
                             eprintln!("[helper] Socket write error: {}", e);
                         }
                         
@@ -566,7 +330,6 @@ impl EventRunner {
                     }
                 }
                 Err(mpsc::RecvError) => {
-                    self.health_monitor.record_error();
                     eprintln!("[helper] Event monitor disconnected");
                     return Err(FocusHelperError::ConnectionFailed("Event monitor disconnected".to_string()));
                 }
@@ -576,13 +339,7 @@ impl EventRunner {
         Ok(())
     }
     
-    fn update_memory_metrics(&self) {
-        // Get memory usage from window monitors
-        let total_cache_size = 50 * 1024; // 50KB estimate
-        let total_buffer_size = 10 * 1024; // 10KB estimate
-        
-        self.health_monitor.update_memory_metrics(total_cache_size, total_buffer_size);
-    }
+
 
     fn write_to_socket(&self, stream: &mut UnixStream, data: &str) -> Result<()> {
         stream.write_all(data.as_bytes())?;
@@ -725,9 +482,9 @@ impl X11WindowMonitor {
     }
     
     fn wait_for_focus_change(&mut self) -> Result<Option<String>> {
-        // Pure event-driven: wait for the next X11 event
-        match self.conn.poll_for_event() {
-            Ok(Some(event)) => {
+        // Use pure blocking event wait - no polling
+        match self.conn.wait_for_event() {
+            Ok(event) => {
                 match event {
                     x11rb::protocol::Event::PropertyNotify(ev) => {
                         if ev.atom == self.net_active_window_atom {
@@ -740,12 +497,8 @@ impl X11WindowMonitor {
                 // Event processed but not a focus change
                 Ok(None)
             }
-            Ok(None) => {
-                // No events available, return None to indicate no change
-                Ok(None)
-            }
             Err(e) => {
-                Err(FocusHelperError::X11(format!("Event polling error: {}", e)))
+                Err(FocusHelperError::X11(format!("Event wait error: {}", e)))
             }
         }
     }
@@ -774,7 +527,10 @@ impl WindowMonitor for X11WindowMonitor {
                         last_class = new_class;
                     }
                 }
-                Ok(None) => continue,
+                Ok(None) => {
+                    // No focus change, continue to next event - no polling
+                    continue;
+                }
                 Err(e) => {
                     eprintln!("[helper] X11 event error: {}", e);
                     break;
@@ -844,6 +600,7 @@ impl SwayWindowMonitor {
             let _ = tx.send(class);
         }
         
+        // Use pure blocking iterator - no polling
         for event in events {
             match event? {
                 swayipc::reply::Event::Workspace(_) | swayipc::reply::Event::Window(_) => {
@@ -895,44 +652,29 @@ impl HyprlandWindowMonitor {
         eprintln!("[helper] Connecting to Hyprland socket: {}", socket_path);
         
         let mut stream = UnixStream::connect(&socket_path)?;
-        
-        stream.set_nonblocking(true)?;
+        // Keep socket blocking for pure event-driven behavior
         stream.write_all(b"subscribe\n")?;
         
+        use std::io::{BufRead, BufReader};
         let reader = BufReader::new(stream);
-        let mut buffer = BoundedBuffer::new(MAX_BUFFER_SIZE);
         
-        loop {
-            let mut temp_buf = [0u8; 1024];
-            match reader.get_ref().read(&mut temp_buf) {
-                Ok(0) => {
-                    eprintln!("[helper] Hyprland socket closed");
-                    break;
-                }
-                Ok(n) => {
-                    buffer.push_str(&String::from_utf8_lossy(&temp_buf[..n]));
-                    
-                    while let Some(line) = buffer.find_and_drain('\n') {
-                        let line = line.trim_end_matches('\n');
+        // Use pure blocking line reading - no polling
+        for line in reader.lines() {
+            match line {
+                Ok(line) => {
+                    if line.starts_with("activewindow>>") {
+                        let window_name = if let Some(pos) = line.find(',') {
+                            &line[14..pos]
+                        } else {
+                            &line[14..]
+                        };
                         
-                        if line.starts_with("activewindow>>") {
-                            let window_name = if let Some(pos) = line.find(',') {
-                                &line[14..pos]
-                            } else {
-                                &line[14..]
-                            };
-                            
-                            if window_name.trim().is_empty() {
-                                let _ = tx.send("Desktop".to_string());
-                            } else {
-                                let _ = tx.send(window_name.to_string());
-                            }
+                        if window_name.trim().is_empty() {
+                            let _ = tx.send("Desktop".to_string());
+                        } else {
+                            let _ = tx.send(window_name.to_string());
                         }
                     }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    // Socket would block, continue immediately without sleep
-                    continue;
                 }
                 Err(e) => {
                     eprintln!("[helper] Error reading from Hyprland socket: {:?}", e);
@@ -1027,6 +769,7 @@ impl GnomeWindowMonitor {
         
         let mut last_class = String::new();
         
+        // Use blocking stream iteration to prevent CPU spinning
         while let Some(msg) = stream.next().await {
             if let Ok(msg) = msg {
                 if let Some(interface) = msg.interface() {
@@ -1048,6 +791,8 @@ impl GnomeWindowMonitor {
                     }
                 }
             }
+            
+            // Pure event-driven - no artificial delays needed
         }
         
         Ok(())
@@ -1152,17 +897,18 @@ impl NiriWindowMonitor {
             .map_err(|e| FocusHelperError::Niri(format!("Failed to start event stream: {}", e)))?;
         
         if let Some(stdout) = child.stdout {
-                    use std::io::{BufRead, BufReader};
-                    let reader = BufReader::new(stdout);
-                    
-                    for line in reader.lines() {
-                        if let Ok(line) = line {
+            use std::io::{BufRead, BufReader};
+            let reader = BufReader::new(stdout);
+            
+            // Use pure blocking line reading - no polling
+            for line in reader.lines() {
+                if let Ok(line) = line {
                     if line.contains("Windows changed:") || line.contains("Window focus changed:") {
                         if let Some(class) = Self::get_active_window_class() {
                             let _ = tx.send(class);
                         }
                     }
-                        }
+                }
             }
         }
         

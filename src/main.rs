@@ -60,6 +60,8 @@ pub enum MainError {
     Config(String),
     #[error("Helper error: {0}")]
     Helper(String),
+    #[error("Display error: {0}")]
+    Display(String),
     #[error("Layer not found: {0:?}")]
     LayerNotFound(LayerKey),
     #[error("Touch slot not found: {0}")]
@@ -954,7 +956,8 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
         .map_err(|e| MainError::Input(e))?;
     let mut uinput = UInputHandle::new(uinput_file);
     
-    let mut backlight = BacklightManager::new();
+    let mut backlight = BacklightManager::new()
+        .map_err(|e| MainError::Display(format!("Failed to initialize backlight manager: {}", e)))?;
     let mut last_redraw_minute = Local::now().minute();
     let mut cfg_mgr = ConfigManager::new();
     let (mut cfg, mut layers) = cfg_mgr.load_config(width);
@@ -1162,8 +1165,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
         
         // Handle different types of redraws
         if needs_complete_redraw || any_changed || browser_buttons_changed {
-            // Manage image cache before redraw
-            button_images::manage_image_cache();
+
             
             // Performance optimization: Only log redraws in debug mode
             if DEBUG_LOGGING {
@@ -1207,20 +1209,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
             needs_complete_redraw = false;
         }
         
-        // Performance optimization: Reduce cache check frequency
-        static mut CACHE_CHECK_COUNTER: u64 = 0;
-        unsafe {
-            CACHE_CHECK_COUNTER += 1;
-            // Check every 2000 frames instead of 1000 for better performance
-            if CACHE_CHECK_COUNTER % 2000 == 0 {
-                button_images::clear_image_cache_if_needed();
-            }
-        }
-        
-        // Performance optimization: Only display cache stats in debug mode
-        if DEBUG_LOGGING {
-            button_images::display_cache_stats();
-        }
+
         
         // --- epoll wait and event handling ---
         let mut events = [EpollEvent::empty(); 5];
@@ -1818,26 +1807,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                         active_layer = LayerKey::Custom3;
                         needs_complete_redraw = true;
                     }
-                    // Cache management commands (Ctrl+Shift+C for cache debug, Ctrl+Shift+X for cache cleanup)
-                    else if key.key() == Key::C as u32 && key.key_state() == KeyState::Pressed {
-                        // Check if cache debug keys are enabled
-                        let config = button_images::get_cache_config();
-                        if config.debug_keys_enabled {
-                            button_images::debug_cache_state();
-                        }
-                    } else if key.key() == Key::X as u32 && key.key_state() == KeyState::Pressed {
-                        // Check if cache debug keys are enabled
-                        let config = button_images::get_cache_config();
-                        if config.debug_keys_enabled {
-                            button_images::force_cache_cleanup();
-                        }
-                    } else if key.key() == Key::V as u32 && key.key_state() == KeyState::Pressed {
-                        // Check if cache debug keys are enabled
-                        let config = button_images::get_cache_config();
-                        if config.debug_keys_enabled {
-                            button_images::display_detailed_cache_info();
-                        }
-                    }
+
                 },
                 Event::Touch(te) => {
                     if Some(te.device()) != digitizer || backlight.current_bl() == 0 {
@@ -2302,7 +2272,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
             }
         }
         
-        backlight.update_backlight(&cfg);
+        let _ = backlight.update_backlight(&cfg);
         
         // No login animation needed
         
