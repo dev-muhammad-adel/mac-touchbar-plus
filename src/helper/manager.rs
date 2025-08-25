@@ -1101,17 +1101,23 @@ fn get_env_from_session(user: &str, leader_pid: u32) -> HashMap<String, String> 
         if let Some(xdg_runtime) = env.get("XDG_RUNTIME_DIR") {
             let xdg_runtime = xdg_runtime.clone(); // Clone to avoid borrow conflict
             
-            // Look for any wayland socket files (wayland-0, wayland-1, etc.)
+            // Look for wayland socket files with numeric suffix (wayland-0.sock, wayland-1.sock, etc.)
             let mut wayland_display = None;
             if let Ok(entries) = fs::read_dir(&xdg_runtime) {
                 for entry in entries {
                     if let Ok(entry) = entry {
                         let file_name = entry.file_name();
                         if let Some(name) = file_name.to_str() {
-                            if name.starts_with("wayland-") && !name.ends_with(".lock") {
-                                println!("[get_env_from_session] Found wayland socket: {}, setting WAYLAND_DISPLAY={}", name, name);
-                                wayland_display = Some(name.to_string());
-                                break;
+                            // Match pattern: wayland- followed by digits and ending with .sock
+                            if name.starts_with("wayland-") && name.ends_with(".sock") {
+                                // Extract the part between "wayland-" and ".sock"
+                                let suffix = &name[8..name.len()-5]; // Remove "wayland-" prefix and ".sock" suffix
+                                // Check if the suffix is numeric
+                                if suffix.chars().all(|c| c.is_ascii_digit()) {
+                                    println!("[get_env_from_session] Found wayland socket: {}, setting WAYLAND_DISPLAY={}", name, name);
+                                    wayland_display = Some(name.to_string());
+                                    break;
+                                }
                             }
                         }
                     }
