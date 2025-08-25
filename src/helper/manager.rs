@@ -1022,38 +1022,53 @@ impl BrowserHelperManager {
 } 
 
 // Add the missing functions that were referenced
+
+fn find_deepest(pid: i32, path: &mut Vec<i32>, best: &mut Vec<i32>) {
+    path.push(pid);
+
+    let children = fs::read_to_string(format!("/proc/{}/task/{}/children", pid, pid))
+        .unwrap_or_default();
+
+    let mut has_child = false;
+    for child in children.split_whitespace() {
+        if let Ok(child_pid) = child.parse::<i32>() {
+            has_child = true;
+            find_deepest(child_pid, path, best);
+        }
+    }
+
+    // if leaf → update if deeper
+    if !has_child && path.len() > best.len() {
+        *best = path.clone();
+    }
+
+    path.pop();
+}
+
 fn get_env_from_session(user: &str, leader_pid: u32) -> HashMap<String, String> {
     let mut env = HashMap::new();
     
-    // NEW APPROACH: Use the exact same bash command that works
+    // NEW APPROACH: Use find_deepest instead of pstree
     
     let mut main_level_pids: Vec<u32> = Vec::new();
     
-    // Run the exact same command that you tested
-    let bash_output = match Command::new("bash")
-        .arg("-c")
-        .arg(format!("pstree -p {} | grep -oP '\\(\\d+\\)' | grep -oP '\\d+' | head -n 10", leader_pid))
-        .output() {
-        Ok(output) => output,
-        Err(e) => {
-            println!("[get_env_from_session] Failed to run bash command: {}", e);
-            return env;
-            }
-    };
+    // Use find_deepest to get the deepest process tree path
+    let mut path = Vec::new();
+    let mut best = Vec::new();
+    find_deepest(leader_pid as i32, &mut path, &mut best);
     
-    let bash_str = String::from_utf8_lossy(&bash_output.stdout);
-    
-    // Parse the PIDs from bash output
-    for line in bash_str.lines() {
-        if let Ok(pid) = line.trim().parse::<u32>() {
-            main_level_pids.push(pid);
-        }
+    // Convert the best path to u32 and add to main_level_pids
+    for &pid in &best {
+        main_level_pids.push(pid as u32);
     }
     
-    // Step 4: Accumulate environment from each main tree level, with later levels overriding earlier ones
-    for (_, &pid) in main_level_pids.iter().enumerate() {
+    println!("[get_env_from_session] Found {} processes in deepest path: {:?}", main_level_pids.len(), main_level_pids);
+    
+    // Accumulate environment from each main tree level, with later levels overriding earlier ones
+    for (i, &pid) in main_level_pids.iter().enumerate() {
         let path = format!("/proc/{}/environ", pid);
         if let Ok(data) = fs::read(&path) {
+            let mut env_count = 0;
             for entry in data.split(|&b| b == 0) {
                 if entry.is_empty() {
                     continue;
@@ -1065,8 +1080,22 @@ fn get_env_from_session(user: &str, leader_pid: u32) -> HashMap<String, String> 
                     
                     // Insert or override (later levels take precedence)
                     env.insert(key, value);
+                    env_count += 1;
                 }
             }
+            println!("[get_env_from_session] Process {} (PID {}): found {} env vars", i, pid, env_count);
+        } else {
+            println!("[get_env_from_session] Process {} (PID {}): failed to read environ", i, pid);
+        }
+    }
+    
+    // Debug: Show key environment variables collected
+    println!("[get_env_from_session] Key env vars collected:");
+    for key in ["DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "HYPRLAND_INSTANCE_SIGNATURE", "NIRI_SOCKET", "SWAYSOCK", "I3SOCK", "XDG_CURRENT_DESKTOP"] {
+        if let Some(value) = env.get(key) {
+            println!("[get_env_from_session]   {}={}", key, value);
+        } else {
+            println!("[get_env_from_session]   {} (not found)", key);
         }
     }
     
@@ -1144,6 +1173,7 @@ fn get_env_from_session(user: &str, leader_pid: u32) -> HashMap<String, String> 
         }
     }
     
+
     // Fallback 4: NIRI_SOCKET fallback
     if !env.contains_key("NIRI_SOCKET") {
         if let Some(xdg_runtime) = env.get("XDG_RUNTIME_DIR") {
@@ -1249,4 +1279,4 @@ fn get_env_from_pid(pid: u32) -> HashMap<String, String> {
     }
     
     env
-} 
+}
