@@ -1022,7 +1022,7 @@ impl BrowserHelperManager {
 } 
 
 // Add the missing functions that were referenced
-fn get_env_from_session(_user: &str, leader_pid: u32) -> HashMap<String, String> {
+fn get_env_from_session(user: &str, leader_pid: u32) -> HashMap<String, String> {
     let mut env = HashMap::new();
     
     // NEW APPROACH: Use the exact same bash command that works
@@ -1069,11 +1069,35 @@ fn get_env_from_session(_user: &str, leader_pid: u32) -> HashMap<String, String>
             }
         }
     }
-        
-
     
-    // Fallback: If we have XDG_RUNTIME_DIR but no WAYLAND_DISPLAY, check for wayland socket
-    if !env.contains_key("WAYLAND_DISPLAY") && env.contains_key("XDG_RUNTIME_DIR") {
+    // FALLBACK MECHANISMS
+    
+    // Fallback 1: XDG_RUNTIME_DIR fallback to /run/user/<UID>
+    if !env.contains_key("XDG_RUNTIME_DIR") {
+        // Get user UID
+        if let Ok(Some(userinfo)) = User::from_name(user) {
+            let xdg_runtime_dir = format!("/run/user/{}", userinfo.uid);
+            if std::path::Path::new(&xdg_runtime_dir).exists() {
+                println!("[get_env_from_session] Setting XDG_RUNTIME_DIR fallback: {}", xdg_runtime_dir);
+                env.insert("XDG_RUNTIME_DIR".to_string(), xdg_runtime_dir);
+            }
+        }
+    }
+    
+    // Fallback 2: DBUS_SESSION_BUS_ADDRESS fallback
+    if !env.contains_key("DBUS_SESSION_BUS_ADDRESS") {
+        if let Some(xdg_runtime) = env.get("XDG_RUNTIME_DIR") {
+            let dbus_socket_path = format!("{}/bus", xdg_runtime);
+            if std::path::Path::new(&dbus_socket_path).exists() {
+                let dbus_address = format!("unix:path={}", dbus_socket_path);
+                println!("[get_env_from_session] Setting DBUS_SESSION_BUS_ADDRESS fallback: {}", dbus_address);
+                env.insert("DBUS_SESSION_BUS_ADDRESS".to_string(), dbus_address);
+            }
+        }
+    }
+    
+    // Fallback 3: WAYLAND_DISPLAY fallback (enhanced)
+    if !env.contains_key("WAYLAND_DISPLAY") {
         if let Some(xdg_runtime) = env.get("XDG_RUNTIME_DIR") {
             // Look for any wayland socket files (wayland-0, wayland-1, etc.)
             if let Ok(entries) = fs::read_dir(xdg_runtime) {
@@ -1087,6 +1111,19 @@ fn get_env_from_session(_user: &str, leader_pid: u32) -> HashMap<String, String>
                                 break;
                             }
                         }
+                    }
+                }
+            }
+            
+            // If still no wayland socket found, try common fallbacks
+            if !env.contains_key("WAYLAND_DISPLAY") {
+                let common_wayland_names = ["wayland-0", "wayland-1", "wayland-2"];
+                for wayland_name in &common_wayland_names {
+                    let wayland_path = format!("{}/{}", xdg_runtime, wayland_name);
+                    if std::path::Path::new(&wayland_path).exists() {
+                        println!("[get_env_from_session] Setting WAYLAND_DISPLAY fallback: {}", wayland_name);
+                        env.insert("WAYLAND_DISPLAY".to_string(), wayland_name.to_string());
+                        break;
                     }
                 }
             }
