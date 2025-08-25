@@ -1096,18 +1096,21 @@ fn get_env_from_session(user: &str, leader_pid: u32) -> HashMap<String, String> 
         }
     }
     
-    // Fallback 3: WAYLAND_DISPLAY fallback (enhanced)
+    // Fallback 3: WAYLAND_DISPLAY fallback
     if !env.contains_key("WAYLAND_DISPLAY") {
         if let Some(xdg_runtime) = env.get("XDG_RUNTIME_DIR") {
+            let xdg_runtime = xdg_runtime.clone(); // Clone to avoid borrow conflict
+            
             // Look for any wayland socket files (wayland-0, wayland-1, etc.)
-            if let Ok(entries) = fs::read_dir(xdg_runtime) {
+            let mut wayland_display = None;
+            if let Ok(entries) = fs::read_dir(&xdg_runtime) {
                 for entry in entries {
                     if let Ok(entry) = entry {
                         let file_name = entry.file_name();
                         if let Some(name) = file_name.to_str() {
                             if name.starts_with("wayland-") && !name.ends_with(".lock") {
                                 println!("[get_env_from_session] Found wayland socket: {}, setting WAYLAND_DISPLAY={}", name, name);
-                                env.insert("WAYLAND_DISPLAY".to_string(), name.to_string());
+                                wayland_display = Some(name.to_string());
                                 break;
                             }
                         }
@@ -1116,14 +1119,90 @@ fn get_env_from_session(user: &str, leader_pid: u32) -> HashMap<String, String> 
             }
             
             // If still no wayland socket found, try common fallbacks
-            if !env.contains_key("WAYLAND_DISPLAY") {
+            if wayland_display.is_none() {
                 let common_wayland_names = ["wayland-0", "wayland-1", "wayland-2"];
                 for wayland_name in &common_wayland_names {
                     let wayland_path = format!("{}/{}", xdg_runtime, wayland_name);
                     if std::path::Path::new(&wayland_path).exists() {
                         println!("[get_env_from_session] Setting WAYLAND_DISPLAY fallback: {}", wayland_name);
-                        env.insert("WAYLAND_DISPLAY".to_string(), wayland_name.to_string());
+                        wayland_display = Some(wayland_name.to_string());
                         break;
+                    }
+                }
+            }
+            
+            // Insert the wayland display if found
+            if let Some(display) = wayland_display {
+                env.insert("WAYLAND_DISPLAY".to_string(), display);
+            }
+        }
+    }
+    
+    // Fallback 4: NIRI_SOCKET fallback
+    if !env.contains_key("NIRI_SOCKET") {
+        if let Some(xdg_runtime) = env.get("XDG_RUNTIME_DIR") {
+            let xdg_runtime = xdg_runtime.clone(); // Clone to avoid borrow conflict
+            
+            // Look for niri.*.sock files
+            if let Ok(entries) = fs::read_dir(&xdg_runtime) {
+                for entry in entries {
+                    if let Ok(entry) = entry {
+                        let file_name = entry.file_name();
+                        if let Some(name) = file_name.to_str() {
+                            if name.starts_with("niri.") && name.ends_with(".sock") {
+                                let niri_socket_path = format!("{}/{}", xdg_runtime, name);
+                                println!("[get_env_from_session] Found niri socket: {}, setting NIRI_SOCKET={}", name, niri_socket_path);
+                                env.insert("NIRI_SOCKET".to_string(), niri_socket_path);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Fallback 5: SWAYSOCK fallback
+    if !env.contains_key("SWAYSOCK") {
+        if let Some(xdg_runtime) = env.get("XDG_RUNTIME_DIR") {
+            let xdg_runtime = xdg_runtime.clone(); // Clone to avoid borrow conflict
+            
+            // Look for sway-ipc.*.sock files
+            if let Ok(entries) = fs::read_dir(&xdg_runtime) {
+                for entry in entries {
+                    if let Ok(entry) = entry {
+                        let file_name = entry.file_name();
+                        if let Some(name) = file_name.to_str() {
+                            if name.starts_with("sway-ipc.") && name.ends_with(".sock") {
+                                let sway_socket_path = format!("{}/{}", xdg_runtime, name);
+                                println!("[get_env_from_session] Found sway socket: {}, setting SWAYSOCK={}", name, sway_socket_path);
+                                env.insert("SWAYSOCK".to_string(), sway_socket_path);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Fallback 6: I3SOCK fallback
+    if !env.contains_key("I3SOCK") {
+        if let Some(xdg_runtime) = env.get("XDG_RUNTIME_DIR") {
+            let xdg_runtime = xdg_runtime.clone(); // Clone to avoid borrow conflict
+            let i3_socket_dir = format!("{}/i3", xdg_runtime);
+            if let Ok(entries) = fs::read_dir(&i3_socket_dir) {
+                for entry in entries {
+                    if let Ok(entry) = entry {
+                        let file_name = entry.file_name();
+                        if let Some(name) = file_name.to_str() {
+                            if name.starts_with("ipc-socket.") {
+                                let i3_socket_path = format!("{}/{}", i3_socket_dir, name);
+                                println!("[get_env_from_session] Found i3 socket: {}, setting I3SOCK={}", name, i3_socket_path);
+                                env.insert("I3SOCK".to_string(), i3_socket_path);
+                                break;
+                            }
+                        }
                     }
                 }
             }
