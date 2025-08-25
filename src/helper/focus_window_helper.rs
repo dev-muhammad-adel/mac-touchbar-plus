@@ -339,7 +339,7 @@ impl EventRunner {
         Ok(())
     }
     
-
+        
 
     fn write_to_socket(&self, stream: &mut UnixStream, data: &str) -> Result<()> {
         stream.write_all(data.as_bytes())?;
@@ -662,19 +662,19 @@ impl HyprlandWindowMonitor {
         for line in reader.lines() {
             match line {
                 Ok(line) => {
-                    if line.starts_with("activewindow>>") {
-                        let window_name = if let Some(pos) = line.find(',') {
-                            &line[14..pos]
-                        } else {
-                            &line[14..]
-                        };
-                        
-                        if window_name.trim().is_empty() {
-                            let _ = tx.send("Desktop".to_string());
-                        } else {
-                            let _ = tx.send(window_name.to_string());
+                        if line.starts_with("activewindow>>") {
+                            let window_name = if let Some(pos) = line.find(',') {
+                                &line[14..pos]
+                            } else {
+                                &line[14..]
+                            };
+                            
+                            if window_name.trim().is_empty() {
+                                let _ = tx.send("Desktop".to_string());
+                            } else {
+                                let _ = tx.send(window_name.to_string());
+                            }
                         }
-                    }
                 }
                 Err(e) => {
                     eprintln!("[helper] Error reading from Hyprland socket: {:?}", e);
@@ -897,18 +897,18 @@ impl NiriWindowMonitor {
             .map_err(|e| FocusHelperError::Niri(format!("Failed to start event stream: {}", e)))?;
         
         if let Some(stdout) = child.stdout {
-            use std::io::{BufRead, BufReader};
-            let reader = BufReader::new(stdout);
-            
+                    use std::io::{BufRead, BufReader};
+                    let reader = BufReader::new(stdout);
+                    
             // Use pure blocking line reading - no polling
-            for line in reader.lines() {
-                if let Ok(line) = line {
+                    for line in reader.lines() {
+                        if let Ok(line) = line {
                     if line.contains("Windows changed:") || line.contains("Window focus changed:") {
                         if let Some(class) = Self::get_active_window_class() {
                             let _ = tx.send(class);
                         }
                     }
-                }
+                        }
             }
         }
         
