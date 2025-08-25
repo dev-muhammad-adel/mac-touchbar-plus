@@ -1,3 +1,11 @@
+use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
+use std::os::fd::{AsFd, OwnedFd, AsRawFd, FromRawFd, IntoRawFd};
+use std::os::unix::net::UnixStream;
+use std::os::unix::fs::OpenOptionsExt;
+use std::cmp::min;
+use std::path::Path;
+
 use anyhow::Result;
 use cairo::{Context, FontSlant, FontWeight, Format, ImageSurface, Rectangle, Surface};
 use drm::control::ClipRect;
@@ -23,24 +31,6 @@ use nix::{
 use rsvg::CairoRenderer;
 use std::io::{BufReader, Read, Write};
 use std::sync::Arc;
-use cairo::{ImageSurface, Format};
-
-use drm::control::ClipRect;
-use anyhow::Result;
-use input::{
-    Libinput, LibinputInterface, Device as InputDevice,
-    event::{EventTrait}
-};
-use libc::{O_ACCMODE, O_RDONLY, O_RDWR, O_WRONLY, c_char};
-use input_linux::{uinput::UInputHandle, EventKind, Key};
-use input_linux_sys::{uinput_setup, input_id};
-use nix::{
-    sys::{
-        signal::{Signal, SigSet, SigAction, SigHandler, SaFlags},
-        epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags}
-    },
-    sys::eventfd::EfdFlags,
-};
 
 use chrono::{Local, Timelike};
 use crate::services::sessionmanager::{SessionState, monitor_sessions};
