@@ -1023,46 +1023,37 @@ impl BrowserHelperManager {
 
 // Add the missing functions that were referenced
 
-fn find_deepest(pid: i32, path: &mut Vec<i32>, best: &mut Vec<i32>) {
-    path.push(pid);
-
+fn collect_first_two(pid: i32, out: &mut Vec<i32>) {
     let children = fs::read_to_string(format!("/proc/{}/task/{}/children", pid, pid))
         .unwrap_or_default();
 
-    let mut has_child = false;
-    for child in children.split_whitespace() {
-        if let Ok(child_pid) = child.parse::<i32>() {
-            has_child = true;
-            find_deepest(child_pid, path, best);
-        }
-    }
+    let mut iter = children.split_whitespace().filter_map(|c| c.parse::<i32>().ok());
 
-    // if leaf → update if deeper
-    if !has_child && path.len() > best.len() {
-        *best = path.clone();
+    // take first two children
+    for child in iter.by_ref().take(2) {
+        out.push(child);
+        collect_first_two(child, out);
     }
-
-    path.pop();
 }
 
 fn get_env_from_session(user: &str, leader_pid: u32) -> HashMap<String, String> {
     let mut env = HashMap::new();
     
-    // NEW APPROACH: Use find_deepest instead of pstree
+    // NEW APPROACH: Use collect_first_two instead of pstree
     
     let mut main_level_pids: Vec<u32> = Vec::new();
     
-    // Use find_deepest to get the deepest process tree path
-    let mut path = Vec::new();
-    let mut best = Vec::new();
-    find_deepest(leader_pid as i32, &mut path, &mut best);
+    // Use collect_first_two to get the first two children at each level
+    let mut collected_pids = Vec::new();
+    collect_first_two(leader_pid as i32, &mut collected_pids);
     
-    // Convert the best path to u32 and add to main_level_pids
-    for &pid in &best {
+    // Add the leader PID first, then the collected children
+    main_level_pids.push(leader_pid);
+    for &pid in &collected_pids {
         main_level_pids.push(pid as u32);
     }
     
-    println!("[get_env_from_session] Found {} processes in deepest path: {:?}", main_level_pids.len(), main_level_pids);
+    println!("[get_env_from_session] Found {} processes (leader + first two children at each level): {:?}", main_level_pids.len(), main_level_pids);
     
     // Accumulate environment from each main tree level, with later levels overriding earlier ones
     for (i, &pid) in main_level_pids.iter().enumerate() {
