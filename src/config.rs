@@ -1,21 +1,17 @@
 //! Configuration loading, validation, and management.
-use std::{
-    fs::read_to_string,
-    os::fd::AsFd,
-    collections::HashMap
-};
+use crate::fonts::{FontConfig, Pattern};
+use crate::LayerKey;
+use crate::{Button, FunctionLayer};
 use anyhow::Error;
 use cairo::FontFace;
-use crate::{FunctionLayer, Button};
-use crate::fonts::{FontConfig, Pattern};
 use freetype::Library as FtLibrary;
 use input_linux::Key;
 use nix::{
     errno::Errno,
-    sys::inotify::{AddWatchFlags, InitFlags, Inotify, WatchDescriptor}
+    sys::inotify::{AddWatchFlags, InitFlags, Inotify, WatchDescriptor},
 };
 use serde::Deserialize;
-use crate::LayerKey;
+use std::{collections::HashMap, fs::read_to_string, os::fd::AsFd};
 
 const USER_CFG_PATH: &'static str = "/etc/tiny-dfr/config.json";
 
@@ -33,7 +29,7 @@ pub struct Config {
 
 pub struct Theme {
     pub media_icon_theme: String,
-    pub app_icon_theme: String
+    pub app_icon_theme: String,
 }
 
 #[derive(Deserialize)]
@@ -104,8 +100,12 @@ fn load_font(name: &str) -> FontFace {
 }
 
 fn load_theme() -> Theme {
-    let mut base = serde_json::from_str::<ConfigProxy>(&read_to_string("/usr/share/tiny-dfr/config.json").unwrap()).unwrap();
-    let user = read_to_string("/etc/tiny-dfr/config.json").map_err::<Error, _>(|e| e.into())
+    let mut base = serde_json::from_str::<ConfigProxy>(
+        &read_to_string("/usr/share/tiny-dfr/config.json").unwrap(),
+    )
+    .unwrap();
+    let user = read_to_string("/etc/tiny-dfr/config.json")
+        .map_err::<Error, _>(|e| e.into())
         .and_then(|r| Ok(serde_json::from_str::<ConfigProxy>(&r)?));
     if let Ok(user) = user {
         base.media_icon_theme = user.media_icon_theme.or(base.media_icon_theme);
@@ -113,13 +113,18 @@ fn load_theme() -> Theme {
     };
     Theme {
         media_icon_theme: base.media_icon_theme.unwrap(),
-        app_icon_theme: base.app_icon_theme.unwrap()
+        app_icon_theme: base.app_icon_theme.unwrap(),
     }
 }
 
 fn load_config(width: u16) -> (Config, HashMap<LayerKey, FunctionLayer>) {
-    let mut base = serde_json::from_str::<ConfigProxy>(&read_to_string("/usr/share/tiny-dfr/config.json").unwrap()).unwrap();
-    let user = read_to_string(USER_CFG_PATH).map_err::<Error, _>(|e| e.into())
+    println!("/usr/share/tiny-dfr/config.json");
+    let mut base = serde_json::from_str::<ConfigProxy>(
+        &read_to_string("/usr/share/tiny-dfr/config.json").unwrap(),
+    )
+    .unwrap();
+    let user = read_to_string(USER_CFG_PATH)
+        .map_err::<Error, _>(|e| e.into())
         .and_then(|r| Ok(serde_json::from_str::<ConfigProxy>(&r)?));
     if let Ok(user) = user {
         base.show_button_outlines = user.show_button_outlines.or(base.show_button_outlines);
@@ -136,7 +141,9 @@ fn load_config(width: u16) -> (Config, HashMap<LayerKey, FunctionLayer>) {
         base.app_layer_keys2 = user.app_layer_keys2.or(base.app_layer_keys2);
         base.app_layer_keys3 = user.app_layer_keys3.or(base.app_layer_keys3);
         base.active_brightness = user.active_brightness.or(base.active_brightness);
-        base.app_layer_splited_layout = user.app_layer_splited_layout.or(base.app_layer_splited_layout);
+        base.app_layer_splited_layout = user
+            .app_layer_splited_layout
+            .or(base.app_layer_splited_layout);
     };
     let _media_layer = FunctionLayer::with_config(base.media_layer_keys.unwrap());
     let fkey_layer = FunctionLayer::with_config(base.primary_layer_keys.unwrap());
@@ -160,7 +167,9 @@ fn load_config(width: u16) -> (Config, HashMap<LayerKey, FunctionLayer>) {
     layers.insert(LayerKey::Custom3, app_layer3);
     if width >= 2170 {
         for layer in layers.values_mut() {
-            layer.buttons.insert(0, Button::new_text("esc".to_string(), Key::Esc, true));
+            layer
+                .buttons
+                .insert(0, Button::new_text("esc".to_string(), Key::Esc, true));
         }
     }
     let cfg = Config {
@@ -172,14 +181,14 @@ fn load_config(width: u16) -> (Config, HashMap<LayerKey, FunctionLayer>) {
         bold_cairo: base.bold.unwrap(),
         italic_cairo: base.italic.unwrap(),
         font_face: load_font(&base.font_template.unwrap()),
-        active_brightness: base.active_brightness.unwrap()
+        active_brightness: base.active_brightness.unwrap(),
     };
     (cfg, layers)
 }
 
 pub struct ConfigManager {
     inotify_fd: Inotify,
-    watch_desc: Option<WatchDescriptor>
+    watch_desc: Option<WatchDescriptor>,
 }
 
 fn arm_inotify(inotify_fd: &Inotify) -> Option<WatchDescriptor> {
@@ -187,7 +196,7 @@ fn arm_inotify(inotify_fd: &Inotify) -> Option<WatchDescriptor> {
     match inotify_fd.add_watch(USER_CFG_PATH, flags) {
         Ok(wd) => Some(wd),
         Err(Errno::ENOENT) => None,
-        e => Some(e.unwrap())
+        e => Some(e.unwrap()),
     }
 }
 
@@ -196,7 +205,8 @@ impl ConfigManager {
         let inotify_fd = Inotify::init(InitFlags::IN_NONBLOCK).unwrap();
         let watch_desc = arm_inotify(&inotify_fd);
         ConfigManager {
-            inotify_fd, watch_desc
+            inotify_fd,
+            watch_desc,
         }
     }
     pub fn load_config(&self, width: u16) -> (Config, HashMap<LayerKey, FunctionLayer>) {
@@ -205,7 +215,12 @@ impl ConfigManager {
     pub fn load_theme(&self) -> Theme {
         load_theme()
     }
-    pub fn update_config(&mut self, cfg: &mut Config, layers: &mut HashMap<LayerKey, FunctionLayer>, width: u16) -> bool {
+    pub fn update_config(
+        &mut self,
+        cfg: &mut Config,
+        layers: &mut HashMap<LayerKey, FunctionLayer>,
+        width: u16,
+    ) -> bool {
         if self.watch_desc.is_none() {
             self.watch_desc = arm_inotify(&self.inotify_fd);
             return false;
@@ -218,7 +233,7 @@ impl ConfigManager {
         let mut ret = false;
         for evt in evts {
             if evt.wd != self.watch_desc.unwrap() {
-                continue
+                continue;
             }
             let parts = load_config(width);
             *cfg = parts.0;
