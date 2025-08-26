@@ -685,8 +685,8 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
     let mut cfg_mgr = ConfigManager::new();
     let (mut cfg, mut layers) = cfg_mgr.load_config(width);
     let mut uinput = initialize_uinput(&layers)?;
-    let mut backlight = BacklightManager::new()
-        .map_err(|e| MainError::Display(format!("Failed to initialize backlight manager: {}", e)))?;
+
+      let mut backlight = BacklightManager::new();
     let mut last_redraw_minute = Local::now().minute();
     let mut pixel_shift = PixelShiftManager::new();
     let mut helper_manager = HelperManager::new();
@@ -1412,7 +1412,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
             )?;
         }
         
-        let _ = backlight.update_backlight(&cfg);
+         backlight.update_backlight(&cfg);
         
         // No login animation needed
         
