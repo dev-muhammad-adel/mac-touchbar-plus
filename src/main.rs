@@ -247,6 +247,95 @@ fn create_eventfd() -> MainResult<Arc<OwnedFd>> {
     Ok(event_fd)
 }
 
+// Helper function to send keys via uinput
+fn send_key_via_uinput(uinput: &mut UInputHandle<File>, key_command: &str) -> MainResult<()> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    
+    // Parse the key command (e.g., "ctrl+r", "alt+left", "l")
+    let keys = parse_key_combination(key_command);
+    if keys.is_empty() {
+        eprintln!("[main] No valid keys found for command: {}", key_command);
+        return Ok(());
+    }
+    
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    
+    let time = timeval {
+        tv_sec: now.as_secs() as i64,
+        tv_usec: now.subsec_micros() as i64,
+    };
+    
+    // Send key press events
+    for &key in &keys {
+        let event = input_event {
+            time,
+            type_: EventKind::Key as u16,
+            code: key as u16,
+            value: 1, // Press
+        };
+        uinput.write(&[event])?;
+    }
+    
+    // Send synchronization event
+    let sync_event = input_event {
+        time,
+        type_: EventKind::Synchronize as u16,
+        code: SynchronizeKind::Report as u16,
+        value: 0,
+    };
+    uinput.write(&[sync_event])?;
+    
+    // Small delay
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    
+    // Send key release events
+    for &key in keys.iter().rev() {
+        let event = input_event {
+            time,
+            type_: EventKind::Key as u16,
+            code: key as u16,
+            value: 0, // Release
+        };
+        uinput.write(&[event])?;
+    }
+    
+    // Send final synchronization event
+    let sync_event = input_event {
+        time,
+        type_: EventKind::Synchronize as u16,
+        code: SynchronizeKind::Report as u16,
+        value: 0,
+    };
+    uinput.write(&[sync_event])?;
+    
+    eprintln!("[main] Successfully sent keys via uinput: {:?}", keys);
+    Ok(())
+}
+
+fn parse_key_combination(combination: &str) -> Vec<Key> {
+    let mut keys = Vec::new();
+    let parts: Vec<&str> = combination.split('+').collect();
+    
+    for part in parts {
+        match part.to_lowercase().as_str() {
+            "left" => keys.push(Key::Left),
+            "right" => keys.push(Key::Right),
+            "r" => keys.push(Key::R),
+            "t" => keys.push(Key::T),
+            "l" => keys.push(Key::L),
+            "w" => keys.push(Key::W),
+            "n" => keys.push(Key::N),
+            "f4" => keys.push(Key::F4),
+            "backspace" => keys.push(Key::Backspace),
+            _ => eprintln!("[main] Unknown key: {}", part),
+        }
+    }
+    
+    keys
+}
+
 // Helper function to handle layer switching and animations
 fn handle_layer_switching(
     active_layer: &mut LayerKey,
@@ -1321,8 +1410,18 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                continue;
                                            }
                                            
+                                           // Handle uinput commands from browser helper
+                                           if part.starts_with("uinput:") {
+                                               let key_command = part.trim_start_matches("uinput:");
+                                               eprintln!("[main] Received uinput command from browser helper: {}", key_command);
+                                               
+                                               // Parse and send the key combination via uinput
+                                               if let Err(e) = send_key_via_uinput(&mut uinput, key_command) {
+                                                   eprintln!("[main] Failed to send key via uinput: {}", e);
+                                               }
+                                           }
                                            // Handle browser status message (plain JSON format)
-                                           if let Ok(browser_status) = serde_json::from_str::<serde_json::Value>(part) {
+                                           else if let Ok(browser_status) = serde_json::from_str::<serde_json::Value>(part) {
                                                // Update browser screen with the status
                                                if let Some(url) = browser_status.get("url").and_then(|v| v.as_str()) {
                                                    if let Some(title) = browser_status.get("title").and_then(|v| v.as_str()) {

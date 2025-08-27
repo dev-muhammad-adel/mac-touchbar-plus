@@ -86,7 +86,7 @@
   ],
   "AppLayerSplitedLayout": {
     "AppLayerKeys1Media": {
-      "Width": 0.3,
+      "Width": 0.31,
       "Items": [
         {
           "Icon": "go-previous-symbolic",
@@ -105,19 +105,19 @@
           "Mode": "Media"
         },
         {
-          "Icon": "media-playback-start-symbolic",
-          "Action": "PlayPause",
+          "Icon": "display-brightness-low-symbolic",
+          "Action": "BrightnessDown",
           "Mode": "Media"
         },
         {
-          "Icon": "system-search-symbolic",
-          "Action": "Search",
+          "Icon": "display-brightness-high-symbolic",
+          "Action": "BrightnessUp",
           "Mode": "Media"
         }
       ]
     },
     "AppLayerKeys1Modules": {
-      "Width": 0.7
+      "Width": 0.69
     }
   },
 
@@ -132,7 +132,7 @@
       "Action": "BrightnessUp",
       "Mode": "Media"
     },
-    { "Action": "Unknown", "Mode": "Blank", "Fraction": 0.1 },
+    { "Action": "Unknown", "Mode": "Blank", "Fraction": 0.15 },
     {
       "Icon": "keyboard-brightness-low-symbolic",
       "Action": "IllumDown",
@@ -143,7 +143,7 @@
       "Action": "IllumUp",
       "Mode": "Media"
     },
-    { "Action": "Unknown", "Mode": "Blank", "Fraction": 0.1 },
+    { "Action": "Unknown", "Mode": "Blank", "Fraction": 0.15 },
     {
       "Icon": "audio-volume-muted-symbolic",
       "Action": "Mute",
@@ -159,7 +159,7 @@
       "Action": "VolumeUp",
       "Mode": "Media"
     },
-    { "Action": "Unknown", "Mode": "Blank" },
+    { "Action": "Unknown", "Mode": "Blank", "Fraction": 0.7  },
     { "Action": "Unknown", "Mode": "Blank" },
     { "Action": "Unknown", "Mode": "Blank" },
     { "Action": "Unknown", "Mode": "Blank" },
