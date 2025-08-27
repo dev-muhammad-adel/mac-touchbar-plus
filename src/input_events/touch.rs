@@ -104,7 +104,7 @@ impl TouchEventHandler {
                     Self::handle_modules_touch_down(
                         _x, _y, width, height, current_window_class, app_ui_manager,
                         vlc_touch_active, vlc_drag_position, vlc_helper_stream,
-                        browser_helper_stream, needs_complete_redraw, cfg_enable_pixel_shift
+                        browser_helper_stream, needs_complete_redraw, cfg_enable_pixel_shift, uinput
                     )?;
                 },
                 "media" => {
@@ -250,6 +250,7 @@ impl TouchEventHandler {
         browser_helper_stream: &mut Option<UnixStream>,
         needs_complete_redraw: &mut bool,
         cfg_enable_pixel_shift: bool,
+        uinput: &mut UInputHandle<std::fs::File>,
     ) -> crate::MainResult<()> {
         if let Some(window_class) = current_window_class {
             let pixel_shift_width = if cfg_enable_pixel_shift { PIXEL_SHIFT_WIDTH_PX } else { 0 };
@@ -268,7 +269,7 @@ impl TouchEventHandler {
                 Self::handle_app_action(
                     app_action, window_class, app_ui_manager, vlc_touch_active,
                     vlc_drag_position, vlc_helper_stream, browser_helper_stream,
-                    needs_complete_redraw
+                    needs_complete_redraw, uinput
                 )?;
             }
         }
@@ -356,11 +357,12 @@ impl TouchEventHandler {
         vlc_helper_stream: &mut Option<UnixStream>,
         browser_helper_stream: &mut Option<UnixStream>,
         needs_complete_redraw: &mut bool,
+        uinput: &mut UInputHandle<std::fs::File>,
     ) -> crate::MainResult<()> {
         let window_class_lc = window_class.to_lowercase();
         
         if window_class_lc == "firefox" || window_class_lc == "chrome" || window_class_lc == "chromium" || window_class_lc == "brave" || window_class_lc == "brave-browser" || window_class_lc == "edge" || window_class_lc == "safari" || window_class_lc == "opera" || window_class_lc == "google-chrome" {
-            Self::handle_browser_action(app_action, app_ui_manager, browser_helper_stream)?;
+            Self::handle_browser_action(app_action, app_ui_manager, browser_helper_stream, uinput)?;
         } else if window_class_lc == "vlc" && vlc_helper_stream.is_some() {
             Self::handle_vlc_action(app_action, app_ui_manager, vlc_touch_active, vlc_drag_position, vlc_helper_stream, needs_complete_redraw)?;
         }
@@ -394,78 +396,136 @@ impl TouchEventHandler {
         app_action: AppAction,
         app_ui_manager: &mut AppUiManager,
         browser_helper_stream: &mut Option<UnixStream>,
+        uinput: &mut UInputHandle<std::fs::File>,
     ) -> crate::MainResult<()> {
         match app_action {
             AppAction::Browser(BrowserAction::Back) => {
                 println!("[touch] Executing Browser Back");
                 app_ui_manager.browser_screen.buttons[0].active = true;
                 app_ui_manager.browser_screen.buttons[0].changed = true;
-                if let Some(stream) = browser_helper_stream {
-                    Self::send_browser_command(stream, "back")?;
-                }
+                // Send Alt+Left directly via uinput
+                crate::layers::button::toggle_key(uinput, Key::LeftAlt, 1);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                crate::layers::button::toggle_key(uinput, Key::Left, 1);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                crate::layers::button::toggle_key(uinput, Key::Left, 0);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                crate::layers::button::toggle_key(uinput, Key::LeftAlt, 0);
             }
             AppAction::Browser(BrowserAction::Forward) => {
                 println!("[touch] Executing Browser Forward");
                 app_ui_manager.browser_screen.buttons[1].active = true;
                 app_ui_manager.browser_screen.buttons[1].changed = true;
-                if let Some(stream) = browser_helper_stream {
-                    Self::send_browser_command(stream, "forward")?;
-                }
+                // Send Alt+Right directly via uinput
+                crate::layers::button::toggle_key(uinput, Key::LeftAlt, 1);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                crate::layers::button::toggle_key(uinput, Key::Right, 1);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                crate::layers::button::toggle_key(uinput, Key::Right, 0);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                crate::layers::button::toggle_key(uinput, Key::LeftAlt, 0);
             }
             AppAction::Browser(BrowserAction::Refresh) => {
                 println!("[touch] Executing Browser Refresh");
                 app_ui_manager.browser_screen.buttons[2].active = true;
                 app_ui_manager.browser_screen.buttons[2].changed = true;
-                if let Some(stream) = browser_helper_stream {
-                    Self::send_browser_command(stream, "refresh")?;
-                }
+                // Send Ctrl+R directly via uinput
+                crate::layers::button::toggle_key(uinput, Key::LeftCtrl, 1);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                crate::layers::button::toggle_key(uinput, Key::R, 1);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                crate::layers::button::toggle_key(uinput, Key::R, 0);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                crate::layers::button::toggle_key(uinput, Key::LeftCtrl, 0);
             }
             AppAction::Browser(BrowserAction::Home) => {
                 println!("[touch] Executing Browser Home");
                 app_ui_manager.browser_screen.buttons[3].active = true;
                 app_ui_manager.browser_screen.buttons[3].changed = true;
-                if let Some(stream) = browser_helper_stream {
-                    Self::send_browser_command(stream, "home")?;
-                }
+                // Send Ctrl+L directly via uinput (focus address bar, then Ctrl+A to select all)
+                crate::layers::button::toggle_key(uinput, Key::LeftCtrl, 1);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                crate::layers::button::toggle_key(uinput, Key::L, 1);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                crate::layers::button::toggle_key(uinput, Key::L, 0);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                crate::layers::button::toggle_key(uinput, Key::LeftCtrl, 0);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                crate::layers::button::toggle_key(uinput, Key::LeftCtrl, 1);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                crate::layers::button::toggle_key(uinput, Key::A, 1);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                crate::layers::button::toggle_key(uinput, Key::A, 0);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                crate::layers::button::toggle_key(uinput, Key::LeftCtrl, 0);
             }
             AppAction::Browser(BrowserAction::AddBookmark) => {
                 println!("[touch] Executing Browser Add Bookmark");
                 app_ui_manager.browser_screen.buttons[4].active = true;
                 app_ui_manager.browser_screen.buttons[4].changed = true;
-                if let Some(stream) = browser_helper_stream {
-                    Self::send_browser_command(stream, "add_bookmark")?;
-                }
+                // Send Ctrl+D directly via uinput
+                crate::layers::button::toggle_key(uinput, Key::LeftCtrl, 1);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                crate::layers::button::toggle_key(uinput, Key::D, 1);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                crate::layers::button::toggle_key(uinput, Key::D, 0);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                crate::layers::button::toggle_key(uinput, Key::LeftCtrl, 0);
             }
             AppAction::Browser(BrowserAction::BookmarksManager) => {
                 println!("[touch] Executing Browser Bookmarks Manager");
                 app_ui_manager.browser_screen.buttons[4].active = true;
                 app_ui_manager.browser_screen.buttons[4].changed = true;
-                if let Some(stream) = browser_helper_stream {
-                    Self::send_browser_command(stream, "bookmarks_manager")?;
-                }
+                // Send Ctrl+Shift+O directly via uinput
+                crate::layers::button::toggle_key(uinput, Key::LeftCtrl, 1);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                crate::layers::button::toggle_key(uinput, Key::LeftShift, 1);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                crate::layers::button::toggle_key(uinput, Key::O, 1);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                crate::layers::button::toggle_key(uinput, Key::O, 0);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                crate::layers::button::toggle_key(uinput, Key::LeftShift, 0);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                crate::layers::button::toggle_key(uinput, Key::LeftCtrl, 0);
             }
             AppAction::Browser(BrowserAction::CloseTab) => {
                 println!("[touch] Executing Browser Close Tab");
                 app_ui_manager.browser_screen.buttons[4].active = true;
                 app_ui_manager.browser_screen.buttons[4].changed = true;
-                if let Some(stream) = browser_helper_stream {
-                    Self::send_browser_command(stream, "close_tab")?;
-                }
+                // Send Ctrl+W directly via uinput
+                crate::layers::button::toggle_key(uinput, Key::LeftCtrl, 1);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                crate::layers::button::toggle_key(uinput, Key::W, 1);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                crate::layers::button::toggle_key(uinput, Key::W, 0);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                crate::layers::button::toggle_key(uinput, Key::LeftCtrl, 0);
             }
             AppAction::Browser(BrowserAction::NewTab) => {
                 println!("[touch] Executing Browser New Tab");
-                app_ui_manager.browser_screen.buttons[5].active = true;
-                app_ui_manager.browser_screen.buttons[5].changed = true;
-                if let Some(stream) = browser_helper_stream {
-                    Self::send_browser_command(stream, "new_tab")?;
-                }
+                app_ui_manager.browser_screen.buttons[4].active = true;
+                app_ui_manager.browser_screen.buttons[4].changed = true;
+                // Send Ctrl+T directly via uinput
+                crate::layers::button::toggle_key(uinput, Key::LeftCtrl, 1);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                crate::layers::button::toggle_key(uinput, Key::T, 1);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                crate::layers::button::toggle_key(uinput, Key::T, 0);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                crate::layers::button::toggle_key(uinput, Key::LeftCtrl, 0);
             }
             AppAction::Browser(BrowserAction::AddressBar) => {
                 println!("[touch] Executing Browser Address Bar Focus");
                 app_ui_manager.browser_screen.focus_address_bar();
-                if let Some(stream) = browser_helper_stream {
-                    Self::send_browser_command(stream, "focus_address_bar")?;
-                }
+                // Send Ctrl+L directly via uinput
+                crate::layers::button::toggle_key(uinput, Key::LeftCtrl, 1);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                crate::layers::button::toggle_key(uinput, Key::L, 1);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                crate::layers::button::toggle_key(uinput, Key::L, 0);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                crate::layers::button::toggle_key(uinput, Key::LeftCtrl, 0);
             }
             _ => {
                 println!("[touch] Ignoring non-browser action: {:?}", app_action);
@@ -590,11 +650,7 @@ impl TouchEventHandler {
         Ok(())
     }
 
-    fn send_browser_command(stream: &mut UnixStream, command: &str) -> Result<(), std::io::Error> {
-        let command_with_newline = format!("{}\n", command);
-        stream.write_all(command_with_newline.as_bytes())?;
-        Ok(())
-    }
+
 
     fn get_touch_slot<'a>(
         touches: &'a HashMap<u32, (LayerKey, &'static str, usize)>,
