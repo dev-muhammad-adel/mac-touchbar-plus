@@ -69,6 +69,7 @@ pub struct Button {
     pub action: Key,
     pub background: bool,
     pub fraction: Option<f32>,
+    pub visible: bool,
 }
 
 impl Button {
@@ -128,6 +129,7 @@ impl Button {
             image: button_images::ButtonImage::Text(text),
             background,
             fraction: None,
+            visible: true,
         }
     }
 
@@ -153,6 +155,7 @@ impl Button {
             changed: false,
             background,
             fraction: None,
+            visible: true,
         }
     }
 
@@ -164,6 +167,7 @@ impl Button {
             image: button_images::ButtonImage::Blank,
             background,
             fraction: None,
+            visible: true,
         }
     }
 

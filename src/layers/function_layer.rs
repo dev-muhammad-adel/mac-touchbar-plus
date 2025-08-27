@@ -103,9 +103,10 @@ impl FunctionLayer {
          
                 // --- MEDIA BUTTON WIDTHS WITH FRACTION ---
                 let media_spacing_px = 2.0f64; // 2px spacing for AppLayerKeys1Media
-                let total_spacing = if media_count > 1 { media_spacing_px * (media_count as f64 - 1.0) } else { 0.0 };
+                let visible_media_count = split.media.iter().filter(|b| b.visible).count();
+                let total_spacing = if visible_media_count > 1 { media_spacing_px * (visible_media_count as f64 - 1.0) } else { 0.0 };
                 let button_area = media_width - total_spacing;
-                let weights: Vec<f32> = split.media.iter().map(|b| b.fraction.unwrap_or(1.0)).collect();
+                let weights: Vec<f32> = split.media.iter().filter(|b| b.visible).map(|b| b.fraction.unwrap_or(1.0)).collect();
                 let total_weight: f32 = weights.iter().sum();
                 let mut media_button_widths: Vec<f64> = weights.iter().map(|w| button_area * (*w as f64 / total_weight as f64)).collect();
                 // Last button absorbs rounding error
@@ -189,9 +190,10 @@ impl FunctionLayer {
                 if !modules_only_redraw {
                     // Draw media section
                     let media_spacing_px = 2.0f64; // 2px spacing for AppLayerKeys1Media
-                    let total_spacing = if media_count > 1 { media_spacing_px * (media_count as f64 - 1.0) } else { 0.0 };
+                    let visible_media_count = split.media.iter().filter(|b| b.visible).count();
+                    let total_spacing = if visible_media_count > 1 { media_spacing_px * (visible_media_count as f64 - 1.0) } else { 0.0 };
                     let button_area = media_width - total_spacing;
-                    let weights: Vec<f32> = split.media.iter().map(|b| b.fraction.unwrap_or(1.0)).collect();
+                    let weights: Vec<f32> = split.media.iter().filter(|b| b.visible).map(|b| b.fraction.unwrap_or(1.0)).collect();
                     let total_weight: f32 = weights.iter().sum();
                     let mut media_button_widths: Vec<f64> = weights.iter().map(|w| button_area * (*w as f64 / total_weight as f64)).collect();
                     let sum_widths: f64 = media_button_widths.iter().sum();
@@ -410,11 +412,11 @@ impl FunctionLayer {
             let total_width = (width - group_spacing as i32) as f64;
             let modules_width = (split.modules_width as f64 * total_width).round();
             let media_width = total_width - modules_width - group_spacing;
-            let media_count = split.media.len();
+            let visible_media_count = split.media.iter().filter(|b| b.visible).count();
             let media_spacing_px = 2.0f64;
-            let total_spacing = if media_count > 1 { media_spacing_px * (media_count as f64 - 1.0) } else { 0.0 };
+            let total_spacing = if visible_media_count > 1 { media_spacing_px * (visible_media_count as f64 - 1.0) } else { 0.0 };
             let button_area = media_width - total_spacing;
-            let weights: Vec<f32> = split.media.iter().map(|b| b.fraction.unwrap_or(1.0)).collect();
+            let weights: Vec<f32> = split.media.iter().filter(|b| b.visible).map(|b| b.fraction.unwrap_or(1.0)).collect();
             let total_weight: f32 = weights.iter().sum();
             let mut media_button_widths: Vec<f64> = weights.iter().map(|w| button_area * (*w as f64 / total_weight as f64)).collect();
             let sum_widths: f64 = media_button_widths.iter().sum();
@@ -423,15 +425,20 @@ impl FunctionLayer {
             }
             // SIMPLIFIED: media section starts after modules_width + group_spacing
             let mut left_edge = modules_width + group_spacing;
-            for (i, _) in split.media.iter().enumerate() {
-                let right_edge = left_edge + media_button_widths[i];
+            let mut visible_index = 0;
+            for (i, button) in split.media.iter().enumerate() {
+                if !button.visible {
+                    continue;
+                }
+                let right_edge = left_edge + media_button_widths[visible_index];
                 if x >= left_edge && x < right_edge {
                     return Some(i);
                 }
                 left_edge = right_edge;
-                if i != media_count - 1 {
+                if visible_index < visible_media_count - 1 {
                     left_edge += media_spacing_px;
                 }
+                visible_index += 1;
             }
         }
         None

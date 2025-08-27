@@ -45,6 +45,7 @@ mod layers;
 mod input_events;
 use crate::layers::{Button, FunctionLayer};
 
+
 use crate::input_events::{KeyboardEventHandler, TouchEventHandler};
 
 // Error handling types and functions
@@ -749,6 +750,25 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
     let mut app_ui_manager = AppUiManager::new();
     let mut vlc_touch_active = false; // Track if VLC touch interaction is active
     let mut vlc_drag_position: Option<f64> = None; // Track current drag position for visual feedback
+    
+    // Media state management
+    let mut is_media_on = true; // Default to true as requested
+    
+    // Add hardcoded media button to AppLayerKeys1Media
+    if let Some(media_layer) = layers.get_mut(&LayerKey::Media) {
+        if let Some(split) = &mut media_layer.split {
+            // Add a hardcoded button that can be shown/hidden based on isMediaOn state
+            let mut media_button = Button::new_icon(
+                "bar-chart-2", // Use bar-chart-2 icon as placeholder
+                input_linux::Key::Macro4, // Use Macro4 as the action
+                Some("Media".to_string()),
+                "use_default",
+                true
+            );
+            media_button.visible = is_media_on; // Set initial visibility
+            split.media.insert(1, media_button); // Insert as second button (after go-previous-symbolic)
+        }
+    }
 
     // --- main event loop ---
     loop {
@@ -789,6 +809,20 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
             &mut app_layer3_slide_anim,
             &mut needs_complete_redraw
         )?;
+        
+        // Update hardcoded media button visibility based on is_media_on state
+        if let Some(media_layer) = layers.get_mut(&LayerKey::Media) {
+            if let Some(split) = &mut media_layer.split {
+                // Find the hardcoded button (second button in the media section)
+                if let Some(second_button) = split.media.get_mut(1) {
+                    if second_button.visible != is_media_on {
+                        second_button.visible = is_media_on;
+                        second_button.changed = true;
+                        needs_complete_redraw = true;
+                    }
+                }
+            }
+        }
         // --- Restore any_changed variable for redraw logic ---
         let any_changed = if let Some(split) = &get_active_layer(&layers, active_layer)?.split {
             split.media.iter().any(|b| b.changed)
@@ -893,11 +927,10 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                 
                                 // Switch to Media layer when user logs in
                                 if active_layer != LayerKey::Media {
-                                    if DEBUG_LOGGING {
-                                        println!("[main] User logged in, switching from {:?} to Media layer", active_layer);
-                                    }
-                                    active_layer = LayerKey::Media;
-                                    needs_complete_redraw = true;
+                                                            if DEBUG_LOGGING {
+                            println!("[main] User logged in, switching from {:?} to Media layer", active_layer);
+                        }
+                        active_layer = LayerKey::Media;
                                 }
                              } else {
                                 if DEBUG_LOGGING {
@@ -932,11 +965,10 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                 
                                 // Switch to Custom2 layer when user logs out
                                 if active_layer != LayerKey::Custom2 {
-                                    if DEBUG_LOGGING {
-                                        println!("[main] User logged out, switching from {:?} to Custom2 layer", active_layer);
-                                    }
-                                    active_layer = LayerKey::Custom2;
-                                    needs_complete_redraw = true;
+                                                                    if DEBUG_LOGGING {
+                                    println!("[main] User logged out, switching from {:?} to Custom2 layer", active_layer);
+                                }
+                                active_layer = LayerKey::Custom2;
                                 }
                                 
                                 // Clear current window class when user logs out
