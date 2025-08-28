@@ -26,11 +26,6 @@ pub fn draw_media_section(
 ) {
     let media_spacing_px = 2.0f64;
     for (i, button) in media_buttons.iter_mut().enumerate() {
-        // Skip invisible buttons
-        if !button.visible {
-            continue;
-        }
-        
         if button.changed || complete_redraw {
             let color = if button.active {
                 BUTTON_COLOR_ACTIVE
@@ -159,25 +154,17 @@ pub fn media_hit_test(
     left_edge: f64,
     media_button_widths: &[f64],
     media_count: usize,
-    media_buttons: &[crate::Button],
 ) -> Option<usize> {
     let mut current_left = left_edge;
-    let mut visible_index = 0;
     for i in 0..media_count {
-        // Skip invisible buttons
-        if !media_buttons[i].visible {
-            continue;
-        }
-        
-        let right = current_left + media_button_widths[visible_index];
+        let right = current_left + media_button_widths[i];
         if x >= current_left && x < right {
-            return Some(i); // Return the original index, not the visible index
+            return Some(i);
         }
         current_left = right;
-        if visible_index < media_count - 1 {
+        if i != media_count - 1 {
             current_left += 2.0; // media_spacing_px
         }
-        visible_index += 1;
     }
     None
 } 

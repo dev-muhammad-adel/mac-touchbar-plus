@@ -69,7 +69,6 @@ pub struct Button {
     pub action: Key,
     pub background: bool,
     pub fraction: Option<f32>,
-    pub visible: bool,
 }
 
 impl Button {
@@ -129,7 +128,6 @@ impl Button {
             image: button_images::ButtonImage::Text(text),
             background,
             fraction: None,
-            visible: true,
         }
     }
 
@@ -155,7 +153,6 @@ impl Button {
             changed: false,
             background,
             fraction: None,
-            visible: true,
         }
     }
 
@@ -167,7 +164,6 @@ impl Button {
             image: button_images::ButtonImage::Blank,
             background,
             fraction: None,
-            visible: true,
         }
     }
 
@@ -202,7 +198,7 @@ impl Button {
         Ok(())
     }
 
-    pub fn set_active<F>(&mut self, uinput: &mut UInputHandle<F>, active: bool) where F: std::os::fd::AsRawFd {
+    pub fn 1<F>(&mut self, uinput: &mut UInputHandle<F>, active: bool) where F: std::os::fd::AsRawFd {
         if self.active != active {
             self.active = active;
             self.changed = true;
@@ -210,4 +206,16 @@ impl Button {
             toggle_key(uinput, self.action, active as i32);
         }
     }
+        pub fn set_action<F>(&mut self, uinput: &mut UInputHandle<F>, active: bool) where F: std::os::fd::AsRawFd {
+        if self.active != active {
+            toggle_key(uinput, self.action, active as i32);
+        }
+    }
+        
+        pub fn trigger_action<F>(&mut self, uinput: &mut UInputHandle<F>) where F: std::os::fd::AsRawFd {
+            // Trigger the action without changing visual state
+            toggle_key(uinput, self.action, 1);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            toggle_key(uinput, self.action, 0);
+        }
 } 
