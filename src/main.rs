@@ -717,6 +717,8 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
     let mut browser_window_focused = false;
     let _last_window_class: Option<String> = None;
     let mut current_user: Option<String> = None;
+    let mut current_vlc_window_id: Option<u64> = None; // Track current VLC window ID
+    let mut current_browser_window_id: Option<u64> = None; // Track current browser window ID
 
     // Safe surface creation
     let mut surface = ImageSurface::create(Format::ARgb32, db_width as i32, db_height as i32)
@@ -941,6 +943,9 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                 
                                 // Clear current window class when user logs out
                                 current_window_class = None;
+                                // Clear VLC and browser window IDs when user logs out
+                                current_vlc_window_id = None;
+                                current_browser_window_id = None;
                             }
                             // No animation needed - just update session state
                             current_session = Some(new_state);
@@ -1043,11 +1048,59 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                            
                                            // Check if VLC window focus changed
                                            let new_vlc_focused = class == "vlc";
-                                           if new_vlc_focused != vlc_window_focused {
-                                               vlc_window_focused = new_vlc_focused;
-                                               if vlc_window_focused {
-                                                   // VLC window gained focus - start VLC helper
-                                                   println!("[main] VLC window focused, starting VLC helper");
+                                           let vlc_focus_changed = new_vlc_focused != vlc_window_focused;
+                                           let vlc_window_id_changed = if new_vlc_focused && vlc_window_focused {
+                                               // VLC is still focused, check if window ID changed
+                                               current_vlc_window_id != window_id
+                                           } else {
+                                               false
+                                           };
+                                           
+                                           if vlc_focus_changed || vlc_window_id_changed {
+                                               if vlc_focus_changed {
+                                                   vlc_window_focused = new_vlc_focused;
+                                               }
+                                               
+                                               if vlc_window_id_changed {
+                                                   println!("[main] VLC window ID changed from {:?} to {:?}, restarting VLC helper", current_vlc_window_id, window_id);
+                                                   println!("[main] Stopping existing VLC helper and clearing state...");
+                                               }
+                                               
+                                               if new_vlc_focused {
+                                                   // VLC window gained focus or ID changed - start/restart VLC helper
+                                                   if vlc_window_id_changed {
+                                                       // Stop existing helper first if ID changed
+                                                       if let Some(stream) = vlc_helper_stream.take() {
+                                                           if let Err(e) = safe_epoll_delete(&epoll, &stream) {
+                                                               eprintln!("[main] Failed to remove VLC stream from epoll: {}", e);
+                                                           }
+                                                       }
+                                                       vlc_helper_reader = None;
+                                                       if let Some(fd) = vlc_helper_listener_fd.take() {
+                                                           let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
+                                                           if let Err(e) = safe_epoll_delete(&epoll, &listener_fd_obj) {
+                                                               eprintln!("[main] Failed to remove VLC listener from epoll: {}", e);
+                                                           }
+                                                       }
+                                                       if vlc_helper_manager.is_process_running() {
+                                                           vlc_helper_manager.stop();
+                                                           println!("[main] VLC helper stopped due to window ID change");
+                                                       } else {
+                                                           println!("[main] VLC helper was not running, no need to stop");
+                                                       }
+                                                       // Clear VLC drag position when switching windows
+                                                       vlc_drag_position = None;
+                                                   }
+                                                   
+                                                   if vlc_window_id_changed {
+                                                       println!("[main] VLC helper restarted for new window ID: {:?}", window_id);
+                                                   } else {
+                                                       if current_vlc_window_id.is_none() {
+                                                           println!("[main] VLC window focused for the first time, starting VLC helper");
+                                                       } else {
+                                                           println!("[main] VLC window focused, starting VLC helper");
+                                                       }
+                                                   }
                                                    if let Some(user) = &current_user {
                                                        if let Some(fd) = vlc_helper_manager.start(user, current_session.as_ref().and_then(|s| s.leader).unwrap_or(0)) {
                                                            let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
@@ -1055,7 +1108,14 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                                eprintln!("[main] Failed to add VLC helper listener to epoll: {}", e);
                                                            } else {
                                                                vlc_helper_listener_fd = Some(listener_fd_obj.into_raw_fd());
+                                                               if vlc_window_id_changed {
+                                                                   println!("[main] VLC helper restarted successfully for window ID: {:?}", window_id);
+                                                               } else {
+                                                                   println!("[main] VLC helper started successfully for window ID: {:?}", window_id);
+                                                               }
                                                            }
+                                                       } else {
+                                                           println!("[main] Failed to start VLC helper for user: {}", user);
                                                        }
                                                    } else {
                                                        println!("[main] No current user available for VLC helper");
@@ -1075,19 +1135,104 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                            eprintln!("[main] Failed to remove VLC listener from epoll: {}", e);
                                                        }
                                                    }
-                                                   vlc_helper_manager.stop();
+                                                   if vlc_helper_manager.is_process_running() {
+                                                       vlc_helper_manager.stop();
+                                                       println!("[main] VLC helper stopped due to losing focus");
+                                                   } else {
+                                                       println!("[main] VLC helper was not running, no need to stop");
+                                                   }
                                                    // Clear VLC drag position when losing focus
                                                    vlc_drag_position = None;
+                                               }
+                                               
+                                               // Update the current VLC window ID
+                                               if new_vlc_focused {
+                                                   if current_vlc_window_id != window_id {
+                                                       println!("[main] VLC window ID updated: {:?} -> {:?}", current_vlc_window_id, window_id);
+                                                   }
+                                                   current_vlc_window_id = window_id;
+                                               } else {
+                                                   if current_vlc_window_id.is_some() {
+                                                       println!("[main] VLC window ID cleared (lost focus)");
+                                                   }
+                                                   current_vlc_window_id = None;
                                                }
                                            }
                                            
                                            // Check if browser window focus changed
                                            let class_lower = class.to_lowercase();
                                            let new_browser_focused = class_lower == "firefox" || class_lower == "chrome" || class_lower == "chromium" || class_lower == "brave" || class_lower == "brave-browser" || class_lower == "edge" || class_lower == "safari" || class_lower == "opera" || class_lower == "google-chrome";
+                                           let browser_focus_changed = new_browser_focused != browser_window_focused;
+                                           let browser_window_id_changed = if new_browser_focused && browser_window_focused {
+                                               // Browser is still focused, check if window ID changed
+                                               current_browser_window_id != window_id
+                                           } else {
+                                               false
+                                           };
                                            
-                                           if new_browser_focused != browser_window_focused {
-                                               // Browser focus state changed
-                                               if browser_window_focused && !new_browser_focused {
+                                           if browser_focus_changed || browser_window_id_changed {
+                                               if browser_focus_changed {
+                                                   browser_window_focused = new_browser_focused;
+                                               }
+                                               
+                                               if browser_window_id_changed {
+                                                   println!("[main] Browser window ID changed from {:?} to {:?}, restarting browser helper", current_browser_window_id, window_id);
+                                               }
+                                               
+                                               if new_browser_focused {
+                                                   // Browser window gained focus or ID changed - start/restart browser helper
+                                                   if browser_window_id_changed {
+                                                       // Stop existing helper first if ID changed
+                                                       if let Some(stream) = browser_helper_stream.take() {
+                                                           if let Err(e) = safe_epoll_delete(&epoll, &stream) {
+                                                               eprintln!("[main] Failed to remove browser helper stream from epoll: {}", e);
+                                                           }
+                                                       }
+                                                       browser_helper_reader = None;
+                                                       if let Some(fd) = browser_helper_listener_fd.take() {
+                                                           let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
+                                                           if let Err(e) = safe_epoll_delete(&epoll, &listener_fd_obj) {
+                                                               eprintln!("[main] Failed to remove browser helper listener from epoll: {}", e);
+                                                           }
+                                                       }
+                                                       if browser_helper_manager.is_process_running() {
+                                                           browser_helper_manager.stop();
+                                                           println!("[main] Browser helper stopped due to window ID change");
+                                                       } else {
+                                                           println!("[main] Browser helper was not running, no need to stop");
+                                                       }
+                                                   }
+                                                   
+                                                   if browser_window_id_changed {
+                                                       println!("[main] Browser helper restarted for new window ID: {:?}", window_id);
+                                                   } else {
+                                                       if current_browser_window_id.is_none() {
+                                                           println!("[main] Browser window focused for the first time, starting browser helper");
+                                                       } else {
+                                                           println!("[main] Browser window focused, starting browser helper");
+                                                       }
+                                                   }
+                                                   
+                                                   if let Some(user) = &current_user {
+                                                       if let Some(fd) = browser_helper_manager.start(user, current_session.as_ref().and_then(|s| s.leader).unwrap_or(0)) {
+                                                           let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
+                                                           if let Err(e) = safe_epoll_add(&epoll, &listener_fd_obj, EpollEvent::new(EpollFlags::EPOLLIN, 8)) {
+                                                               eprintln!("[main] Failed to add browser helper listener to epoll: {}", e);
+                                                           } else {
+                                                               browser_helper_listener_fd = Some(listener_fd_obj.into_raw_fd());
+                                                               if browser_window_id_changed {
+                                                                   println!("[main] Browser helper restarted successfully for window ID: {:?}", window_id);
+                                                               } else {
+                                                                   println!("[main] Browser helper started successfully for window ID: {:?}", window_id);
+                                                               }
+                                                           }
+                                                       } else {
+                                                           println!("[main] Failed to start browser helper for user: {}", user);
+                                                       }
+                                                   } else {
+                                                       println!("[main] No current user available for browser helper");
+                                                   }
+                                               } else {
                                                    // Browser window lost focus - stop browser helper
                                                    println!("[main] Browser window lost focus, stopping browser helper");
                                                    if let Some(stream) = browser_helper_stream.take() {
@@ -1102,26 +1247,26 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                            eprintln!("[main] Failed to remove browser helper listener from epoll: {}", e);
                                                        }
                                                    }
-                                                   browser_helper_manager.stop();
-                                               } else if !browser_window_focused && new_browser_focused {
-                                                   // Browser window gained focus - start browser helper
-                                                   println!("[main] Browser window focused: '{}', starting browser helper", class);
-                                                   if let Some(user) = &current_user {
-                                                       if let Some(fd) = browser_helper_manager.start(user, current_session.as_ref().and_then(|s| s.leader).unwrap_or(0)) {
-                                                           let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
-                                                           if let Err(e) = safe_epoll_add(&epoll, &listener_fd_obj, EpollEvent::new(EpollFlags::EPOLLIN, 8)) {
-                                                               eprintln!("[main] Failed to add browser helper listener to epoll: {}", e);
-                                                           } else {
-                                                               browser_helper_listener_fd = Some(listener_fd_obj.into_raw_fd());
-                                                           }
-                                                       }
+                                                   if browser_helper_manager.is_process_running() {
+                                                       browser_helper_manager.stop();
+                                                       println!("[main] Browser helper stopped due to losing focus");
                                                    } else {
-                                                       println!("[main] No current user available for browser helper");
+                                                       println!("[main] Browser helper was not running, no need to stop");
                                                    }
                                                }
                                                
-                                               // Update focus state
-                                               browser_window_focused = new_browser_focused;
+                                               // Update the current browser window ID
+                                               if new_browser_focused {
+                                                   if current_browser_window_id != window_id {
+                                                       println!("[main] Browser window ID updated: {:?} -> {:?}", current_browser_window_id, window_id);
+                                                   }
+                                                   current_browser_window_id = window_id;
+                                               } else {
+                                                   if current_browser_window_id.is_some() {
+                                                       println!("[main] Browser window ID cleared (lost focus)");
+                                                   }
+                                                   current_browser_window_id = None;
+                                               }
                                            } else if new_browser_focused && browser_window_focused {
                                                // Browser focus state is the same, but browser type might have changed
                                                if current_window_class.as_ref() != Some(&class.to_string()) {
@@ -1475,10 +1620,12 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
         unsafe {
             PROCESS_STATUS_COUNTER += 1;
             if PROCESS_STATUS_COUNTER % 1000 == 0 { // Log every 1000 frames
-                println!("[main] Process status - Main helper: {}, VLC helper: {}, Browser helper: {}", 
+                println!("[main] Process status - Main helper: {}, VLC helper: {} (window ID: {:?}), Browser helper: {} (window ID: {:?})", 
                     if helper_manager.is_process_running() { "running" } else { "stopped" },
                     if vlc_helper_manager.is_process_running() { "running" } else { "stopped" },
-                    if browser_helper_manager.is_process_running() { "running" } else { "stopped" }
+                    current_vlc_window_id,
+                    if browser_helper_manager.is_process_running() { "running" } else { "stopped" },
+                    current_browser_window_id
                 );
             }
         }
