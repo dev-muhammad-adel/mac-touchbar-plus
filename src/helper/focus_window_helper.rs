@@ -98,6 +98,34 @@ const MAX_RETRIES: u32 = 10;
 const MAX_CACHE_SIZE: usize = 1000; // Max window classes in cache
 const CACHE_CLEANUP_INTERVAL: Duration = Duration::from_secs(300); // 5 minutes
 
+// Window information structure
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowInfo {
+    pub class: String,
+    pub window_id: Option<u64>,
+}
+
+impl WindowInfo {
+    pub fn new(class: String, window_id: Option<u64>) -> Self {
+        Self { class, window_id }
+    }
+    
+    pub fn desktop() -> Self {
+        Self {
+            class: "Desktop".to_string(),
+            window_id: Some(0),
+        }
+    }
+    
+    pub fn to_string(&self) -> String {
+        if let Some(id) = self.window_id {
+            format!("{}:{}", self.class, id)
+        } else {
+            self.class.clone()
+        }
+    }
+}
+
 type Result<T> = std::result::Result<T, FocusHelperError>;
 
 // ============================================================================
@@ -157,13 +185,7 @@ impl LruWindowCache {
         }
     }
     
-    fn len(&self) -> usize {
-        self.cache.len()
-    }
-    
-    fn clear(&mut self) {
-        self.cache.clear();
-    }
+
 }
 
 // ============================================================================
@@ -171,14 +193,12 @@ impl LruWindowCache {
 // ============================================================================
 
 struct ThreadSafeState {
-    last_class: Arc<AtomicBool>, // Using AtomicBool as a simple flag for now
     shutdown_requested: Arc<AtomicBool>,
 }
 
 impl ThreadSafeState {
     fn new() -> Self {
         Self {
-            last_class: Arc::new(AtomicBool::new(false)),
             shutdown_requested: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -193,21 +213,12 @@ impl ThreadSafeState {
 }
 
 // Bounded channel with backpressure handling
-fn create_bounded_channel() -> (mpsc::Sender<String>, mpsc::Receiver<String>) {
+fn create_bounded_channel() -> (mpsc::Sender<WindowInfo>, mpsc::Receiver<WindowInfo>) {
     // Use a bounded channel to prevent memory issues
     mpsc::channel()
 }
 
-// Channel with backpressure handling (simplified version)
-fn send_with_backpressure(tx: &mpsc::Sender<String>, data: String) -> Result<()> {
-    match tx.send(data) {
-        Ok(_) => Ok(()),
-        Err(mpsc::SendError(_)) => {
-            eprintln!("[helper] Warning: Channel full, dropping window change event");
-            Ok(()) // Don't fail, just log and continue
-        }
-    }
-}
+
 
 
 
@@ -216,8 +227,8 @@ fn send_with_backpressure(tx: &mpsc::Sender<String>, data: String) -> Result<()>
 // ============================================================================
 
 trait WindowMonitor: Send {
-    fn get_initial_window_class(&self) -> Result<String>;
-    fn run_event_monitor(&self, tx: mpsc::Sender<String>) -> Result<()>;
+    fn get_initial_window_info(&self) -> Result<WindowInfo>;
+    fn run_event_monitor(&self, tx: mpsc::Sender<WindowInfo>) -> Result<()>;
 }
 
 // ============================================================================
@@ -245,9 +256,9 @@ impl EventRunner {
         // Create communication channel with backpressure handling
         let (tx, rx) = create_bounded_channel();
         
-        // Get initial window class
-        let initial_class = monitor.get_initial_window_class()?;
-        self.write_to_socket(&mut stream, &initial_class)?;
+        // Get initial window info
+        let initial_info = monitor.get_initial_window_info()?;
+        self.write_to_socket(&mut stream, &initial_info.to_string())?;
         
         // Spawn monitor thread with shutdown capability
         let monitor_thread = self.spawn_monitor_thread(monitor, tx)?;
@@ -293,7 +304,7 @@ impl EventRunner {
         }
     }
 
-    fn spawn_monitor_thread(&self, monitor: Box<dyn WindowMonitor>, tx: mpsc::Sender<String>) -> Result<thread::JoinHandle<()>> {
+    fn spawn_monitor_thread(&self, monitor: Box<dyn WindowMonitor>, tx: mpsc::Sender<WindowInfo>) -> Result<thread::JoinHandle<()>> {
         let tx_clone = tx.clone();
         let _shutdown_flag = self.state.shutdown_requested.clone();
         
@@ -305,8 +316,8 @@ impl EventRunner {
         Ok(monitor_thread)
     }
 
-    fn run_event_loop(&mut self, stream: &mut UnixStream, rx: mpsc::Receiver<String>) -> Result<()> {
-        let mut last_class = String::new();
+    fn run_event_loop(&mut self, stream: &mut UnixStream, rx: mpsc::Receiver<WindowInfo>) -> Result<()> {
+        let mut last_info = WindowInfo::desktop();
         
         loop {
             // Check for shutdown request
@@ -317,16 +328,16 @@ impl EventRunner {
             
             // Use pure blocking recv - no polling
             match rx.recv() {
-                Ok(class) => {
-                    if class != last_class {
+                Ok(info) => {
+                    if info != last_info {
                         eprintln!("[helper] Window focus changed from '{}' to '{}'", 
-                                 last_class, class);
+                                 last_info.to_string(), info.to_string());
                         
-                        if let Err(e) = self.write_to_socket(stream, &class) {
+                        if let Err(e) = self.write_to_socket(stream, &info.to_string()) {
                             eprintln!("[helper] Socket write error: {}", e);
                         }
                         
-                        last_class = class;
+                        last_info = info;
                     }
                 }
                 Err(mpsc::RecvError) => {
@@ -450,23 +461,23 @@ impl X11WindowMonitor {
         None
     }
     
-    fn get_active_window_class(&mut self) -> Option<String> {
+    fn get_active_window_info(&mut self) -> Option<WindowInfo> {
         let active_window = self.get_active_window()?;
         
         if active_window == 0 {
             eprintln!("[helper] No active window (empty workspace)");
-            return Some("Desktop".to_string());
+            return Some(WindowInfo::desktop());
         }
         
         if let Some(class) = self.get_window_class(active_window) {
             if self.active_window != Some(active_window) {
                 self.active_window = Some(active_window);
             }
-            return Some(class);
+            return Some(WindowInfo::new(class, Some(active_window as u64)));
         }
         
         eprintln!("[helper] Could not get window class for window {}, using Desktop", active_window);
-        Some("Desktop".to_string())
+        Some(WindowInfo::desktop())
     }
     
     fn setup_event_listening(&mut self) -> Result<()> {
@@ -481,7 +492,7 @@ impl X11WindowMonitor {
         Ok(())
     }
     
-    fn wait_for_focus_change(&mut self) -> Result<Option<String>> {
+    fn wait_for_focus_change(&mut self) -> Result<Option<WindowInfo>> {
         // Use pure blocking event wait - no polling
         match self.conn.wait_for_event() {
             Ok(event) => {
@@ -489,7 +500,7 @@ impl X11WindowMonitor {
                     x11rb::protocol::Event::PropertyNotify(ev) => {
                         if ev.atom == self.net_active_window_atom {
                             eprintln!("[helper] Active window property changed!");
-                            return Ok(self.get_active_window_class());
+                            return Ok(self.get_active_window_info());
                         }
                     }
                     _ => {}
@@ -505,26 +516,26 @@ impl X11WindowMonitor {
 }
 
 impl WindowMonitor for X11WindowMonitor {
-    fn get_initial_window_class(&self) -> Result<String> {
+    fn get_initial_window_info(&self) -> Result<WindowInfo> {
         let mut monitor = X11WindowMonitor::new()?;
         monitor.setup_event_listening()?;
         
-        Ok(monitor.get_active_window_class().unwrap_or_else(|| "Desktop".to_string()))
+        Ok(monitor.get_active_window_info().unwrap_or_else(|| WindowInfo::desktop()))
     }
     
-    fn run_event_monitor(&self, tx: mpsc::Sender<String>) -> Result<()> {
+    fn run_event_monitor(&self, tx: mpsc::Sender<WindowInfo>) -> Result<()> {
         let mut monitor = X11WindowMonitor::new()?;
         monitor.setup_event_listening()?;
         
-        let mut last_class = monitor.get_active_window_class().unwrap_or_else(|| "Desktop".to_string());
-        let _ = tx.send(last_class.clone());
+        let mut last_info = monitor.get_active_window_info().unwrap_or_else(|| WindowInfo::desktop());
+        let _ = tx.send(last_info.clone());
         
         loop {
             match monitor.wait_for_focus_change() {
-                Ok(Some(new_class)) => {
-                    if new_class != last_class {
-                        let _ = tx.send(new_class.clone());
-                        last_class = new_class;
+                Ok(Some(new_info)) => {
+                    if new_info != last_info {
+                        let _ = tx.send(new_info.clone());
+                        last_info = new_info;
                     }
                 }
                 Ok(None) => {
@@ -553,7 +564,9 @@ impl SwayWindowMonitor {
         Ok(Self)
     }
     
-    fn get_active_window_class() -> Option<String> {
+
+    
+    fn get_active_window_info() -> Option<WindowInfo> {
         if let Ok(mut connection) = swayipc::Connection::new() {
             if let Ok(tree) = connection.get_tree() {
                 if let Some(focused) = tree.find_focused(|n| n.focused) {
@@ -561,51 +574,51 @@ impl SwayWindowMonitor {
                         if let Some(window_properties) = &focused.window_properties {
                             if let Some(class) = &window_properties.class {
                                 if !class.is_empty() && class != "null" {
-                                    return Some(class.clone());
+                                    return Some(WindowInfo::new(class.clone(), Some(focused.id as u64)));
                                 }
                             }
                             if let Some(instance) = &window_properties.instance {
                                 if !instance.is_empty() && instance != "null" {
-                                    return Some(instance.clone());
+                                    return Some(WindowInfo::new(instance.clone(), Some(focused.id as u64)));
                                 }
                             }
                         }
                         
                         if let Some(app_id) = &focused.app_id {
                             if !app_id.is_empty() && app_id != "null" {
-                                return Some(app_id.clone());
+                                return Some(WindowInfo::new(app_id.clone(), Some(focused.id as u64)));
                             }
                         }
                         
                         if let Some(name) = &focused.name {
                             if !name.is_empty() && name != "null" {
-                                return Some(name.clone());
+                                return Some(WindowInfo::new(name.clone(), Some(focused.id as u64)));
                             }
                         }
                     } else {
-                        return Some("Desktop".to_string());
+                        return Some(WindowInfo::desktop());
                     }
                 }
             }
         }
-        Some("Desktop".to_string())
+        Some(WindowInfo::desktop())
     }
     
-    fn run_event_monitor(tx: mpsc::Sender<String>) -> Result<()> {
+    fn run_event_monitor(tx: mpsc::Sender<WindowInfo>) -> Result<()> {
         let connection = swayipc::Connection::new()?;
         
         let events = connection.subscribe(&[swayipc::EventType::Workspace, swayipc::EventType::Window])?;
         
-        if let Some(class) = Self::get_active_window_class() {
-            let _ = tx.send(class);
+        if let Some(info) = Self::get_active_window_info() {
+            let _ = tx.send(info);
         }
         
         // Use pure blocking iterator - no polling
         for event in events {
             match event? {
                 swayipc::reply::Event::Workspace(_) | swayipc::reply::Event::Window(_) => {
-                    if let Some(class) = Self::get_active_window_class() {
-                        let _ = tx.send(class);
+                    if let Some(info) = Self::get_active_window_info() {
+                        let _ = tx.send(info);
                     }
                 }
                 _ => {}
@@ -617,11 +630,11 @@ impl SwayWindowMonitor {
 }
 
 impl WindowMonitor for SwayWindowMonitor {
-    fn get_initial_window_class(&self) -> Result<String> {
-        Ok(Self::get_active_window_class().unwrap_or_else(|| "Desktop".to_string()))
+    fn get_initial_window_info(&self) -> Result<WindowInfo> {
+        Ok(Self::get_active_window_info().unwrap_or_else(|| WindowInfo::desktop()))
     }
     
-    fn run_event_monitor(&self, tx: mpsc::Sender<String>) -> Result<()> {
+    fn run_event_monitor(&self, tx: mpsc::Sender<WindowInfo>) -> Result<()> {
         Self::run_event_monitor(tx)
     }
 }
@@ -647,34 +660,85 @@ impl HyprlandWindowMonitor {
         Ok(format!("{}/hypr/{}/.socket2.sock", runtime_dir, signature))
     }
     
-    fn run_event_monitor(tx: mpsc::Sender<String>) -> Result<()> {
+    fn run_event_monitor(tx: mpsc::Sender<WindowInfo>) -> Result<()> {
         let socket_path = Self::get_socket_path()?;
         eprintln!("[helper] Connecting to Hyprland socket: {}", socket_path);
         
         let mut stream = UnixStream::connect(&socket_path)?;
         // Keep socket blocking for pure event-driven behavior
         stream.write_all(b"subscribe\n")?;
+        eprintln!("[helper] Subscribed to events, waiting for window changes...");
         
         use std::io::{BufRead, BufReader};
         let reader = BufReader::new(stream);
+        
+        let mut last_window_id: Option<String> = None;
+        let mut last_window_class: Option<String> = None;
         
         // Use pure blocking line reading - no polling
         for line in reader.lines() {
             match line {
                 Ok(line) => {
-                        if line.starts_with("activewindow>>") {
-                            let window_name = if let Some(pos) = line.find(',') {
-                                &line[14..pos]
-                            } else {
-                                &line[14..]
-                            };
+                    eprintln!("[helper] Event received: '{}'", line);
+                    
+                    if line.starts_with("activewindowv2>>") {
+                        // Extract window ID from activewindowv2 event
+                        let window_id = &line[16..];
+                        eprintln!("[helper] activewindowv2>> event, ID: '{}'", window_id);
+                        
+                        if !window_id.trim().is_empty() {
+                            last_window_id = Some(window_id.to_string());
+                            eprintln!("[helper] Set last_window_id to: '{}'", window_id);
                             
-                            if window_name.trim().is_empty() {
-                                let _ = tx.send("Desktop".to_string());
+                            // If we have both class and ID now, send the complete info
+                            if let Some(class) = &last_window_class {
+                                eprintln!("[helper] We have class '{}', sending complete info", class);
+                                if let Ok(window_id_u64) = u64::from_str_radix(window_id, 16) {
+                                    let _ = tx.send(WindowInfo::new(class.clone(), Some(window_id_u64)));
+                                    eprintln!("[helper] Sent WindowInfo: {}:{}", class, window_id_u64);
+                                }
                             } else {
-                                let _ = tx.send(window_name.to_string());
+                                eprintln!("[helper] No class yet, waiting for activewindow>> event");
                             }
                         }
+                    } else if line.starts_with("activewindow>>") {
+                        // Extract window class from activewindow event
+                        let window_info = if let Some(pos) = line.find(',') {
+                            &line[14..pos]
+                        } else {
+                            &line[14..]
+                        };
+                        
+                        eprintln!("[helper] activewindow>> event, class: '{}'", window_info);
+                        
+                        if window_info.trim().is_empty() {
+                            eprintln!("[helper] Empty window info, sending Desktop");
+                            last_window_id = None;
+                            last_window_class = None;
+                            let _ = tx.send(WindowInfo::desktop());
+                        } else {
+                            last_window_class = Some(window_info.to_string());
+                            eprintln!("[helper] Set last_window_class to: '{}'", window_info);
+                            
+                            // Always wait for both class and ID before sending
+                            if let Some(id) = &last_window_id {
+                                eprintln!("[helper] We have ID '{}', sending complete info", id);
+                                // Convert hex string to u64
+                                if let Ok(window_id_u64) = u64::from_str_radix(id, 16) {
+                                    let _ = tx.send(WindowInfo::new(window_info.to_string(), Some(window_id_u64)));
+                                    eprintln!("[helper] Sent WindowInfo: {}:{}", window_info, window_id_u64);
+                                } else {
+                                    eprintln!("[helper] Failed to parse ID, waiting for valid ID");
+                                    // Don't send anything until we have a valid ID
+                                }
+                            } else {
+                                eprintln!("[helper] No ID yet, waiting for activewindowv2>> event");
+                                // Don't send anything until we have both class and ID
+                            }
+                        }
+                    } else {
+                        eprintln!("[helper] Unknown event type: '{}'", line);
+                    }
                 }
                 Err(e) => {
                     eprintln!("[helper] Error reading from Hyprland socket: {:?}", e);
@@ -688,11 +752,80 @@ impl HyprlandWindowMonitor {
 }
 
 impl WindowMonitor for HyprlandWindowMonitor {
-    fn get_initial_window_class(&self) -> Result<String> {
-        Ok("Desktop".to_string())
+    fn get_initial_window_info(&self) -> Result<WindowInfo> {
+        eprintln!("[helper] Getting initial window info for Hyprland...");
+        
+        // Try to get current window info using hyprctl (more reliable than socket)
+        let output = std::process::Command::new("hyprctl")
+            .arg("activewindow")
+            .output();
+        
+        match output {
+            Ok(output) => {
+                if output.status.success() {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    eprintln!("[helper] hyprctl output: {}", stdout);
+                    
+                    let lines: Vec<&str> = stdout.lines().collect();
+                    
+                    // Parse hyprctl activewindow output
+                    let mut window_class = None;
+                    let mut window_id = None;
+                    
+                    for line in lines {
+                        let line = line.trim();
+                        eprintln!("[helper] Parsing line: '{}'", line);
+                        
+                        if line.starts_with("class:") {
+                            let class = line[6..].trim();
+                            eprintln!("[helper] Found class: '{}'", class);
+                            if !class.is_empty() && class != "null" {
+                                window_class = Some(class.to_string());
+                            }
+                        } else if line.starts_with("Window") && line.contains("->") {
+                            // Extract hex ID from "Window 5626b6b0a690 -> ..."
+                            if let Some(start) = line.find("Window ") {
+                                if let Some(end) = line[start..].find(" ->") {
+                                    let id_str = &line[start + 7..start + end];
+                                    eprintln!("[helper] Found window ID: '{}'", id_str);
+                                    if let Ok(id) = u64::from_str_radix(id_str, 16) {
+                                        window_id = Some(id);
+                                        eprintln!("[helper] Parsed window ID: {}", id);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    eprintln!("[helper] Final window_class: {:?}, window_id: {:?}", window_class, window_id);
+                    
+                    if let Some(class) = window_class {
+                        if class.is_empty() || class == "null" {
+                            eprintln!("[helper] Returning Desktop (empty/null class)");
+                            return Ok(WindowInfo::desktop());
+                        } else {
+                            eprintln!("[helper] Returning WindowInfo: class='{}', id={:?}", class, window_id);
+                            return Ok(WindowInfo::new(class, window_id));
+                        }
+                    } else {
+                        eprintln!("[helper] No window class found, returning Desktop");
+                        return Ok(WindowInfo::desktop());
+                    }
+                } else {
+                    eprintln!("[helper] hyprctl command failed with status: {}", output.status);
+                }
+            }
+            Err(e) => {
+                eprintln!("[helper] hyprctl command error: {:?}", e);
+            }
+        }
+        
+        eprintln!("[helper] Fallback: returning Desktop");
+        // Fallback to desktop if we can't get window info
+        Ok(WindowInfo::desktop())
     }
     
-    fn run_event_monitor(&self, tx: mpsc::Sender<String>) -> Result<()> {
+    fn run_event_monitor(&self, tx: mpsc::Sender<WindowInfo>) -> Result<()> {
         Self::run_event_monitor(tx)
     }
 }
@@ -708,8 +841,9 @@ impl GnomeWindowMonitor {
         Ok(Self)
     }
     
-    fn get_initial_focused_class() -> Option<String> {
-        let output = std::process::Command::new("gdbus")
+    fn get_initial_focused_info() -> Option<WindowInfo> {
+        // Get both window class and ID from WindowMonitorPro extension
+        let class_output = std::process::Command::new("gdbus")
             .arg("call")
             .arg("--session")
             .arg("--dest")
@@ -720,31 +854,87 @@ impl GnomeWindowMonitor {
             .arg("org.gnome.Shell.Extensions.WindowMonitorPro.FocusClass")
             .output();
         
-        match output {
+        let id_output = std::process::Command::new("gdbus")
+            .arg("call")
+            .arg("--session")
+            .arg("--dest")
+            .arg("org.gnome.Shell")
+            .arg("--object-path")
+            .arg("/org/gnome/Shell/Extensions/WindowMonitorPro")
+            .arg("--method")
+            .arg("org.gnome.Shell.Extensions.WindowMonitorPro.FocusID")
+            .output();
+        
+        let class = match class_output {
             Ok(output) => {
                 if output.status.success() {
                     let stdout = String::from_utf8_lossy(&output.stdout);
                     if let Some(start) = stdout.find("('") {
                         if let Some(end) = stdout[start..].find("',") {
-                            let class = &stdout[start + 2..start + end];
-                            if class.is_empty() {
-                                return Some("Desktop".to_string());
-                            } else if class != "null" {
-                                return Some(class.to_string());
+                            let class_str = &stdout[start + 2..start + end];
+                            if class_str.is_empty() || class_str == "null" {
+                                return Some(WindowInfo::desktop());
+                            } else {
+                                Some(class_str.to_string())
                             }
+                        } else {
+                            None
                         }
+                    } else {
+                        None
                     }
+                } else {
+                    None
                 }
             }
             Err(e) => {
                 eprintln!("[helper] FocusClass command error: {:?}", e);
+                None
+            }
+        };
+        
+        let window_id = match id_output {
+            Ok(output) => {
+                if output.status.success() {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    if let Some(start) = stdout.find("('") {
+                        if let Some(end) = stdout[start..].find("',") {
+                            let id_str = &stdout[start + 2..start + end];
+                            id_str.parse::<u64>().ok()
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            Err(e) => {
+                eprintln!("[helper] FocusID command error: {:?}", e);
+                None
+            }
+        };
+        
+        match (class, window_id) {
+            (Some(class), Some(id)) => {
+                println!("[helper] GNOME: Got window class '{}' with ID {}", class, id);
+                Some(WindowInfo::new(class, Some(id)))
+            }
+            (Some(class), None) => {
+                println!("[helper] GNOME: Got window class '{}' but no ID", class);
+                Some(WindowInfo::new(class, None))
+            }
+            (None, _) => {
+                eprintln!("[helper] GNOME: WindowMonitorPro extension not available or failed");
+                eprintln!("[helper] Install from: https://extensions.gnome.org/extension/6027/window-monitor-pro/");
+                Some(WindowInfo::new("GNOME: Install WindowMonitorPro Extension".to_string(), None))
             }
         }
-        
-        Some("Install WindowMonitorPro".to_string())
     }
     
-    async fn run_dbus_event_monitor(tx: mpsc::Sender<String>) -> Result<()> {
+    async fn run_dbus_event_monitor(tx: mpsc::Sender<WindowInfo>) -> Result<()> {
         let connection = ZbusConnection::session().await?;
         
         let mut stream = MessageStream::from(&connection);
@@ -762,30 +952,32 @@ impl GnomeWindowMonitor {
             }
             Err(_) => {
                 eprintln!("[helper] Failed to subscribe to WindowMonitorPro signals");
-                let _ = tx.send("Install WindowMonitorPro".to_string());
+                let _ = tx.send(WindowInfo::new("Install WindowMonitorPro".to_string(), None));
                 return Ok(());
             }
         }
         
-        let mut last_class = String::new();
+        let mut last_info = WindowInfo::desktop();
         
         // Use blocking stream iteration to prevent CPU spinning
         while let Some(msg) = stream.next().await {
             if let Ok(msg) = msg {
                 if let Some(interface) = msg.interface() {
                     if interface.as_str() == "org.gnome.Shell.Extensions.WindowMonitorPro" {
-                        if let Ok((_window_id, _window_title, window_class, _window_pid)) = 
+                        if let Ok((window_id_str, _window_title, window_class, _window_pid)) = 
                             msg.body::<(String, String, String, String)>() {
                             
-                            let display_class = if window_class.is_empty() {
-                                "Desktop".to_string()
+                            let display_info = if window_class.is_empty() {
+                                WindowInfo::desktop()
                             } else {
-                                window_class
+                                // Parse window ID from the signal
+                                let window_id = window_id_str.parse::<u64>().ok();
+                                WindowInfo::new(window_class, window_id)
                             };
                             
-                            if display_class != last_class {
-                                let _ = tx.send(display_class.clone());
-                                last_class = display_class;
+                            if display_info != last_info {
+                                let _ = tx.send(display_info.clone());
+                                last_info = display_info;
                             }
                         }
                     }
@@ -798,9 +990,9 @@ impl GnomeWindowMonitor {
         Ok(())
     }
     
-    fn run_event_monitor(tx: mpsc::Sender<String>) -> Result<()> {
-        if let Some(initial_class) = Self::get_initial_focused_class() {
-            let _ = tx.send(initial_class);
+    fn run_event_monitor(tx: mpsc::Sender<WindowInfo>) -> Result<()> {
+        if let Some(initial_info) = Self::get_initial_focused_info() {
+            let _ = tx.send(initial_info);
         }
         
         let rt = tokio::runtime::Runtime::new()
@@ -813,11 +1005,11 @@ impl GnomeWindowMonitor {
 }
 
 impl WindowMonitor for GnomeWindowMonitor {
-    fn get_initial_window_class(&self) -> Result<String> {
-        Ok(Self::get_initial_focused_class().unwrap_or_else(|| "Desktop".to_string()))
+    fn get_initial_window_info(&self) -> Result<WindowInfo> {
+        Ok(Self::get_initial_focused_info().unwrap_or_else(|| WindowInfo::desktop()))
     }
     
-    fn run_event_monitor(&self, tx: mpsc::Sender<String>) -> Result<()> {
+    fn run_event_monitor(&self, tx: mpsc::Sender<WindowInfo>) -> Result<()> {
         Self::run_event_monitor(tx)
     }
 }
@@ -833,7 +1025,7 @@ impl NiriWindowMonitor {
         Ok(Self)
     }
     
-    fn get_active_window_class() -> Option<String> {
+    fn get_active_window_info() -> Option<WindowInfo> {
         let output = std::process::Command::new("niri")
             .arg("msg")
             .arg("focused-window")
@@ -843,22 +1035,49 @@ impl NiriWindowMonitor {
         match output {
             Ok(output) => {
                 if !output.status.success() {
-                    return Some("Desktop".to_string());
+                    eprintln!("[helper] Niri command failed with status: {:?}", output.status);
+                    return Some(WindowInfo::desktop());
                 }
                 
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let lines: Vec<&str> = stdout.lines().collect();
                 
+                eprintln!("[helper] Niri output lines: {:?}", lines);
+                
                 if lines.is_empty() || !lines[0].contains("Window ID") {
-                    return Some("Desktop".to_string());
+                    eprintln!("[helper] No Window ID found in first line: {:?}", lines.get(0));
+                    return Some(WindowInfo::desktop());
+                }
+                
+                // Try to extract window ID first
+                let mut window_id = None;
+                for line in &lines {
+                    if line.trim().starts_with("Window ID") {
+                        // Handle both "Window ID:" and "Window ID 4:" formats
+                        let parts: Vec<&str> = line.split_whitespace().collect();
+                        eprintln!("[helper] Parsing Window ID line: {:?}", parts);
+                        if parts.len() >= 3 && parts[0] == "Window" && parts[1] == "ID" {
+                            let id_str = parts[2].trim_end_matches(':');
+                            eprintln!("[helper] Attempting to parse ID: '{}'", id_str);
+                            if let Ok(id) = id_str.parse::<u64>() {
+                                window_id = Some(id);
+                                eprintln!("[helper] Successfully parsed window ID: {}", id);
+                                break;
+                            } else {
+                                eprintln!("[helper] Failed to parse ID: '{}'", id_str);
+                            }
+                        }
+                    }
                 }
                 
                 for line in &lines {
                     if line.trim().starts_with("App ID:") {
                         if let Some(app_id) = line.split("App ID:").nth(1) {
                             let app_id = app_id.trim().trim_matches('"');
+                            eprintln!("[helper] Found App ID: '{}'", app_id);
                             if !app_id.is_empty() && app_id != "null" {
-                                return Some(app_id.to_string());
+                                eprintln!("[helper] Returning WindowInfo with App ID: '{}' and window_id: {:?}", app_id, window_id);
+                                return Some(WindowInfo::new(app_id.to_string(), window_id));
                             }
                         }
                     }
@@ -869,7 +1088,7 @@ impl NiriWindowMonitor {
                         if let Some(title) = line.split("Title:").nth(1) {
                             let title = title.trim().trim_matches('"');
                             if !title.is_empty() && title != "null" {
-                                return Some(title.to_string());
+                                return Some(WindowInfo::new(title.to_string(), window_id));
                             }
                         }
                     }
@@ -880,12 +1099,12 @@ impl NiriWindowMonitor {
             }
         }
         
-        Some("Desktop".to_string())
+        Some(WindowInfo::desktop())
     }
     
-    fn run_event_monitor(tx: mpsc::Sender<String>) -> Result<()> {
-        if let Some(class) = Self::get_active_window_class() {
-            let _ = tx.send(class);
+    fn run_event_monitor(tx: mpsc::Sender<WindowInfo>) -> Result<()> {
+        if let Some(info) = Self::get_active_window_info() {
+            let _ = tx.send(info);
         }
         
         let child = std::process::Command::new("niri")
@@ -904,8 +1123,8 @@ impl NiriWindowMonitor {
                     for line in reader.lines() {
                         if let Ok(line) = line {
                     if line.contains("Windows changed:") || line.contains("Window focus changed:") {
-                        if let Some(class) = Self::get_active_window_class() {
-                            let _ = tx.send(class);
+                        if let Some(info) = Self::get_active_window_info() {
+                            let _ = tx.send(info);
                         }
                     }
                         }
@@ -917,11 +1136,11 @@ impl NiriWindowMonitor {
 }
 
 impl WindowMonitor for NiriWindowMonitor {
-    fn get_initial_window_class(&self) -> Result<String> {
-        Ok(Self::get_active_window_class().unwrap_or_else(|| "Desktop".to_string()))
+    fn get_initial_window_info(&self) -> Result<WindowInfo> {
+        Ok(Self::get_active_window_info().unwrap_or_else(|| WindowInfo::desktop()))
     }
     
-    fn run_event_monitor(&self, tx: mpsc::Sender<String>) -> Result<()> {
+    fn run_event_monitor(&self, tx: mpsc::Sender<WindowInfo>) -> Result<()> {
         Self::run_event_monitor(tx)
     }
 }
@@ -983,5 +1202,6 @@ fn main() -> Result<()> {
     runner.run_with_monitor(monitor)
 }
 
+ 
  
  

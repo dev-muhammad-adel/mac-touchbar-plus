@@ -743,6 +743,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
     let mut vlc_helper_stream: Option<UnixStream> = None;
     let mut vlc_helper_reader: Option<BufReader<UnixStream>> = None;
     let mut current_window_class: Option<String> = None;
+    let mut current_window_id: Option<u64> = None;
     let mut needs_complete_redraw = false;
     let mut app_layer3_slide_anim = Animation::new(0.18, 16.0); // 60fps for smooth slide
     let mut app_ui_manager = AppUiManager::new();
@@ -1014,10 +1015,31 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                    if let Ok(text) = std::str::from_utf8(data) {
                                        println!("[main] Helper data as text: {}", text);
                                        for part in text.split('\n') {
-                                           let class = part.trim();
-                                           if class.is_empty() {
+                                           let part = part.trim();
+                                           if part.is_empty() {
                                                continue;
                                            }
+                                           
+                                           // Parse the new "class:id" format
+                                           let (class, window_id) = if let Some(colon_pos) = part.find(':') {
+                                               let class_part = &part[..colon_pos];
+                                               let id_part = &part[colon_pos + 1..];
+                                               
+                                               // Try to parse the window ID
+                                               let parsed_id = if id_part == "0" {
+                                                   // Desktop window
+                                                   Some(0)
+                                               } else {
+                                                   id_part.parse::<u64>().ok()
+                                               };
+                                               
+                                               (class_part, parsed_id)
+                                           } else {
+                                               // Fallback: no ID, just class
+                                               (part, None)
+                                           };
+                                           
+                                           println!("[main] Parsed window info - class: '{}', id: {:?}", class, window_id);
                                            
                                            // Check if VLC window focus changed
                                            let new_vlc_focused = class == "vlc";
@@ -1138,8 +1160,9 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                }
                                            }
                                            
-                                           // Update current window class AFTER all the logic
+                                           // Update current window class and ID AFTER all the logic
                                            current_window_class = Some(class.to_string());
+                                           current_window_id = window_id;
                                            
                                            // Update app UI manager with new window class
                                            app_ui_manager.update_app(&class).await;
