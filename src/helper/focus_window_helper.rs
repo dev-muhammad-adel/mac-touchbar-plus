@@ -103,26 +103,34 @@ const CACHE_CLEANUP_INTERVAL: Duration = Duration::from_secs(300); // 5 minutes
 pub struct WindowInfo {
     pub class: String,
     pub window_id: Option<u64>,
+    pub pid: Option<u32>,
 }
 
 impl WindowInfo {
-    pub fn new(class: String, window_id: Option<u64>) -> Self {
-        Self { class, window_id }
+    pub fn new(class: String, window_id: Option<u64>, pid: Option<u32>) -> Self {
+        Self { class, window_id, pid }
     }
     
     pub fn desktop() -> Self {
         Self {
             class: "Desktop".to_string(),
             window_id: Some(0),
+            pid: Some(0),
         }
     }
     
     pub fn to_string(&self) -> String {
+        let mut result = self.class.clone();
+        
         if let Some(id) = self.window_id {
-            format!("{}:{}", self.class, id)
-        } else {
-            self.class.clone()
+            result.push_str(&format!(":{}", id));
         }
+        
+        if let Some(pid) = self.pid {
+            result.push_str(&format!(":{}", pid));
+        }
+        
+        result
     }
 }
 
@@ -429,6 +437,49 @@ impl X11WindowMonitor {
         None
     }
     
+    fn get_window_pid(&self, window: Window) -> Option<u32> {
+        // Get _NET_WM_PID property - first try to intern the atom
+        let net_wm_pid_atom = match self.conn.intern_atom(false, b"_NET_WM_PID") {
+            Ok(cookie) => match cookie.reply() {
+                Ok(reply) => reply.atom,
+                Err(_) => {
+                    eprintln!("[helper] X11: Failed to intern _NET_WM_PID atom");
+                    return None;
+                },
+            },
+            Err(_) => {
+                eprintln!("[helper] X11: Failed to intern _NET_WM_PID atom");
+                return None;
+            },
+        };
+        
+        let cookie = self.conn.get_property(
+            false,
+            window,
+            net_wm_pid_atom,
+            xproto::AtomEnum::CARDINAL,
+            0,
+            4,
+        );
+        
+        match cookie.ok()?.reply() {
+            Ok(reply) => {
+                if reply.value.len() >= 4 {
+                    let pid = u32::from_ne_bytes([
+                        reply.value[0],
+                        reply.value[1],
+                        reply.value[2],
+                        reply.value[3],
+                    ]);
+                    return Some(pid);
+                }
+            }
+            Err(_) => {}
+        }
+        
+        None
+    }
+    
     fn get_active_window(&mut self) -> Option<Window> {
         let cookie = self.conn.get_property(
             false,
@@ -473,7 +524,8 @@ impl X11WindowMonitor {
             if self.active_window != Some(active_window) {
                 self.active_window = Some(active_window);
             }
-            return Some(WindowInfo::new(class, Some(active_window as u64)));
+            let pid = self.get_window_pid(active_window);
+            return Some(WindowInfo::new(class, Some(active_window as u64), pid));
         }
         
         eprintln!("[helper] Could not get window class for window {}, using Desktop", active_window);
@@ -574,25 +626,25 @@ impl SwayWindowMonitor {
                         if let Some(window_properties) = &focused.window_properties {
                             if let Some(class) = &window_properties.class {
                                 if !class.is_empty() && class != "null" {
-                                    return Some(WindowInfo::new(class.clone(), Some(focused.id as u64)));
+                                    return Some(WindowInfo::new(class.clone(), Some(focused.id as u64), focused.pid.map(|p| p as u32)));
                                 }
                             }
                             if let Some(instance) = &window_properties.instance {
                                 if !instance.is_empty() && instance != "null" {
-                                    return Some(WindowInfo::new(instance.clone(), Some(focused.id as u64)));
+                                    return Some(WindowInfo::new(instance.clone(), Some(focused.id as u64), focused.pid.map(|p| p as u32)));
                                 }
                             }
                         }
                         
                         if let Some(app_id) = &focused.app_id {
                             if !app_id.is_empty() && app_id != "null" {
-                                return Some(WindowInfo::new(app_id.clone(), Some(focused.id as u64)));
+                                return Some(WindowInfo::new(app_id.clone(), Some(focused.id as u64), focused.pid.map(|p| p as u32)));
                             }
                         }
                         
                         if let Some(name) = &focused.name {
                             if !name.is_empty() && name != "null" {
-                                return Some(WindowInfo::new(name.clone(), Some(focused.id as u64)));
+                                return Some(WindowInfo::new(name.clone(), Some(focused.id as u64), focused.pid.map(|p| p as u32)));
                             }
                         }
                     } else {
@@ -660,6 +712,42 @@ impl HyprlandWindowMonitor {
         Ok(format!("{}/hypr/{}/.socket2.sock", runtime_dir, signature))
     }
     
+    fn get_window_pid(_window_id: u64) -> Option<u32> {
+        // Use hyprctl to get PID for a specific window
+        let output = std::process::Command::new("hyprctl")
+            .arg("activewindow")
+            .output();
+        
+        match output {
+            Ok(output) => {
+                if output.status.success() {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let lines: Vec<&str> = stdout.lines().collect();
+                    
+                    for line in lines {
+                        let line = line.trim();
+                        if line.starts_with("pid:") {
+                            let pid_str = line[4..].trim();
+                            eprintln!("[helper] Found PID line: '{}', extracted: '{}', length: {}", line, pid_str, pid_str.len());
+                            eprintln!("[helper] PID line bytes: {:?}", line.as_bytes());
+                            eprintln!("[helper] Extracted PID bytes: {:?}", pid_str.as_bytes());
+                            eprintln!("[helper] PID line hex: {:02x?}", line.as_bytes());
+                            eprintln!("[helper] Extracted PID hex: {:02x?}", pid_str.as_bytes());
+                            if let Ok(pid) = pid_str.parse::<u32>() {
+                                return Some(pid);
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("[helper] hyprctl command error: {:?}", e);
+            }
+        }
+        
+        None
+    }
+    
     fn run_event_monitor(tx: mpsc::Sender<WindowInfo>) -> Result<()> {
         let socket_path = Self::get_socket_path()?;
         eprintln!("[helper] Connecting to Hyprland socket: {}", socket_path);
@@ -694,8 +782,10 @@ impl HyprlandWindowMonitor {
                             if let Some(class) = &last_window_class {
                                 eprintln!("[helper] We have class '{}', sending complete info", class);
                                 if let Ok(window_id_u64) = u64::from_str_radix(window_id, 16) {
-                                    let _ = tx.send(WindowInfo::new(class.clone(), Some(window_id_u64)));
-                                    eprintln!("[helper] Sent WindowInfo: {}:{}", class, window_id_u64);
+                                    // Get PID for this window
+                                    let pid = Self::get_window_pid(window_id_u64);
+                                    let _ = tx.send(WindowInfo::new(class.clone(), Some(window_id_u64), pid));
+                                    eprintln!("[helper] Sent WindowInfo: {}:{}:{:?}", class, window_id_u64, pid);
                                 }
                             } else {
                                 eprintln!("[helper] No class yet, waiting for activewindow>> event");
@@ -725,8 +815,10 @@ impl HyprlandWindowMonitor {
                                 eprintln!("[helper] We have ID '{}', sending complete info", id);
                                 // Convert hex string to u64
                                 if let Ok(window_id_u64) = u64::from_str_radix(id, 16) {
-                                    let _ = tx.send(WindowInfo::new(window_info.to_string(), Some(window_id_u64)));
-                                    eprintln!("[helper] Sent WindowInfo: {}:{}", window_info, window_id_u64);
+                                    // Get PID for this window
+                                    let pid = Self::get_window_pid(window_id_u64);
+                                    let _ = tx.send(WindowInfo::new(window_info.to_string(), Some(window_id_u64), pid));
+                                    eprintln!("[helper] Sent WindowInfo: {}:{}:{:?}", window_info, window_id_u64, pid);
                                 } else {
                                     eprintln!("[helper] Failed to parse ID, waiting for valid ID");
                                     // Don't send anything until we have a valid ID
@@ -771,6 +863,7 @@ impl WindowMonitor for HyprlandWindowMonitor {
                     // Parse hyprctl activewindow output
                     let mut window_class = None;
                     let mut window_id = None;
+                    let mut window_pid = None;
                     
                     for line in lines {
                         let line = line.trim();
@@ -788,24 +881,30 @@ impl WindowMonitor for HyprlandWindowMonitor {
                                 if let Some(end) = line[start..].find(" ->") {
                                     let id_str = &line[start + 7..start + end];
                                     eprintln!("[helper] Found window ID: '{}'", id_str);
-                                    if let Ok(id) = u64::from_str_radix(id_str, 16) {
-                                        window_id = Some(id);
-                                        eprintln!("[helper] Parsed window ID: {}", id);
-                                    }
+                                                                if let Ok(id) = u64::from_str_radix(id_str, 16) {
+                                window_id = Some(id);
+                                eprintln!("[helper] Parsed window ID: {}", id);
+                            }
                                 }
+                            }
+                        } else if line.starts_with("pid:") {
+                            let pid_str = line[4..].trim();
+                            if let Ok(pid) = pid_str.parse::<u32>() {
+                                window_pid = Some(pid);
+                                eprintln!("[helper] Parsed PID: {}", pid);
                             }
                         }
                     }
                     
-                    eprintln!("[helper] Final window_class: {:?}, window_id: {:?}", window_class, window_id);
+                    eprintln!("[helper] Final window_class: {:?}, window_id: {:?}, window_pid: {:?}", window_class, window_id, window_pid);
                     
                     if let Some(class) = window_class {
                         if class.is_empty() || class == "null" {
                             eprintln!("[helper] Returning Desktop (empty/null class)");
                             return Ok(WindowInfo::desktop());
                         } else {
-                            eprintln!("[helper] Returning WindowInfo: class='{}', id={:?}", class, window_id);
-                            return Ok(WindowInfo::new(class, window_id));
+                            eprintln!("[helper] Returning WindowInfo: class='{}', id={:?}, pid={:?}", class, window_id, window_pid);
+                            return Ok(WindowInfo::new(class, window_id, window_pid));
                         }
                     } else {
                         eprintln!("[helper] No window class found, returning Desktop");
@@ -917,19 +1016,62 @@ impl GnomeWindowMonitor {
             }
         };
         
+        // Get PID using FocusPID method
+        let pid_output = std::process::Command::new("gdbus")
+            .arg("call")
+            .arg("--session")
+            .arg("--dest")
+            .arg("org.gnome.Shell")
+            .arg("--object-path")
+            .arg("/org/gnome/Shell/Extensions/WindowMonitorPro")
+            .arg("--method")
+            .arg("org.gnome.Shell.Extensions.WindowMonitorPro.FocusPID")
+            .output();
+        
+        let window_pid = match pid_output {
+            Ok(output) => {
+                if output.status.success() {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    if let Some(start) = stdout.find("('") {
+                        if let Some(end) = stdout[start..].find("',") {
+                            let pid_str = &stdout[start + 2..start + end];
+                            if let Ok(pid) = pid_str.parse::<u32>() {
+                                eprintln!("[helper] GNOME: Retrieved PID {} from FocusPID", pid);
+                                Some(pid)
+                            } else {
+                                eprintln!("[helper] GNOME: Failed to parse PID from '{}'", pid_str);
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    eprintln!("[helper] GNOME: FocusPID command failed");
+                    None
+                }
+            }
+            Err(e) => {
+                eprintln!("[helper] GNOME: FocusPID command error: {:?}", e);
+                None
+            }
+        };
+        
         match (class, window_id) {
             (Some(class), Some(id)) => {
-                println!("[helper] GNOME: Got window class '{}' with ID {}", class, id);
-                Some(WindowInfo::new(class, Some(id)))
+                println!("[helper] GNOME: Got window class '{}' with ID {} and PID {:?}", class, id, window_pid);
+                Some(WindowInfo::new(class, Some(id), window_pid))
             }
             (Some(class), None) => {
-                println!("[helper] GNOME: Got window class '{}' but no ID", class);
-                Some(WindowInfo::new(class, None))
+                println!("[helper] GNOME: Got window class '{}' but no ID, PID {:?}", class, window_pid);
+                Some(WindowInfo::new(class, None, window_pid))
             }
             (None, _) => {
                 eprintln!("[helper] GNOME: WindowMonitorPro extension not available or failed");
                 eprintln!("[helper] Install from: https://extensions.gnome.org/extension/6027/window-monitor-pro/");
-                Some(WindowInfo::new("GNOME: Install WindowMonitorPro Extension".to_string(), None))
+                Some(WindowInfo::new("GNOME: Install WindowMonitorPro Extension".to_string(), None, window_pid))
             }
         }
     }
@@ -952,7 +1094,8 @@ impl GnomeWindowMonitor {
             }
             Err(_) => {
                 eprintln!("[helper] Failed to subscribe to WindowMonitorPro signals");
-                let _ = tx.send(WindowInfo::new("Install WindowMonitorPro".to_string(), None));
+                // For now, set PID to 0 (will be handled later)
+                let _ = tx.send(WindowInfo::new("Install WindowMonitorPro".to_string(), None, Some(0)));
                 return Ok(());
             }
         }
@@ -964,15 +1107,17 @@ impl GnomeWindowMonitor {
             if let Ok(msg) = msg {
                 if let Some(interface) = msg.interface() {
                     if interface.as_str() == "org.gnome.Shell.Extensions.WindowMonitorPro" {
-                        if let Ok((window_id_str, _window_title, window_class, _window_pid)) = 
+                        if let Ok((window_id_str, _window_title, window_class, window_pid_str)) = 
                             msg.body::<(String, String, String, String)>() {
                             
                             let display_info = if window_class.is_empty() {
                                 WindowInfo::desktop()
                             } else {
-                                // Parse window ID from the signal
+                                // Parse window ID and PID from the signal
                                 let window_id = window_id_str.parse::<u64>().ok();
-                                WindowInfo::new(window_class, window_id)
+                                let window_pid = window_pid_str.parse::<u32>().ok();
+                                eprintln!("[helper] GNOME: D-Bus signal - class: '{}', ID: {:?}, PID: {:?}", window_class, window_id, window_pid);
+                                WindowInfo::new(window_class, window_id, window_pid)
                             };
                             
                             if display_info != last_info {
@@ -1049,8 +1194,10 @@ impl NiriWindowMonitor {
                     return Some(WindowInfo::desktop());
                 }
                 
-                // Try to extract window ID first
+                // Try to extract window ID and PID
                 let mut window_id = None;
+                let mut window_pid = None;
+                
                 for line in &lines {
                     if line.trim().starts_with("Window ID") {
                         // Handle both "Window ID:" and "Window ID 4:" formats
@@ -1070,14 +1217,29 @@ impl NiriWindowMonitor {
                     }
                 }
                 
+                // Extract PID
+                for line in &lines {
+                    if line.trim().starts_with("PID:") {
+                        let pid_str = line.split("PID:").nth(1).unwrap_or("").trim();
+                        eprintln!("[helper] Found PID line: '{}', extracted: '{}'", line.trim(), pid_str);
+                        if let Ok(pid) = pid_str.parse::<u32>() {
+                            window_pid = Some(pid);
+                            eprintln!("[helper] Successfully parsed PID: {}", pid);
+                        } else {
+                            eprintln!("[helper] Failed to parse PID: '{}'", pid_str);
+                        }
+                        break;
+                    }
+                }
+                
                 for line in &lines {
                     if line.trim().starts_with("App ID:") {
                         if let Some(app_id) = line.split("App ID:").nth(1) {
                             let app_id = app_id.trim().trim_matches('"');
                             eprintln!("[helper] Found App ID: '{}'", app_id);
                             if !app_id.is_empty() && app_id != "null" {
-                                eprintln!("[helper] Returning WindowInfo with App ID: '{}' and window_id: {:?}", app_id, window_id);
-                                return Some(WindowInfo::new(app_id.to_string(), window_id));
+                                eprintln!("[helper] Returning WindowInfo with App ID: '{}', window_id: {:?}, PID: {:?}", app_id, window_id, window_pid);
+                                return Some(WindowInfo::new(app_id.to_string(), window_id, window_pid));
                             }
                         }
                     }
@@ -1088,7 +1250,8 @@ impl NiriWindowMonitor {
                         if let Some(title) = line.split("Title:").nth(1) {
                             let title = title.trim().trim_matches('"');
                             if !title.is_empty() && title != "null" {
-                                return Some(WindowInfo::new(title.to_string(), window_id));
+                                eprintln!("[helper] Returning WindowInfo with Title: '{}', window_id: {:?}, PID: {:?}", title, window_id, window_pid);
+                                return Some(WindowInfo::new(title.to_string(), window_id, window_pid));
                             }
                         }
                     }
@@ -1202,6 +1365,8 @@ fn main() -> Result<()> {
     runner.run_with_monitor(monitor)
 }
 
+ 
+ 
  
  
  

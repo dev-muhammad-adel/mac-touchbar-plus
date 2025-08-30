@@ -712,12 +712,12 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
     let mut browser_helper_stream: Option<UnixStream> = None;
     let mut browser_helper_reader: Option<BufReader<UnixStream>> = None;
     
-    // Add focus-based VLC helper management
+    // Add focus-based VLC/Dragon Player helper management
     let mut vlc_window_focused = false;
     let mut browser_window_focused = false;
     let _last_window_class: Option<String> = None;
     let mut current_user: Option<String> = None;
-    let mut current_vlc_window_id: Option<u64> = None; // Track current VLC window ID
+    let mut current_vlc_window_id: Option<u64> = None; // Track current VLC/Dragon Player window ID
     let mut current_browser_window_id: Option<u64> = None; // Track current browser window ID
 
     // Safe surface creation
@@ -749,7 +749,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
     let mut needs_complete_redraw = false;
     let mut app_layer3_slide_anim = Animation::new(0.18, 16.0); // 60fps for smooth slide
     let mut app_ui_manager = AppUiManager::new();
-    let mut vlc_touch_active = false; // Track if VLC touch interaction is active
+    let mut vlc_touch_active = false; // Track if VLC/Dragon Player touch interaction is active
     let mut vlc_drag_position: Option<f64> = None; // Track current drag position for visual feedback
 
     // --- main event loop ---
@@ -1025,29 +1025,53 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                continue;
                                            }
                                            
-                                           // Parse the new "class:id" format
-                                           let (class, window_id) = if let Some(colon_pos) = part.find(':') {
-                                               let class_part = &part[..colon_pos];
-                                               let id_part = &part[colon_pos + 1..];
+                                           // Parse the new "class:id:pid" format
+                                           let (class, window_id, pid) = if let Some(first_colon_pos) = part.find(':') {
+                                               let class_part = &part[..first_colon_pos];
                                                
-                                               // Try to parse the window ID
-                                               let parsed_id = if id_part == "0" {
-                                                   // Desktop window
-                                                   Some(0)
+                                               // Look for second colon to find PID
+                                               if let Some(second_colon_pos) = part[first_colon_pos + 1..].find(':') {
+                                                   let id_part = &part[first_colon_pos + 1..first_colon_pos + 1 + second_colon_pos];
+                                                   let pid_part = &part[first_colon_pos + 1 + second_colon_pos + 1..];
+                                                   
+                                                   // Try to parse the window ID and PID
+                                                   let parsed_id = if id_part == "0" {
+                                                       // Desktop window
+                                                       Some(0)
+                                                   } else {
+                                                       id_part.parse::<u64>().ok()
+                                                   };
+                                                   
+                                                   let parsed_pid = if pid_part == "0" {
+                                                       // Desktop or no PID
+                                                       Some(0)
+                                                   } else {
+                                                       pid_part.parse::<u32>().ok()
+                                                   };
+                                                   
+                                                   (class_part, parsed_id, parsed_pid)
                                                } else {
-                                                   id_part.parse::<u64>().ok()
-                                               };
-                                               
-                                               (class_part, parsed_id)
+                                                   // Fallback: no PID, just "class:id" format
+                                                   let id_part = &part[first_colon_pos + 1..];
+                                                   
+                                                   let parsed_id = if id_part == "0" {
+                                                       // Desktop window
+                                                       Some(0)
+                                                   } else {
+                                                       id_part.parse::<u64>().ok()
+                                                   };
+                                                   
+                                                   (class_part, parsed_id, Some(0)) // Default PID to 0
+                                               }
                                            } else {
-                                               // Fallback: no ID, just class
-                                               (part, None)
+                                               // Fallback: no ID or PID, just class
+                                               (part, None, Some(0)) // Default PID to 0
                                            };
                                            
-                                           println!("[main] Parsed window info - class: '{}', id: {:?}", class, window_id);
+                                           println!("[main] Parsed window info - class: '{}', id: {:?}, pid: {:?}", class, window_id, pid);
                                            
-                                           // Check if VLC window focus changed
-                                           let new_vlc_focused = class == "vlc";
+                                           // Check if VLC/Dragon Player window focus changed
+                                           let new_vlc_focused = class == "vlc" || class == "org.kde.dragonplayer";
                                            let vlc_focus_changed = new_vlc_focused != vlc_window_focused;
                                            let vlc_window_id_changed = if new_vlc_focused && vlc_window_focused {
                                                // VLC is still focused, check if window ID changed
@@ -1058,11 +1082,11 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                            
                                            if vlc_focus_changed || vlc_window_id_changed {
                                                if vlc_focus_changed {
-                                                   vlc_window_focused = new_vlc_focused;
+                                               vlc_window_focused = new_vlc_focused;
                                                }
                                                
                                                if vlc_window_id_changed {
-                                                   println!("[main] VLC window ID changed from {:?} to {:?}, restarting VLC helper", current_vlc_window_id, window_id);
+                                                   println!("[main] VLC/Dragon Player window ID changed from {:?} to {:?}, restarting VLC helper", current_vlc_window_id, window_id);
                                                    println!("[main] Stopping existing VLC helper and clearing state...");
                                                }
                                                
@@ -1096,13 +1120,13 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                        println!("[main] VLC helper restarted for new window ID: {:?}", window_id);
                                                    } else {
                                                        if current_vlc_window_id.is_none() {
-                                                           println!("[main] VLC window focused for the first time, starting VLC helper");
+                                                           println!("[main] VLC/Dragon Player window focused for the first time, starting VLC helper");
                                                        } else {
-                                                           println!("[main] VLC window focused, starting VLC helper");
+                                                           println!("[main] VLC/Dragon Player window focused, starting VLC helper");
                                                        }
                                                    }
                                                    if let Some(user) = &current_user {
-                                                       if let Some(fd) = vlc_helper_manager.start(user, current_session.as_ref().and_then(|s| s.leader).unwrap_or(0)) {
+                                                       if let Some(fd) = vlc_helper_manager.start(user, current_session.as_ref().and_then(|s| s.leader).unwrap_or(0), class, window_id.unwrap_or(0), pid.unwrap_or(0)) {
                                                            let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
                                                            if let Err(e) = safe_epoll_add(&epoll, &listener_fd_obj, EpollEvent::new(EpollFlags::EPOLLIN, 6)) {
                                                                eprintln!("[main] Failed to add VLC helper listener to epoll: {}", e);
@@ -1112,7 +1136,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                                    println!("[main] VLC helper restarted successfully for window ID: {:?}", window_id);
                                                                } else {
                                                                    println!("[main] VLC helper started successfully for window ID: {:?}", window_id);
-                                                               }
+                                                           }
                                                            }
                                                        } else {
                                                            println!("[main] Failed to start VLC helper for user: {}", user);
@@ -1121,8 +1145,8 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                        println!("[main] No current user available for VLC helper");
                                                    }
                                                } else {
-                                                   // VLC window lost focus - stop VLC helper
-                                                   println!("[main] VLC window lost focus, stopping VLC helper");
+                                                   // VLC/Dragon Player window lost focus - stop VLC helper
+                                                   println!("[main] VLC/Dragon Player window lost focus, stopping VLC helper");
                                                    if let Some(stream) = vlc_helper_stream.take() {
                                                        if let Err(e) = safe_epoll_delete(&epoll, &stream) {
                                                            eprintln!("[main] Failed to remove VLC stream from epoll: {}", e);
@@ -1136,7 +1160,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                        }
                                                    }
                                                    if vlc_helper_manager.is_process_running() {
-                                                       vlc_helper_manager.stop();
+                                                   vlc_helper_manager.stop();
                                                        println!("[main] VLC helper stopped due to losing focus");
                                                    } else {
                                                        println!("[main] VLC helper was not running, no need to stop");
@@ -1145,15 +1169,15 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                    vlc_drag_position = None;
                                                }
                                                
-                                               // Update the current VLC window ID
+                                               // Update the current VLC/Dragon Player window ID
                                                if new_vlc_focused {
                                                    if current_vlc_window_id != window_id {
-                                                       println!("[main] VLC window ID updated: {:?} -> {:?}", current_vlc_window_id, window_id);
+                                                       println!("[main] VLC/Dragon Player window ID updated: {:?} -> {:?}", current_vlc_window_id, window_id);
                                                    }
                                                    current_vlc_window_id = window_id;
                                                } else {
                                                    if current_vlc_window_id.is_some() {
-                                                       println!("[main] VLC window ID cleared (lost focus)");
+                                                       println!("[main] VLC/Dragon Player window ID cleared (lost focus)");
                                                    }
                                                    current_vlc_window_id = None;
                                                }
@@ -1183,20 +1207,20 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                    // Browser window gained focus or ID changed - start/restart browser helper
                                                    if browser_window_id_changed {
                                                        // Stop existing helper first if ID changed
-                                                       if let Some(stream) = browser_helper_stream.take() {
-                                                           if let Err(e) = safe_epoll_delete(&epoll, &stream) {
-                                                               eprintln!("[main] Failed to remove browser helper stream from epoll: {}", e);
-                                                           }
+                                                   if let Some(stream) = browser_helper_stream.take() {
+                                                       if let Err(e) = safe_epoll_delete(&epoll, &stream) {
+                                                           eprintln!("[main] Failed to remove browser helper stream from epoll: {}", e);
                                                        }
-                                                       browser_helper_reader = None;
-                                                       if let Some(fd) = browser_helper_listener_fd.take() {
-                                                           let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
-                                                           if let Err(e) = safe_epoll_delete(&epoll, &listener_fd_obj) {
-                                                               eprintln!("[main] Failed to remove browser helper listener from epoll: {}", e);
-                                                           }
+                                                   }
+                                                   browser_helper_reader = None;
+                                                   if let Some(fd) = browser_helper_listener_fd.take() {
+                                                       let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
+                                                       if let Err(e) = safe_epoll_delete(&epoll, &listener_fd_obj) {
+                                                           eprintln!("[main] Failed to remove browser helper listener from epoll: {}", e);
                                                        }
+                                                   }
                                                        if browser_helper_manager.is_process_running() {
-                                                           browser_helper_manager.stop();
+                                                   browser_helper_manager.stop();
                                                            println!("[main] Browser helper stopped due to window ID change");
                                                        } else {
                                                            println!("[main] Browser helper was not running, no need to stop");
@@ -1214,7 +1238,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                    }
                                                    
                                                    if let Some(user) = &current_user {
-                                                       if let Some(fd) = browser_helper_manager.start(user, current_session.as_ref().and_then(|s| s.leader).unwrap_or(0)) {
+                                                       if let Some(fd) = browser_helper_manager.start(user, current_session.as_ref().and_then(|s| s.leader).unwrap_or(0), class, window_id.unwrap_or(0), pid.unwrap_or(0)) {
                                                            let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
                                                            if let Err(e) = safe_epoll_add(&epoll, &listener_fd_obj, EpollEvent::new(EpollFlags::EPOLLIN, 8)) {
                                                                eprintln!("[main] Failed to add browser helper listener to epoll: {}", e);
@@ -1224,7 +1248,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                                    println!("[main] Browser helper restarted successfully for window ID: {:?}", window_id);
                                                                } else {
                                                                    println!("[main] Browser helper started successfully for window ID: {:?}", window_id);
-                                                               }
+                                                           }
                                                            }
                                                        } else {
                                                            println!("[main] Failed to start browser helper for user: {}", user);
@@ -1291,7 +1315,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                    
                                                    // Start new helper for the new browser type
                                                    if let Some(user) = &current_user {
-                                                       if let Some(fd) = browser_helper_manager.start(user, current_session.as_ref().and_then(|s| s.leader).unwrap_or(0)) {
+                                                       if let Some(fd) = browser_helper_manager.start(user, current_session.as_ref().and_then(|s| s.leader).unwrap_or(0), class, window_id.unwrap_or(0), pid.unwrap_or(0)) {
                                                            let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
                                                            if let Err(e) = safe_epoll_add(&epoll, &listener_fd_obj, EpollEvent::new(EpollFlags::EPOLLIN, 8)) {
                                                                eprintln!("[main] Failed to add browser helper listener to epoll: {}", e);
@@ -1607,7 +1631,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
         if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             vlc_helper_manager.check_process_status();
         })) {
-            eprintln!("[main] Error during VLC helper manager status check: {:?}", e);
+            eprintln!("[main] Error during VLC/Dragon Player helper manager status check: {:?}", e);
         }
         if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             browser_helper_manager.check_process_status();
@@ -1620,7 +1644,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
         unsafe {
             PROCESS_STATUS_COUNTER += 1;
             if PROCESS_STATUS_COUNTER % 1000 == 0 { // Log every 1000 frames
-                println!("[main] Process status - Main helper: {}, VLC helper: {} (window ID: {:?}), Browser helper: {} (window ID: {:?})", 
+                println!("[main] Process status - Main helper: {}, VLC/Dragon Player helper: {} (window ID: {:?}), Browser helper: {} (window ID: {:?})", 
                     if helper_manager.is_process_running() { "running" } else { "stopped" },
                     if vlc_helper_manager.is_process_running() { "running" } else { "stopped" },
                     current_vlc_window_id,

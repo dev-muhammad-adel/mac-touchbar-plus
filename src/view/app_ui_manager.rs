@@ -42,7 +42,7 @@ impl AppUiManager {
         let new_app_type = match class_lower.as_str() {
             "firefox" | "chrome" | "chromium" | "brave" | "brave-browser" | 
             "edge" | "safari" | "opera" | "google-chrome" => AppType::Browser,
-            "vlc" => AppType::Vlc,
+            "vlc" | "org.kde.dragonplayer" => AppType::Vlc,
             "alacritty" | "gnome-terminal" | "konsole" | "xterm" | "kitty" | 
             "terminator" | "tilix" | "urxvt" | "st" | "wezterm" => AppType::Terminal,
             "code" | "vscodium" | "atom" | "sublime_text" | "vim" | "nvim" | 
@@ -63,7 +63,7 @@ impl AppUiManager {
                     println!("[AppUI] Detected browser: {}", window_class);
                 }
                 AppType::Vlc => {
-                    println!("[AppUI] Detected VLC media player");
+                    println!("[AppUI] Detected VLC/Dragon Player media player");
                 }
                 AppType::Terminal => {
                     println!("[AppUI] Detected terminal: {}", window_class);
@@ -103,7 +103,7 @@ impl AppUiManager {
         match window_class {
             Some(class) => {
                 match class.to_lowercase().as_str() {
-            "vlc" | "vlc.exe" => {
+            "vlc" | "org.kde.dragonplayer" => {
                 self.vlc_screen.draw(c, x, y, width, height, radius, anim_progress, drag_position);
             }
             "firefox" | "chrome" | "chromium" | "brave" | "brave-browser" | "edge" | "safari" | "opera" | "google-chrome" => {
@@ -175,7 +175,13 @@ impl AppUiManager {
     pub fn get_app_context(&self) -> String {
         match (&self.current_app, &self.current_window_class) {
             (Some(AppType::Browser), Some(class)) => format!("Browser: {}", class),
-            (Some(AppType::Vlc), _) => "VLC Media Player".to_string(),
+            (Some(AppType::Vlc), Some(class)) => {
+                if class == "org.kde.dragonplayer" {
+                    "Dragon Player".to_string()
+                } else {
+                    "VLC Media Player".to_string()
+                }
+            },
             (Some(AppType::Terminal), Some(class)) => format!("Terminal: {}", class),
             (Some(AppType::Editor), Some(class)) => format!("Editor: {}", class),
             (Some(AppType::MediaPlayer), Some(class)) => format!("Media: {}", class),
@@ -199,7 +205,7 @@ impl AppUiManager {
     ) -> Option<AppAction> {
         println!("[app_ui_manager] hit_test_app_ui called for window_class={}, touch_x={}, touch_y={}", window_class, touch_x, touch_y);
         match window_class.to_lowercase().as_str() {
-            "vlc" | "vlc.exe" => {
+            "vlc" | "org.kde.dragonplayer" => {
                 if let Some(vlc_action) = self.vlc_screen.hit_test(touch_x, touch_y, x, y, width, height, radius) {
                     Some(AppAction::Vlc(vlc_action))
                 } else {

@@ -1,9 +1,9 @@
-//! VLC helper binary for tiny-dfr, providing VLC status via DBus.
+//! Media Player helper binary for tiny-dfr, providing VLC and Dragon Player status via DBus.
 //! 
 //! This helper process:
 //! 1. Connects to the main process via Unix socket
-//! 2. Monitors VLC via DBus signals and sends status updates to main process
-//! 3. Receives commands from main process and executes them on VLC
+//! 2. Monitors VLC or Dragon Player via DBus signals and sends status updates to main process
+//! 3. Receives commands from main process and executes them on the active media player
 //! 
 //! Supported commands:
 //! - play_pause: Toggle play/pause
@@ -48,30 +48,65 @@ impl VlcStatus {
     }
 }
 
-fn is_vlc_running() -> bool {
-    Command::new("timeout")
-        .arg("1") // 1 second timeout
-        .arg("dbus-send")
-        .arg("--session")
-        .arg("--dest=org.mpris.MediaPlayer2.vlc")
-        .arg("--type=method_call")
-        .arg("--print-reply")
-        .arg("/org/mpris/MediaPlayer2")
-        .arg("org.freedesktop.DBus.Properties.Get")
-        .arg("string:org.mpris.MediaPlayer2.Player")
-        .arg("string:PlaybackStatus")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+#[derive(Debug, Clone)]
+enum MediaPlayer {
+    Vlc,
+    DragonPlayer,
 }
 
-fn get_vlc_status() -> Option<VlcStatus> {
+impl MediaPlayer {
+    fn from_window_class(class: &str) -> Option<MediaPlayer> {
+        match class {
+            "vlc" => Some(MediaPlayer::Vlc),
+            "org.kde.dragonplayer" => Some(MediaPlayer::DragonPlayer),
+            _ => None,
+        }
+    }
+    
+    fn mpris_dest(&self) -> &'static str {
+        match self {
+            MediaPlayer::Vlc => "org.mpris.MediaPlayer2.vlc",
+            MediaPlayer::DragonPlayer => "org.mpris.MediaPlayer2.dragonplayer",
+        }
+    }
+}
+
+
+
+fn is_media_player_running() -> bool {
+    get_current_media_player().is_some()
+}
+
+// Global variable to store the current focused media player
+static mut CURRENT_MEDIA_PLAYER: Option<MediaPlayer> = None;
+
+fn set_current_media_player(class: &str) {
+    unsafe {
+        CURRENT_MEDIA_PLAYER = MediaPlayer::from_window_class(class);
+        if let Some(player) = &CURRENT_MEDIA_PLAYER {
+            eprintln!("[media-helper] Set current media player to: {:?}", player);
+        }
+    }
+}
+
+fn get_current_media_player() -> Option<MediaPlayer> {
+    unsafe {
+        CURRENT_MEDIA_PLAYER.clone()
+    }
+}
+
+fn get_media_player_status() -> Option<VlcStatus> {
+    let media_player = get_current_media_player()?;
+    let mpris_dest = media_player.mpris_dest();
+    
+    eprintln!("[media-helper] Getting status from: {}", mpris_dest);
+    
     // Get playback status with timeout to prevent hanging
     let status_output = Command::new("timeout")
         .arg("1") // 1 second timeout
         .arg("dbus-send")
         .arg("--session")
-        .arg("--dest=org.mpris.MediaPlayer2.vlc")
+        .arg(format!("--dest={}", mpris_dest))
         .arg("--type=method_call")
         .arg("--print-reply")
         .arg("/org/mpris/MediaPlayer2")
@@ -93,7 +128,7 @@ fn get_vlc_status() -> Option<VlcStatus> {
         .arg("1") // 1 second timeout
         .arg("dbus-send")
         .arg("--session")
-        .arg("--dest=org.mpris.MediaPlayer2.vlc")
+        .arg(format!("--dest={}", mpris_dest))
         .arg("--type=method_call")
         .arg("--print-reply")
         .arg("/org/mpris/MediaPlayer2")
@@ -115,7 +150,7 @@ fn get_vlc_status() -> Option<VlcStatus> {
         .arg("1") // 1 second timeout
         .arg("dbus-send")
         .arg("--session")
-        .arg("--dest=org.mpris.MediaPlayer2.vlc")
+        .arg(format!("--dest={}", mpris_dest))
         .arg("--type=method_call")
         .arg("--print-reply")
         .arg("/org/mpris/MediaPlayer2")
@@ -197,12 +232,23 @@ fn get_vlc_status() -> Option<VlcStatus> {
     })
 }
 
-fn execute_vlc_command(command: &str, args: &[&str]) -> bool {
+fn execute_media_player_command(command: &str, args: &[&str]) -> bool {
+    let media_player = match get_current_media_player() {
+        Some(player) => player,
+        None => {
+            eprintln!("[media-helper] No media player detected");
+            return false;
+        }
+    };
+    
+    let mpris_dest = media_player.mpris_dest();
+    eprintln!("[media-helper] Executing command '{}' on {}", command, mpris_dest);
+    
     let mut cmd = Command::new("timeout");
     cmd.arg("1") // 1 second timeout
        .arg("dbus-send")
        .arg("--session")
-       .arg("--dest=org.mpris.MediaPlayer2.vlc")
+       .arg(format!("--dest={}", mpris_dest))
        .arg("--type=method_call")
        .arg("/org/mpris/MediaPlayer2")
        .arg(command);
@@ -214,15 +260,15 @@ fn execute_vlc_command(command: &str, args: &[&str]) -> bool {
     match cmd.output() {
         Ok(output) => {
             if output.status.success() {
-                eprintln!("[vlc-helper] Command '{}' executed successfully", command);
+                eprintln!("[media-helper] Command '{}' executed successfully on {}", command, mpris_dest);
                 true
             } else {
-                eprintln!("[vlc-helper] Command '{}' failed: {:?}", command, String::from_utf8_lossy(&output.stderr));
+                eprintln!("[media-helper] Command '{}' failed on {}: {:?}", command, mpris_dest, String::from_utf8_lossy(&output.stderr));
                 false
             }
         }
         Err(e) => {
-            eprintln!("[vlc-helper] Failed to execute command '{}': {}", command, e);
+            eprintln!("[media-helper] Failed to execute command '{}' on {}: {}", command, mpris_dest, e);
             false
         }
     }
@@ -232,35 +278,35 @@ fn handle_command(command: &str) {
     match command.trim() {
         "play_pause" => {
             eprintln!("[vlc-helper] Executing play/pause command");
-            execute_vlc_command("org.mpris.MediaPlayer2.Player.PlayPause", &[]);
+            execute_media_player_command("org.mpris.MediaPlayer2.Player.PlayPause", &[]);
         }
         "play" => {
             eprintln!("[vlc-helper] Executing play command");
-            execute_vlc_command("org.mpris.MediaPlayer2.Player.Play", &[]);
+            execute_media_player_command("org.mpris.MediaPlayer2.Player.Play", &[]);
         }
         "pause" => {
             eprintln!("[vlc-helper] Executing pause command");
-            execute_vlc_command("org.mpris.MediaPlayer2.Player.Pause", &[]);
+            execute_media_player_command("org.mpris.MediaPlayer2.Player.Pause", &[]);
         }
         "next" => {
             eprintln!("[vlc-helper] Executing next command");
-            execute_vlc_command("org.mpris.MediaPlayer2.Player.Next", &[]);
+            execute_media_player_command("org.mpris.MediaPlayer2.Player.Next", &[]);
         }
         "previous" => {
             eprintln!("[vlc-helper] Executing previous command");
-            execute_vlc_command("org.mpris.MediaPlayer2.Player.Previous", &[]);
+            execute_media_player_command("org.mpris.MediaPlayer2.Player.Previous", &[]);
         }
         "stop" => {
             eprintln!("[vlc-helper] Executing stop command");
-            execute_vlc_command("org.mpris.MediaPlayer2.Player.Stop", &[]);
+            execute_media_player_command("org.mpris.MediaPlayer2.Player.Stop", &[]);
         }
         "raise" => {
             eprintln!("[vlc-helper] Executing raise command");
-            execute_vlc_command("org.mpris.MediaPlayer2.Raise", &[]);
+            execute_media_player_command("org.mpris.MediaPlayer2.Raise", &[]);
         }
         "quit" => {
             eprintln!("[vlc-helper] Executing quit command");
-            execute_vlc_command("org.mpris.MediaPlayer2.Quit", &[]);
+            execute_media_player_command("org.mpris.MediaPlayer2.Quit", &[]);
         }
         cmd if cmd.starts_with("seek:") => {
             if let Some(position_str) = cmd.strip_prefix("seek:") {
@@ -341,7 +387,7 @@ fn handle_command(command: &str) {
                     
                     eprintln!("[vlc-helper] Executing seek command to position: {} (target time: {} microseconds, current: {}, offset: {}, duration: {})", 
                              position, target_time, current_pos, seek_offset, duration);
-                    execute_vlc_command("org.mpris.MediaPlayer2.Player.Seek", &[&format!("int64:{}", seek_offset)]);
+                    execute_media_player_command("org.mpris.MediaPlayer2.Player.Seek", &[&format!("int64:{}", seek_offset)]);
                 } else {
                     eprintln!("[vlc-helper] Invalid seek position: {}", position_str);
                 }
@@ -352,7 +398,7 @@ fn handle_command(command: &str) {
                 if let Ok(position) = position_str.parse::<f64>() {
                     let seek_position = (position * 1_000_000.0) as i64;
                     eprintln!("[vlc-helper] Executing set position command to: {}", position);
-                    execute_vlc_command("org.mpris.MediaPlayer2.Player.SetPosition", &[&format!("objectpath:/org/mpris/MediaPlayer2/TrackList/NoTrack"), &format!("int64:{}", seek_position)]);
+                    execute_media_player_command("org.mpris.MediaPlayer2.Player.SetPosition", &[&format!("objectpath:/org/mpris/MediaPlayer2/TrackList/NoTrack"), &format!("int64:{}", seek_position)]);
                 } else {
                     eprintln!("[vlc-helper] Invalid set position: {}", position_str);
                 }
@@ -364,7 +410,7 @@ fn handle_command(command: &str) {
     }
 }
 
-fn monitor_vlc_events(status_sender: Arc<Mutex<Option<UnixStream>>>) {
+fn monitor_media_player_events(status_sender: Arc<Mutex<Option<UnixStream>>>) {
     // Event-driven monitoring with smart position polling
     // Only polls position during playback, stops when paused/stopped
     
@@ -372,9 +418,9 @@ fn monitor_vlc_events(status_sender: Arc<Mutex<Option<UnixStream>>>) {
     let mut vlc_running = false;
     
     // Check initial VLC status
-    if is_vlc_running() {
+            if is_media_player_running() {
         vlc_running = true;
-        if let Some(initial_status) = get_vlc_status() {
+        if let Some(initial_status) = get_media_player_status() {
             current_status = initial_status.clone();
             send_status_update(&status_sender, &current_status);
             eprintln!("[vlc-helper] Initial VLC status detected: playing={}, title={}", current_status.is_playing, current_status.title);
@@ -397,20 +443,20 @@ fn monitor_vlc_events(status_sender: Arc<Mutex<Option<UnixStream>>>) {
                 
                 if elapsed >= 0.5 { // Update every 500ms during playback only
                     // Get current position from VLC (minimal polling only during playback)
-                    if let Some(status) = get_vlc_status() {
+                    if let Some(status) = get_media_player_status() {
                         if status.is_playing && status.duration > 0 {
                             // Only update if position actually changed
                             if (status.position - last_status.position).abs() > 0.001 {
                                 let position_percent = status.position * 100.0;
                                 send_status_update(&position_sender, &status);
                                 last_status = status;
-                                eprintln!("[vlc-helper] Position updated: {:.2}%", position_percent);
+                                eprintln!("[media-helper] Position updated: {:.2}%", position_percent);
                             }
                         } else {
-                            // VLC stopped playing - stop polling and update status
+                            // Media player stopped playing - stop polling and update status
                             send_status_update(&position_sender, &status);
                             last_status = status;
-                            eprintln!("[vlc-helper] VLC stopped playing - polling stopped");
+                            eprintln!("[media-helper] Media player stopped playing - polling stopped");
                         }
                     }
                     
@@ -418,13 +464,13 @@ fn monitor_vlc_events(status_sender: Arc<Mutex<Option<UnixStream>>>) {
                 }
             } else {
                 // Not playing - no polling, just check occasionally for status changes
-                if let Some(status) = get_vlc_status() {
+                if let Some(status) = get_media_player_status() {
                     if status != last_status {
                         let is_playing = status.is_playing;
                         send_status_update(&position_sender, &status);
                         last_status = status;
                         if is_playing {
-                            eprintln!("[vlc-helper] VLC started playing - polling started");
+                            eprintln!("[media-helper] Media player started playing - polling started");
                         }
                     }
                 }
@@ -474,7 +520,7 @@ fn monitor_vlc_events(status_sender: Arc<Mutex<Option<UnixStream>>>) {
                 let trimmed = line.trim();
                 
                 // Detect signal start
-                if trimmed.starts_with("signal") && trimmed.contains("org.mpris.MediaPlayer2.vlc") {
+                if trimmed.starts_with("signal") && (trimmed.contains("org.mpris.MediaPlayer2.vlc") || trimmed.contains("org.mpris.MediaPlayer2.dragonplayer")) {
                     in_signal = true;
                     signal_buffer.clear();
                     
@@ -487,7 +533,7 @@ fn monitor_vlc_events(status_sender: Arc<Mutex<Option<UnixStream>>>) {
                     }
                     
                     signal_buffer.push(trimmed.to_string());
-                    eprintln!("[vlc-helper] VLC signal detected: {}", signal_sender);
+                    eprintln!("[media-helper] Media player signal detected: {}", signal_sender);
                 }
                 // Detect signal end
                 else if in_signal && trimmed.is_empty() {
@@ -515,22 +561,22 @@ fn monitor_vlc_events(status_sender: Arc<Mutex<Option<UnixStream>>>) {
                     signal_buffer.push(trimmed.to_string());
                 }
                 
-                // Also check for any VLC-related activity and get status if needed
-                if trimmed.contains("org.mpris.MediaPlayer2.vlc") && !vlc_running {
+                // Also check for any media player-related activity and get status if needed
+                if (trimmed.contains("org.mpris.MediaPlayer2.vlc") || trimmed.contains("org.mpris.MediaPlayer2.dragonplayer")) && !vlc_running {
                     vlc_running = true;
-                    if let Some(status) = get_vlc_status() {
+                    if let Some(status) = get_media_player_status() {
                         current_status = status.clone();
                         send_status_update(&status_sender, &current_status);
-                        eprintln!("[vlc-helper] VLC detected and status updated: playing={}, title={}", current_status.is_playing, current_status.title);
+                        eprintln!("[media-helper] Media player detected and status updated: playing={}, title={}", current_status.is_playing, current_status.title);
                     }
                 }
                 
-                // If we see VLC activity but haven't received any status updates, try to get current status
-                if trimmed.contains("org.mpris.MediaPlayer2.vlc") && vlc_running && current_status.title.is_empty() {
-                    if let Some(status) = get_vlc_status() {
+                // If we see media player activity but haven't received any status updates, try to get current status
+                if (trimmed.contains("org.mpris.MediaPlayer2.vlc") || trimmed.contains("org.mpris.MediaPlayer2.dragonplayer")) && vlc_running && current_status.title.is_empty() {
+                    if let Some(status) = get_media_player_status() {
                         current_status = status.clone();
                         send_status_update(&status_sender, &current_status);
-                        eprintln!("[vlc-helper] VLC status retrieved: playing={}, title={}", current_status.is_playing, current_status.title);
+                        eprintln!("[media-helper] Media player status retrieved: playing={}, title={}", current_status.is_playing, current_status.title);
                     }
                 }
             }
@@ -541,8 +587,8 @@ fn monitor_vlc_events(status_sender: Arc<Mutex<Option<UnixStream>>>) {
         }
     }
     
-    eprintln!("[vlc-helper] Restarting dbus-monitor...");
-    monitor_vlc_events(status_sender);
+    eprintln!("[media-helper] Restarting dbus-monitor...");
+    monitor_media_player_events(status_sender);
 }
 
 fn process_properties_changed_signal(signal_lines: &[String], current_status: &mut VlcStatus, _vlc_running: &mut bool, status_sender: &Arc<Mutex<Option<UnixStream>>>) {
@@ -730,6 +776,26 @@ fn main() -> std::io::Result<()> {
         eprintln!("[vlc-helper] DBUS_SESSION_BUS_ADDRESS is not set");
     }
     
+    // Get the window class and window ID from environment variables
+    if let Ok(window_class) = std::env::var("TINY_DFR_WINDOW_CLASS") {
+        eprintln!("[vlc-helper] Window class: {}", window_class);
+        set_current_media_player(&window_class);
+        
+        // Also read window ID for future use
+        if let Ok(window_id_str) = std::env::var("TINY_DFR_WINDOW_ID") {
+            if let Ok(window_id) = window_id_str.parse::<u64>() {
+                eprintln!("[vlc-helper] Window ID: {}", window_id);
+                // Store window ID for future use (you can add a global variable here if needed)
+            } else {
+                eprintln!("[vlc-helper] Invalid window ID format: {}", window_id_str);
+            }
+        } else {
+            eprintln!("[vlc-helper] TINY_DFR_WINDOW_ID is not set");
+        }
+    } else {
+        eprintln!("[vlc-helper] TINY_DFR_WINDOW_CLASS is not set");
+    }
+    
     let stream = loop {
         match UnixStream::connect(socket_path) {
             Ok(stream) => {
@@ -758,7 +824,7 @@ fn main() -> std::io::Result<()> {
     // Start event monitoring in a separate thread
     let status_sender_clone = status_sender.clone();
     thread::spawn(move || {
-        monitor_vlc_events(status_sender_clone);
+        monitor_media_player_events(status_sender_clone);
     });
     
     loop {

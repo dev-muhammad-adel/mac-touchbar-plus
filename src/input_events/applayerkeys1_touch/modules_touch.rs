@@ -35,8 +35,8 @@ impl ModulesTouchHandler {
             let window_class_lc = window_class.to_lowercase();
                 
                 match window_class_lc.as_str() {
-                    "vlc" => {
-                        // Delegate to VLC touch handler
+                    "vlc" | "org.kde.dragonplayer" => {
+                        // Delegate to VLC/Dragon Player touch handler
                         VlcTouchHandler::handle_touch_event(
                             event, width, height, active_layer, layers,
                             current_window_class, app_ui_manager, vlc_touch_active,

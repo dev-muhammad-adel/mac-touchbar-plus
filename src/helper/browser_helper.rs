@@ -79,6 +79,13 @@ fn main() -> std::io::Result<()> {
     
     eprintln!("[browser-helper] Starting browser helper with MPRIS support (placeholder)");
     
+    // Get the window class and window ID from environment variables
+    let window_class = std::env::var("TINY_DFR_WINDOW_CLASS").unwrap_or_else(|_| "unknown".to_string());
+    let window_id_str = std::env::var("TINY_DFR_WINDOW_ID").unwrap_or_else(|_| "0".to_string());
+    let window_id = window_id_str.parse::<u64>().unwrap_or(0);
+    
+    eprintln!("[browser-helper] Window class: {}, Window ID: {}", window_class, window_id);
+    
     let mut stream = loop {
         match UnixStream::connect(socket_path) {
             Ok(stream) => {
@@ -121,11 +128,12 @@ fn main() -> std::io::Result<()> {
                             // Initial browser type
                             browser_type = new_browser_type;
                             received_browser_type = true;
+                            eprintln!("[browser-helper] Initial browser type: {} (Window: {}:{})", browser_type, window_class, window_id);
                             break;
                         } else {
                             // Browser type update
                             browser_type = new_browser_type;
-                            eprintln!("[browser-helper] Browser type updated to: {}", browser_type);
+                            eprintln!("[browser-helper] Browser type updated to: {} (Window: {}:{})", browser_type, window_class, window_id);
                         }
                     }
                 }
@@ -142,7 +150,7 @@ fn main() -> std::io::Result<()> {
         }
     }
     
-    eprintln!("[browser-helper] Starting browser monitoring for: {}", browser_type);
+    eprintln!("[browser-helper] Starting browser monitoring for: {} (Window: {}:{})", browser_type, window_class, window_id);
     
     // Create a reader for incoming commands
     let mut stream_clone = stream.try_clone()?;
