@@ -61,7 +61,7 @@ udevadm trigger
 print_status "Removing binaries..."
 rm -f /usr/bin/tiny-dfr
 rm -f /usr/bin/tiny-dfr-focus-window-helper
-rm -f /usr/bin/tiny-dfr-vlc-helper
+rm -f /usr/bin/tiny-dfr-media-helper
 rm -f /usr/bin/tiny-dfr-browser-helper
 
 # Remove share files

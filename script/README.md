@@ -66,7 +66,7 @@ The install script will automatically detect your package manager and install al
 ### Binaries (to `/usr/bin/`)
 - `tiny-dfr` - Main application
 - `tiny-dfr-helper` - Helper binary
-- `tiny-dfr-vlc-helper` - VLC helper binary
+- `tiny-dfr-media-helper` - Media player helper binary (supports VLC and Dragon Player)
 - `tiny-dfr-browser-helper` - Browser helper binary
 
 ### Configuration Files

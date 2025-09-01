@@ -122,7 +122,7 @@ fn get_vlc_status() -> Option<MediaStatus> {
     
     let destinations = if primary_dest != fallback_dest {
         vec![primary_dest.as_str(), fallback_dest]
-    } else {
+        } else {
         vec![primary_dest.as_str()]
     };
     
@@ -835,7 +835,7 @@ fn handle_dragon_player_command(command: &str, status_sender: &Arc<Mutex<Option<
                             eprintln!("[dragon-helper] Header updated immediately (throttled seek: {:.2}%)", position * 100.0);
                         }
                     }
-                } else {
+                        } else {
                     eprintln!("[dragon-helper] Invalid seek position: {}", position_str);
                 }
             }
@@ -960,7 +960,7 @@ fn monitor_media_player_events(status_sender: Arc<Mutex<Option<UnixStream>>>) {
             let is_playing = {
                 if let Ok(state) = playback_state_clone.lock() {
                     state.0
-                } else {
+            } else {
                     false
                 }
             };
@@ -984,7 +984,7 @@ fn monitor_media_player_events(status_sender: Arc<Mutex<Option<UnixStream>>>) {
                 thread::sleep(Duration::from_millis(1000));
             } else {
                 // Not playing - sleep longer and wait for events
-                thread::sleep(Duration::from_millis(500));
+            thread::sleep(Duration::from_millis(500));
             }
         }
     });
@@ -1522,7 +1522,7 @@ fn send_status_update(status_sender: &Arc<Mutex<Option<UnixStream>>>, status: &M
 }
 
 fn main() -> std::io::Result<()> {
-    let socket_path = "/tmp/touchbar-vlc.sock";
+    let socket_path = "/tmp/touchbar-media.sock";
     
     // Print environment info for debugging
     if let Ok(addr) = std::env::var("DBUS_SESSION_BUS_ADDRESS") {

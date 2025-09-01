@@ -48,8 +48,8 @@ name = "tiny-dfr-focus-window-helper"
 path = "src/helper/focus_window_helper.rs"
 
 [[bin]]
-name = "tiny-dfr-vlc-helper"
-path = "src/helper/vlc_helper.rs"
+name = "tiny-dfr-media-helper"
+path = "src/helper/media_helper.rs"
 
 [[bin]]
 name = "tiny-dfr-browser-helper"

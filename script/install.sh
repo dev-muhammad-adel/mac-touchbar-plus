@@ -280,7 +280,7 @@ install -D -m 755 target/release/tiny-dfr /usr/bin/tiny-dfr
 # Install helper binaries with correct names
 print_status "Installing helper binaries..."
 install -D -m 755 target/release/tiny-dfr-focus-window-helper /usr/bin/tiny-dfr-focus-window-helper
-install -D -m 755 target/release/tiny-dfr-vlc-helper /usr/bin/tiny-dfr-vlc-helper
+install -D -m 755 target/release/tiny-dfr-media-helper /usr/bin/tiny-dfr-media-helper
 install -D -m 755 target/release/tiny-dfr-browser-helper /usr/bin/tiny-dfr-browser-helper
 
 # Install udev rules

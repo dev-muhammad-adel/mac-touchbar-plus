@@ -432,7 +432,7 @@ impl VlcHelperManager {
             listener: None,
             process_info: ProcessInfo::new(),
             auto_restart_enabled: true,
-            socket_path: "/tmp/touchbar-vlc.sock".to_string(),
+            socket_path: "/tmp/touchbar-media.sock".to_string(),
             window_class: None,
             window_id: None,
             pid: None,
@@ -497,7 +497,7 @@ impl VlcHelperManager {
             println!("[main]   {}={}", key, value);
         }
 
-        let helper_path = "/usr/bin/tiny-dfr-vlc-helper";
+        let helper_path = "/usr/bin/tiny-dfr-media-helper";
 
         // Check if helper binary exists
         if !std::path::Path::new(helper_path).exists() {
