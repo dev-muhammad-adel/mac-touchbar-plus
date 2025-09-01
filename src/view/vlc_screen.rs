@@ -1,13 +1,10 @@
 use cairo::Context;
-use crate::helper::VlcStatus;
+use crate::helper::MediaStatus;
 
-const BUTTON_COLOR_ACTIVE: f64 = 0.600;
-const BUTTON_COLOR_INACTIVE: f64 = 0.350;
-const PROGRESS_BAR_HEIGHT: f64 = 4.0;
-const PLAY_PAUSE_BUTTON_SIZE: f64 = 32.0;
+// All constants removed as they were unused
 
 pub struct VlcScreen {
-    pub last_status: Option<VlcStatus>,
+    pub last_status: Option<MediaStatus>,
     pub is_dragging: bool,
 }
 
@@ -19,7 +16,7 @@ impl VlcScreen {
         }
     }
 
-    pub async fn update_status(&mut self) -> Option<VlcStatus> {
+    pub async fn update_status(&mut self) -> Option<MediaStatus> {
         // Status is now updated directly from the helper process
         self.last_status.clone()
     }
@@ -131,40 +128,59 @@ impl VlcScreen {
             };
             let current_time_str = format!("{}:{:02}", current_seconds / 60, current_seconds % 60);
             
-            c.save().unwrap();
-            c.set_font_size(18.0); // Slightly smaller for better fit
-            c.select_font_face("SF Pro Display", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
-            c.set_source_rgba(0.95, 0.95, 0.95, anim_progress); // Brighter white like macOS
-            
-            let current_time_ext = c.text_extents(&current_time_str).unwrap();
-            let current_time_x = icon_x + icon_width + 20.0; // More spacing from icon
-            let current_time_y = pill_y + (pill_h + current_time_ext.height()) / 2.0;
-            c.move_to(current_time_x, current_time_y);
-            c.show_text(&current_time_str).unwrap();
-            c.restore().unwrap();
-
-            // 3. macOS Touch Bar style progress bar with Adwaita dark theme (2px more vertical padding)
-            let progress_x = current_time_x + current_time_ext.width() + 24.0; // More spacing from time
-            let progress_y = pill_y + 2.0; // 2px more vertical padding
-            let progress_h = pill_h - 4.0; // Reduced height for 2px padding on top and bottom
-            
-            // Calculate total time width first to ensure proper spacing
+            // Calculate total time first to ensure proper spacing
             let total_time_seconds = status.duration;
             let total_time_str = format!("{}:{:02}", total_time_seconds / 60, total_time_seconds % 60);
+            
+            // Get text extents for both time displays to ensure proper spacing
             c.save().unwrap();
             c.set_font_size(18.0);
             c.select_font_face("SF Pro Display", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
+            
+            let current_time_ext = c.text_extents(&current_time_str).unwrap();
             let total_time_ext = c.text_extents(&total_time_str).unwrap();
             c.restore().unwrap();
             
-            let total_time_width = total_time_ext.width() + 20.0; // Actual width plus padding
-            let progress_w = pill_w - (progress_x - pill_x) - total_time_width - 16.0; // More margin on right
+            // Fixed spacing calculations to prevent overlap and cutoff
+            let current_time_x = icon_x + icon_width + 20.0; // Fixed spacing from icon
+            let current_time_y = pill_y + (pill_h + current_time_ext.height()) / 2.0;
+            
+            // Center the current time text within its allocated width
+            let estimated_current_time_width = 60.0; // Fixed width for current time display
+            let current_time_center_x = current_time_x + (estimated_current_time_width - current_time_ext.width()) / 2.0;
+            
+            // Draw current time
+            c.save().unwrap();
+            c.set_font_size(18.0);
+            c.select_font_face("SF Pro Display", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
+            c.set_source_rgba(0.95, 0.95, 0.95, anim_progress);
+            c.move_to(current_time_center_x, current_time_y);
+            c.show_text(&current_time_str).unwrap();
+            c.restore().unwrap();
+
+            // 3. macOS Touch Bar style progress bar with Adwaita dark theme
+            // Use fixed width for current time to prevent progress bar width fluctuations
+            let estimated_current_time_width = 60.0; // Fixed width for current time display
+            let progress_x = current_time_x + estimated_current_time_width + 24.0; // Fixed spacing from current time
+            let progress_y = pill_y + 2.0;
+            let progress_h = pill_h - 4.0;
+            
+            // Calculate progress bar width to use full available space with proper margins
+            let total_time_margin = 20.0; // Space between progress bar and total time
+            // Use fixed estimated width for total time to prevent width fluctuations during dragging
+            let estimated_total_time_width = 60.0; // Fixed width instead of measuring total_time_ext.width()
+            let progress_w = pill_w - (progress_x - pill_x) - (estimated_total_time_width + total_time_margin + 16.0); // Use full available width minus margins
+            
+            // Ensure total time doesn't go beyond the right edge
+            let actual_total_time_x = progress_x + progress_w + total_time_margin; // Position total time after progress bar
+            
+            // Simple solution: round the width to prevent sub-pixel fluctuations during dragging
+            let progress_w = (progress_w * 100.0).round() / 100.0;
             
             // Adwaita dark wrapper background for progress bar area
             c.save().unwrap();
-            // Create Adwaita dark theme background (solid color, no gradient)
-            c.set_source_rgba(0.235, 0.235, 0.235, anim_progress); // Adwaita dark theme background
-            let wrapper_radius = 6.0; // Rounded corners for wrapper
+            c.set_source_rgba(0.235, 0.235, 0.235, anim_progress);
+            let wrapper_radius = 6.0;
             c.new_sub_path();
             c.arc(progress_x + progress_w - wrapper_radius, progress_y + wrapper_radius, wrapper_radius, (-90.0f64).to_radians(), (0.0f64).to_radians());
             c.arc(progress_x + progress_w - wrapper_radius, progress_y + progress_h - wrapper_radius, wrapper_radius, (0.0f64).to_radians(), (90.0f64).to_radians());
@@ -179,17 +195,16 @@ impl VlcScreen {
             c.stroke().unwrap();
             c.restore().unwrap();
             
-            // Progress bar background inside Adwaita dark wrapper (solid color, no gradient)
-            let inner_margin = 4.0; // Small margin inside dark wrapper
+            // Progress bar background inside Adwaita dark wrapper
+            let inner_margin = 4.0;
             let inner_x = progress_x + inner_margin;
             let inner_y = progress_y + inner_margin;
             let inner_w = progress_w - (inner_margin * 2.0);
             let inner_h = progress_h - (inner_margin * 2.0);
             
             c.save().unwrap();
-            // Create Adwaita dark theme progress background (solid color, no gradient)
-            c.set_source_rgba(0.157, 0.157, 0.157, anim_progress); // Adwaita dark theme progress background
-            let inner_radius = 4.0; // Smaller radius for inner progress bar
+            c.set_source_rgba(0.157, 0.157, 0.157, anim_progress);
+            let inner_radius = 4.0;
             c.new_sub_path();
             c.arc(inner_x + inner_w - inner_radius, inner_y + inner_radius, inner_radius, (-90.0f64).to_radians(), (0.0f64).to_radians());
             c.arc(inner_x + inner_w - inner_radius, inner_y + inner_h - inner_radius, inner_radius, (0.0f64).to_radians(), (90.0f64).to_radians());
@@ -198,21 +213,15 @@ impl VlcScreen {
             c.close_path();
             c.fill().unwrap();
             c.restore().unwrap();
-            
-            // Draw VU meter background inside the INNER progress bar area only
-            // self.draw_cava_visualizer(c, inner_x, inner_y, inner_w, inner_h, anim_progress); // Removed cava visualizer
 
-            
             // Progress bar head (white, 6px wide, rounded)
             let head_position = drag_position.unwrap_or(status.position);
-            if let Some(drag_pos) = drag_position {
-            }
             if head_position > 0.0 {
                 c.save().unwrap();
-                c.set_source_rgba(1.0, 1.0, 1.0, anim_progress); // White head
-                let head_x = inner_x + (inner_w * head_position) - 3.0; // 6px wide head, centered on inner progress bar
-                let head_y = inner_y - 3.0; // Extend head above and below inner progress bar
-                let head_radius = 3.0; // Rounded corners for head
+                c.set_source_rgba(1.0, 1.0, 1.0, anim_progress);
+                let head_x = inner_x + (inner_w * head_position) - 3.0;
+                let head_y = inner_y - 3.0;
+                let head_radius = 3.0;
                 c.new_sub_path();
                 c.arc(head_x + 6.0 - head_radius, head_y + head_radius, head_radius, (-90.0f64).to_radians(), (0.0f64).to_radians());
                 c.arc(head_x + 6.0 - head_radius, head_y + inner_h + 6.0 - head_radius, head_radius, (0.0f64).to_radians(), (90.0f64).to_radians());
@@ -223,15 +232,16 @@ impl VlcScreen {
                 c.restore().unwrap();
             }
 
-            // 4. Total time (macOS system font style) - reuse the already calculated values
+            // 4. Total time (macOS system font style) - positioned to prevent overlap
             c.save().unwrap();
-            c.set_font_size(18.0); // Match current time font size
+            c.set_font_size(18.0);
             c.select_font_face("SF Pro Display", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
-            c.set_source_rgba(0.95, 0.95, 0.95, anim_progress); // Brighter white like macOS
+            c.set_source_rgba(0.95, 0.95, 0.95, anim_progress);
             
-            let total_time_x = progress_x + progress_w + 20.0; // More spacing from progress bar
+            // Center the total time text within its allocated width
+            let total_time_center_x = actual_total_time_x + (estimated_total_time_width - total_time_ext.width()) / 2.0;
             let total_time_y = pill_y + (pill_h + total_time_ext.height()) / 2.0;
-            c.move_to(total_time_x, total_time_y);
+            c.move_to(total_time_center_x, total_time_y);
             c.show_text(&total_time_str).unwrap();
             c.restore().unwrap();
         } else {
@@ -315,8 +325,12 @@ impl VlcScreen {
         let progress_x = current_time_x + 75.0; // Approximate width for current time with larger font
         let progress_y = pill_y + 2.0; // Use same positioning as drawing code
         let progress_h = pill_h - 4.0; // Reduced height for 2px padding on top and bottom
-        let total_time_width = 60.0; // Increased space for larger font
-        let progress_w = pill_w - (progress_x - pill_x) - total_time_width - 8.0;
+        
+        // Calculate progress bar width dynamically to match the drawing function exactly
+        // Use approximate values for hit testing since we don't have access to text extents here
+        let total_time_margin = 20.0; // Same margin as drawing function
+        let estimated_total_time_width = 60.0; // Estimated width for total time display
+        let progress_w = pill_w - (progress_x - pill_x) - (estimated_total_time_width + total_time_margin + 16.0); // Use full available width minus margins
         
         // Check if touch is on the progress bar area
         if touch_x >= progress_x && touch_x <= progress_x + progress_w &&

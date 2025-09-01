@@ -1413,32 +1413,26 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                // Update VLC screen with the status
                                                if let Some(is_playing) = vlc_status.get("is_playing").and_then(|v| v.as_bool()) {
                                                    if let Some(position) = vlc_status.get("position").and_then(|v| v.as_f64()) {
-                                                       if let Some(title) = vlc_status.get("title").and_then(|v| v.as_str()) {
-                                                           if let Some(artist) = vlc_status.get("artist").and_then(|v| v.as_str()) {
-                                                               if let Some(duration) = vlc_status.get("duration").and_then(|v| v.as_i64()) {
-                                                                   // Create a VlcStatus struct and update the VLC screen
-                                                                   let status = crate::helper::VlcStatus {
-                                                                       is_playing,
-                                                                       position,
-                                                                       duration,
-                                                                       title: title.to_string(),
-                                                                       artist: artist.to_string(),
-                                                                   };
-                                                                   
-                                                                   // If we have a drag position and VLC has updated to a new position,
-                                                                   // gradually fade out the drag position
-                                                                   if let Some(drag_pos) = vlc_drag_position {
-                                                                       if (position - drag_pos).abs() < 0.01 {
-                                                                           // VLC has caught up to the drag position, clear it
-                                                                           vlc_drag_position = None;
-                                                                           println!("[main] VLC caught up to drag position, clearing drag");
-                                                                       }
-                                                                   }
-                                                                   
-                                                                   app_ui_manager.vlc_screen.last_status = Some(status);
-                                                                   needs_complete_redraw = true;
+                                                       if let Some(duration) = vlc_status.get("duration").and_then(|v| v.as_i64()) {
+                                                                                              // Create a MediaStatus struct and update the VLC screen
+                                   let status = crate::helper::MediaStatus {
+                                                               is_playing,
+                                                               position,
+                                                               duration,
+                                                           };
+                                                           
+                                                           // If we have a drag position and VLC has updated to a new position,
+                                                           // gradually fade out the drag position
+                                                           if let Some(drag_pos) = vlc_drag_position {
+                                                               if (position - drag_pos).abs() < 0.01 {
+                                                                   // VLC has caught up to the drag position, clear it
+                                                                   vlc_drag_position = None;
+                                                                   println!("[main] VLC caught up to drag position, clearing drag");
                                                                }
                                                            }
+                                                           
+                                                           app_ui_manager.vlc_screen.last_status = Some(status);
+                                                           needs_complete_redraw = true;
                                                        }
                                                    }
                                                }

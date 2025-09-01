@@ -18,7 +18,7 @@
 //! - set_position:position: Set absolute position (0.0 to 1.0)
 
 use std::os::unix::net::UnixStream;
-use std::io::{Write, Read, BufRead};
+use std::io::{Write, Read};
 use std::thread;
 use std::time::Duration;
 
@@ -26,105 +26,307 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use serde_json::json;
 
+// DBus imports for proper event-driven monitoring
+use zbus::{Connection, MessageType, MessageStream, MatchRule};
+use zbus::fdo::DBusProxy;
+use futures_lite::stream::StreamExt;
+
 
 #[derive(Debug, Clone, PartialEq)]
-struct VlcStatus {
+struct MediaStatus {
     is_playing: bool,
     position: f64,
-    title: String,
-    artist: String,
     duration: i64,
 }
 
-impl VlcStatus {
+impl MediaStatus {
     fn empty() -> Self {
         Self {
             is_playing: false,
             position: 0.0,
-            title: String::new(),
-            artist: String::new(),
             duration: 0,
         }
     }
 }
 
-#[derive(Debug, Clone)]
-enum MediaPlayer {
-    Vlc,
-    DragonPlayer,
+#[derive(Debug, Clone, PartialEq)]
+struct MediaPlayerInstance {
+    mpris_name: String,
+    window_class: String,
+    pid: Option<u32>,
+    is_active: bool,
 }
 
-impl MediaPlayer {
-    fn from_window_class(class: &str) -> Option<MediaPlayer> {
-        match class {
-            "vlc" => Some(MediaPlayer::Vlc),
-            "org.kde.dragonplayer" => Some(MediaPlayer::DragonPlayer),
-            _ => None,
+impl MediaPlayerInstance {
+    fn new(mpris_name: String, window_class: String, pid: Option<u32>) -> Self {
+        Self {
+            mpris_name,
+            window_class,
+            pid,
+            is_active: false,
         }
     }
+}
+
+// Global variable to store the current focused media player instance
+static mut CURRENT_MEDIA_PLAYER_INSTANCE: Option<MediaPlayerInstance> = None;
+
+fn set_current_media_player(class: &str, pid: Option<u32>) {
+    eprintln!("[media-helper] set_current_media_player called with class: '{}', pid: {:?}", class, pid);
     
-    fn mpris_dest(&self) -> &'static str {
-        match self {
-            MediaPlayer::Vlc => "org.mpris.MediaPlayer2.vlc",
-            MediaPlayer::DragonPlayer => "org.mpris.MediaPlayer2.dragonplayer",
-        }
-    }
-}
-
-
-
-fn is_media_player_running() -> bool {
-    get_current_media_player().is_some()
-}
-
-// Global variable to store the current focused media player
-static mut CURRENT_MEDIA_PLAYER: Option<MediaPlayer> = None;
-
-fn set_current_media_player(class: &str) {
+    let mpris_dest = get_mpris_destination(class, pid);
+    eprintln!("[media-helper] Determined MPRIS destination: {}", mpris_dest);
+    
     unsafe {
-        CURRENT_MEDIA_PLAYER = MediaPlayer::from_window_class(class);
-        if let Some(player) = &CURRENT_MEDIA_PLAYER {
-            eprintln!("[media-helper] Set current media player to: {:?}", player);
-        }
+        CURRENT_MEDIA_PLAYER_INSTANCE = Some(MediaPlayerInstance::new(
+            mpris_dest,
+            class.to_string(),
+            pid,
+        ));
+        eprintln!("[media-helper] Set current media player instance to: {:?}", CURRENT_MEDIA_PLAYER_INSTANCE);
     }
 }
 
-fn get_current_media_player() -> Option<MediaPlayer> {
+fn get_current_media_player_instance() -> Option<MediaPlayerInstance> {
     unsafe {
-        CURRENT_MEDIA_PLAYER.clone()
+        CURRENT_MEDIA_PLAYER_INSTANCE.clone()
     }
 }
 
-fn get_media_player_status() -> Option<VlcStatus> {
-    let media_player = get_current_media_player()?;
-    let mpris_dest = media_player.mpris_dest();
-    
-    eprintln!("[media-helper] Getting status from: {}", mpris_dest);
-    
-    // Get playback status with timeout to prevent hanging
-    let status_output = Command::new("timeout")
-        .arg("1") // 1 second timeout
-        .arg("dbus-send")
-        .arg("--session")
-        .arg(format!("--dest={}", mpris_dest))
-        .arg("--type=method_call")
-        .arg("--print-reply")
-        .arg("/org/mpris/MediaPlayer2")
-        .arg("org.freedesktop.DBus.Properties.Get")
-        .arg("string:org.mpris.MediaPlayer2.Player")
-        .arg("string:PlaybackStatus")
-        .output()
-        .ok()?;
-    
-    if !status_output.status.success() {
+// VLC-specific functions
+fn get_vlc_mpris_destination(pid: Option<u32>) -> String {
+    if let Some(pid) = pid {
+        let instance_name = format!("org.mpris.MediaPlayer2.vlc.instance{}", pid);
+        eprintln!("[vlc-helper] Using VLC instance-specific MPRIS: {}", instance_name);
+        instance_name
+    } else {
+        eprintln!("[vlc-helper] No PID available, using legacy VLC MPRIS");
+        "org.mpris.MediaPlayer2.vlc".to_string()
+    }
+}
+
+fn is_vlc_running() -> bool {
+    get_current_media_player_instance()
+        .map(|instance| instance.window_class == "vlc")
+        .unwrap_or(false)
+}
+
+fn get_vlc_status() -> Option<MediaStatus> {
+    let instance = get_current_media_player_instance()?;
+    if instance.window_class != "vlc" {
         return None;
     }
     
-    let status_text = String::from_utf8_lossy(&status_output.stdout);
-    let is_playing = status_text.contains("Playing");
+    let primary_dest = &instance.mpris_name;
+    let fallback_dest = "org.mpris.MediaPlayer2.vlc";
+    
+    let destinations = if primary_dest != fallback_dest {
+        vec![primary_dest.as_str(), fallback_dest]
+    } else {
+        vec![primary_dest.as_str()]
+    };
+    
+    for (i, mpris_dest) in destinations.iter().enumerate() {
+        if i == 0 {
+            eprintln!("[vlc-helper] Getting VLC status from: {} (primary)", mpris_dest);
+        } else {
+            eprintln!("[vlc-helper] Trying VLC fallback: {}", mpris_dest);
+        }
+        
+        if let Some(status) = get_vlc_status_from_dest(mpris_dest) {
+            eprintln!("[vlc-helper] Successfully connected to: {}", mpris_dest);
+            return Some(status);
+        }
+    }
+    
+    eprintln!("[vlc-helper] All VLC MPRIS destinations failed");
+    None
+}
 
-    // Get position with timeout to prevent hanging
-    let position_output = Command::new("timeout")
+fn execute_vlc_command(command: &str, args: &[&str]) -> bool {
+    let instance = match get_current_media_player_instance() {
+        Some(instance) => instance,
+        None => {
+            eprintln!("[vlc-helper] No VLC instance detected");
+            return false;
+        }
+    };
+    
+    if instance.window_class != "vlc" {
+        eprintln!("[vlc-helper] Instance is not VLC: {}", instance.window_class);
+        return false;
+    }
+    
+    let primary_dest = &instance.mpris_name;
+    let fallback_dest = "org.mpris.MediaPlayer2.vlc";
+    
+    let destinations = if primary_dest != fallback_dest {
+        vec![primary_dest.as_str(), fallback_dest]
+    } else {
+        vec![primary_dest.as_str()]
+    };
+    
+    for (i, mpris_dest) in destinations.iter().enumerate() {
+        if i == 0 {
+            eprintln!("[vlc-helper] Executing VLC command '{}' on {} (primary, class: {}, PID: {:?})", 
+                      command, mpris_dest, instance.window_class, instance.pid);
+        } else {
+            eprintln!("[vlc-helper] Trying VLC fallback: {}", mpris_dest);
+        }
+        
+        if try_execute_command_on_destination(command, args, mpris_dest) {
+            return true;
+        }
+    }
+    
+    false
+}
+
+// Dragon Player-specific functions
+fn get_dragon_player_mpris_destination(pid: Option<u32>) -> String {
+    if let Some(pid) = pid {
+        let instance_name = format!("org.mpris.MediaPlayer2.dragonplayer.instance{}", pid);
+        eprintln!("[dragon-helper] Using Dragon Player instance-specific MPRIS: {}", instance_name);
+        instance_name
+    } else {
+        eprintln!("[dragon-helper] No PID available, using legacy Dragon Player MPRIS");
+        "org.mpris.MediaPlayer2.dragonplayer".to_string()
+    }
+}
+
+fn is_dragon_player_running() -> bool {
+    get_current_media_player_instance()
+        .map(|instance| instance.window_class == "org.kde.dragonplayer")
+        .unwrap_or(false)
+}
+
+fn get_dragon_player_status() -> Option<MediaStatus> {
+    let instance = get_current_media_player_instance()?;
+    if instance.window_class != "org.kde.dragonplayer" {
+        return None;
+    }
+    
+    let primary_dest = &instance.mpris_name;
+    let fallback_dest = "org.mpris.MediaPlayer2.dragonplayer";
+    
+    let destinations = if primary_dest != fallback_dest {
+        vec![primary_dest.as_str(), fallback_dest]
+    } else {
+        vec![primary_dest.as_str()]
+    };
+    
+    for (i, mpris_dest) in destinations.iter().enumerate() {
+        if i == 0 {
+            eprintln!("[dragon-helper] Getting Dragon Player status from: {} (primary)", mpris_dest);
+        } else {
+            eprintln!("[dragon-helper] Trying Dragon Player fallback: {}", mpris_dest);
+        }
+        
+        if let Some(status) = get_dragon_player_status_from_dest(mpris_dest) {
+            eprintln!("[dragon-helper] Successfully connected to: {}", mpris_dest);
+            return Some(status);
+        }
+    }
+    
+    eprintln!("[dragon-helper] All Dragon Player MPRIS destinations failed");
+    None
+}
+
+fn execute_dragon_player_command(command: &str, args: &[&str]) -> bool {
+    let instance = match get_current_media_player_instance() {
+        Some(instance) => instance,
+        None => {
+            eprintln!("[dragon-helper] No Dragon Player instance detected");
+            return false;
+        }
+    };
+    
+    if instance.window_class != "org.kde.dragonplayer" {
+        eprintln!("[dragon-helper] Instance is not Dragon Player: {}", instance.window_class);
+        return false;
+    }
+    
+    let primary_dest = &instance.mpris_name;
+    let fallback_dest = "org.mpris.MediaPlayer2.dragonplayer";
+    
+    let destinations = if primary_dest != fallback_dest {
+        vec![primary_dest.as_str(), fallback_dest]
+    } else {
+        vec![primary_dest.as_str()]
+    };
+    
+    for (i, mpris_dest) in destinations.iter().enumerate() {
+        if i == 0 {
+            eprintln!("[dragon-helper] Executing Dragon Player command '{}' on {} (primary, class: {}, PID: {:?})", 
+                      command, mpris_dest, instance.window_class, instance.pid);
+        } else {
+            eprintln!("[dragon-helper] Trying Dragon Player fallback: {}", mpris_dest);
+        }
+        
+        if try_execute_command_on_destination(command, args, mpris_dest) {
+            return true;
+        }
+    }
+    
+    false
+}
+
+// Generic functions that route to the appropriate player-specific function
+fn get_mpris_destination(class: &str, pid: Option<u32>) -> String {
+    eprintln!("[media-helper] get_mpris_destination called with class: '{}', pid: {:?}", class, pid);
+    
+    match class {
+        "vlc" => get_vlc_mpris_destination(pid),
+        "org.kde.dragonplayer" => get_dragon_player_mpris_destination(pid),
+        _ => {
+            eprintln!("[media-helper] Unknown media player class: {}, using VLC fallback", class);
+            get_vlc_mpris_destination(pid)
+        }
+    }
+}
+
+fn is_media_player_running() -> bool {
+    // Check if we have a current media player instance
+    get_current_media_player_instance().is_some()
+}
+
+fn get_media_player_status() -> Option<MediaStatus> {
+    let instance = get_current_media_player_instance()?;
+    
+    // Route to the appropriate player-specific function
+    match instance.window_class.as_str() {
+        "vlc" => get_vlc_status(),
+        "org.kde.dragonplayer" => get_dragon_player_status(),
+        _ => {
+            eprintln!("[media-helper] Unknown media player class: {}, defaulting to VLC", instance.window_class);
+            get_vlc_status()
+        }
+    }
+}
+
+fn execute_media_player_command(command: &str, args: &[&str]) -> bool {
+    let instance = match get_current_media_player_instance() {
+        Some(instance) => instance,
+        None => {
+            eprintln!("[media-helper] No media player instance detected");
+            return false;
+        }
+    };
+    
+    // Route to the appropriate player-specific function
+    match instance.window_class.as_str() {
+        "vlc" => execute_vlc_command(command, args),
+        "org.kde.dragonplayer" => execute_dragon_player_command(command, args),
+        _ => {
+            eprintln!("[media-helper] Unknown media player class: {}, defaulting to VLC", instance.window_class);
+            execute_vlc_command(command, args)
+        }
+    }
+}
+
+fn get_vlc_status_from_dest(mpris_dest: &str) -> Option<MediaStatus> {
+    // Get all properties in a single DBus call to reduce latency
+    let output = Command::new("timeout")
         .arg("1") // 1 second timeout
         .arg("dbus-send")
         .arg("--session")
@@ -132,87 +334,45 @@ fn get_media_player_status() -> Option<VlcStatus> {
         .arg("--type=method_call")
         .arg("--print-reply")
         .arg("/org/mpris/MediaPlayer2")
-        .arg("org.freedesktop.DBus.Properties.Get")
+        .arg("org.freedesktop.DBus.Properties.GetAll")
         .arg("string:org.mpris.MediaPlayer2.Player")
-        .arg("string:Position")
         .output()
         .ok()?;
     
-    let position_text = String::from_utf8_lossy(&position_output.stdout);
-    let position = position_text.lines()
-        .find(|line| line.contains("int64"))
-        .and_then(|line| line.split_whitespace().last())
-        .and_then(|s| s.parse::<i64>().ok())
+    if !output.status.success() {
+        return None;
+    }
+    
+    let text = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = text.lines().collect();
+    
+    // Extract playback status
+    let is_playing = lines.iter().any(|line| line.contains("Playing"));
+    
+    // Extract position
+    let position = lines.iter()
+        .find(|line| line.contains("Position"))
+        .and_then(|line| {
+            // Look for the next line with int64 value
+            if let Some(pos) = lines.iter().position(|l| l == line) {
+                for i in (pos + 1)..lines.len() {
+                    if lines[i].contains("int64") {
+                        return lines[i].split_whitespace().last().and_then(|s| s.parse::<i64>().ok());
+                    }
+                }
+            }
+            None
+        })
         .unwrap_or(0);
 
-    // Get metadata with timeout to prevent hanging
-    let metadata_output = Command::new("timeout")
-        .arg("1") // 1 second timeout
-        .arg("dbus-send")
-        .arg("--session")
-        .arg(format!("--dest={}", mpris_dest))
-        .arg("--type=method_call")
-        .arg("--print-reply")
-        .arg("/org/mpris/MediaPlayer2")
-        .arg("org.freedesktop.DBus.Properties.Get")
-        .arg("string:org.mpris.MediaPlayer2.Player")
-        .arg("string:Metadata")
-        .output()
-        .ok()?;
-    
-    let metadata_text = String::from_utf8_lossy(&metadata_output.stdout);
-    
-    // Extract title
-    let title = metadata_text.lines()
-        .find(|line| line.contains("xesam:title"))
-        .and_then(|_line| {
-            // Look for the next line with a quoted string
-            let lines: Vec<&str> = metadata_text.lines().collect();
-            for (i, l) in lines.iter().enumerate() {
-                if l.contains("xesam:title") {
-                    for j in (i+1)..lines.len() {
-                        let trimmed = lines[j].trim();
-                        if trimmed.starts_with('"') && trimmed.ends_with('"') {
-                            return Some(trimmed[1..trimmed.len()-1].to_string());
-                        }
-                    }
-                }
-            }
-            None
-        })
-        .unwrap_or_else(|| "Unknown".to_string());
-    
-    // Extract artist
-    let artist = metadata_text.lines()
-        .find(|line| line.contains("xesam:artist"))
-        .and_then(|_line| {
-            // Look for the next line with a quoted string
-            let lines: Vec<&str> = metadata_text.lines().collect();
-            for (i, l) in lines.iter().enumerate() {
-                if l.contains("xesam:artist") {
-                    for j in (i+1)..lines.len() {
-                        let trimmed = lines[j].trim();
-                        if trimmed.starts_with('"') && trimmed.ends_with('"') {
-                            return Some(trimmed[1..trimmed.len()-1].to_string());
-                        }
-                    }
-                }
-            }
-            None
-        })
-        .unwrap_or_else(|| "Unknown".to_string());
-
-    // Get duration from metadata
-    let duration = metadata_text.lines()
+    // Extract duration from metadata
+    let duration = lines.iter()
         .find(|line| line.contains("mpris:length"))
-        .and_then(|_line| {
-            let lines: Vec<&str> = metadata_text.lines().collect();
-            for (i, l) in lines.iter().enumerate() {
-                if l.contains("mpris:length") {
-                    for j in (i+1)..lines.len() {
-                        if lines[j].contains("int64") {
-                            return lines[j].split_whitespace().last().and_then(|s| s.parse::<i64>().ok());
-                        }
+        .and_then(|line| {
+            if let Some(pos) = lines.iter().position(|l| l == line) {
+                for i in (pos + 1)..lines.len() {
+                    if lines[i].contains("int64") {
+                        return lines[i].split_whitespace().last().and_then(|s| s.parse::<i64>().ok());
                     }
                 }
             }
@@ -223,33 +383,109 @@ fn get_media_player_status() -> Option<VlcStatus> {
     // Calculate progress
     let progress = if duration > 0 { position as f64 / duration as f64 } else { 0.0 };
     
-    Some(VlcStatus {
+    Some(MediaStatus {
         is_playing,
         position: progress,
-        title,
-        artist,
         duration: duration / 1_000_000, // Convert to seconds
     })
 }
 
-fn execute_media_player_command(command: &str, args: &[&str]) -> bool {
-    let media_player = match get_current_media_player() {
-        Some(player) => player,
-        None => {
-            eprintln!("[media-helper] No media player detected");
-            return false;
+fn get_dragon_player_status_from_dest(mpris_dest: &str) -> Option<MediaStatus> {
+    // Get all properties in a single DBus call to reduce latency
+    let output = Command::new("timeout")
+        .arg("1") // 1 second timeout
+        .arg("dbus-send")
+        .arg("--session")
+        .arg(format!("--dest={}", mpris_dest))
+        .arg("--type=method_call")
+        .arg("--print-reply")
+        .arg("/org/mpris/MediaPlayer2")
+        .arg("org.freedesktop.DBus.Properties.GetAll")
+        .arg("string:org.mpris.MediaPlayer2.Player")
+        .output()
+        .ok()?;
+    
+    if !output.status.success() {
+        return None;
+    }
+    
+    let text = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = text.lines().collect();
+    
+    // Extract playback status
+    let is_playing = lines.iter().any(|line| line.contains("Playing"));
+    
+    // Extract position
+    let position = lines.iter()
+        .find(|line| line.contains("Position"))
+        .and_then(|line| {
+            // Look for the next line with int64 value
+            if let Some(pos) = lines.iter().position(|l| l == line) {
+                for i in (pos + 1)..lines.len() {
+                    if lines[i].contains("int64") {
+                        return lines[i].split_whitespace().last().and_then(|s| s.parse::<i64>().ok());
+                    }
+                }
+            }
+            None
+        })
+        .unwrap_or(0);
+    
+    // Extract duration from metadata
+    let duration = lines.iter()
+        .find(|line| line.contains("mpris:length"))
+        .and_then(|line| {
+            if let Some(pos) = lines.iter().position(|l| l == line) {
+                for i in (pos + 1)..lines.len() {
+                    if lines[i].contains("int64") {
+                        return lines[i].split_whitespace().last().and_then(|s| s.parse::<i64>().ok());
+                    }
+                }
+            }
+            None
+        })
+        .unwrap_or(0);
+    
+    // Calculate progress
+    let progress = if duration > 0 { position as f64 / duration as f64 } else { 0.0 };
+    
+    Some(MediaStatus {
+        is_playing,
+        position: progress,
+        duration: duration / 1_000, // Dragon Player uses milliseconds, convert to seconds
+    })
+}
+
+fn get_media_player_status_from_dest(mpris_dest: &str) -> Option<MediaStatus> {
+    // Get the current media player instance to determine the class
+    let instance = get_current_media_player_instance();
+    
+    // Determine which function to use based on the window class name
+    match instance.as_ref().map(|inst| inst.window_class.as_str()) {
+        Some("vlc") => get_vlc_status_from_dest(mpris_dest),
+        Some("org.kde.dragonplayer") => get_dragon_player_status_from_dest(mpris_dest),
+        _ => {
+            // Fallback: try to determine from MPRIS destination if no instance info
+            if mpris_dest.contains("vlc") {
+                get_vlc_status_from_dest(mpris_dest)
+            } else if mpris_dest.contains("dragonplayer") {
+                get_dragon_player_status_from_dest(mpris_dest)
+        } else {
+                // Default fallback to VLC
+                get_vlc_status_from_dest(mpris_dest)
+            }
         }
-    };
-    
-    let mpris_dest = media_player.mpris_dest();
-    eprintln!("[media-helper] Executing command '{}' on {}", command, mpris_dest);
-    
+    }
+}
+
+fn try_execute_command_on_destination(command: &str, args: &[&str], mpris_dest: &str) -> bool {
     let mut cmd = Command::new("timeout");
     cmd.arg("1") // 1 second timeout
        .arg("dbus-send")
        .arg("--session")
        .arg(format!("--dest={}", mpris_dest))
        .arg("--type=method_call")
+       .arg("--print-reply")
        .arg("/org/mpris/MediaPlayer2")
        .arg(command);
     
@@ -274,120 +510,140 @@ fn execute_media_player_command(command: &str, args: &[&str]) -> bool {
     }
 }
 
-fn handle_command(command: &str) {
+fn handle_command(command: &str, status_sender: &Arc<Mutex<Option<UnixStream>>>) {
+    // Get the current media player instance to determine which player we're working with
+    let player_info = get_current_media_player_instance();
+    let player_name = player_info.as_ref().map(|inst| inst.window_class.as_str()).unwrap_or("unknown");
+    
+    // Route to the appropriate player-specific command handler
+    match player_name {
+        "vlc" => {
+            eprintln!("[media-helper] Routing to VLC-specific command handler");
+            handle_vlc_command(command, status_sender)
+        }
+        "org.kde.dragonplayer" => {
+            eprintln!("[media-helper] Routing to Dragon Player-specific command handler");
+            handle_dragon_player_command(command, status_sender)
+        }
+        _ => {
+            eprintln!("[media-helper] Unknown media player class: {}, defaulting to VLC command handler", player_name);
+            handle_vlc_command(command, status_sender)
+        }
+    }
+}
+
+fn handle_vlc_command(command: &str, status_sender: &Arc<Mutex<Option<UnixStream>>>) {
+    // Command debouncing to prevent spam during fast movement
+    static mut LAST_SEEK_TIME: Option<std::time::Instant> = None;
+    static mut PENDING_SEEK: Option<f64> = None;
+    
+    const MIN_SEEK_INTERVAL: u64 = 150; // Minimum 150ms between seeks
+    
     match command.trim() {
         "play_pause" => {
             eprintln!("[vlc-helper] Executing play/pause command");
-            execute_media_player_command("org.mpris.MediaPlayer2.Player.PlayPause", &[]);
+            execute_vlc_command("org.mpris.MediaPlayer2.Player.PlayPause", &[]);
         }
         "play" => {
             eprintln!("[vlc-helper] Executing play command");
-            execute_media_player_command("org.mpris.MediaPlayer2.Player.Play", &[]);
+            execute_vlc_command("org.mpris.MediaPlayer2.Player.Play", &[]);
         }
         "pause" => {
             eprintln!("[vlc-helper] Executing pause command");
-            execute_media_player_command("org.mpris.MediaPlayer2.Player.Pause", &[]);
+            execute_vlc_command("org.mpris.MediaPlayer2.Player.Pause", &[]);
         }
         "next" => {
             eprintln!("[vlc-helper] Executing next command");
-            execute_media_player_command("org.mpris.MediaPlayer2.Player.Next", &[]);
+            execute_vlc_command("org.mpris.MediaPlayer2.Player.Next", &[]);
         }
         "previous" => {
             eprintln!("[vlc-helper] Executing previous command");
-            execute_media_player_command("org.mpris.MediaPlayer2.Player.Previous", &[]);
+            execute_vlc_command("org.mpris.MediaPlayer2.Player.Previous", &[]);
         }
         "stop" => {
             eprintln!("[vlc-helper] Executing stop command");
-            execute_media_player_command("org.mpris.MediaPlayer2.Player.Stop", &[]);
+            execute_vlc_command("org.mpris.MediaPlayer2.Player.Stop", &[]);
         }
         "raise" => {
             eprintln!("[vlc-helper] Executing raise command");
-            execute_media_player_command("org.mpris.MediaPlayer2.Raise", &[]);
+            execute_vlc_command("org.mpris.MediaPlayer2.Raise", &[]);
         }
         "quit" => {
             eprintln!("[vlc-helper] Executing quit command");
-            execute_media_player_command("org.mpris.MediaPlayer2.Quit", &[]);
+            execute_vlc_command("org.mpris.MediaPlayer2.Quit", &[]);
         }
         cmd if cmd.starts_with("seek:") => {
             if let Some(position_str) = cmd.strip_prefix("seek:") {
                 if let Ok(mut position) = position_str.parse::<f64>() {
-                    // Prevent seeking to exactly 0.0 or 1.0 to avoid VLC closing
+                    // Prevent seeking to exactly 0.0 or 1.0 to avoid media player closing
                     if position <= 0.001 {
                         position = 0.001;
                     } else if position >= 0.999 {
                         position = 0.999;
                     }
                     
-                    // Get current position and duration with timeout
-                    let current_pos_output = Command::new("timeout")
-                        .arg("1") // 1 second timeout
-                        .arg("dbus-send")
-                        .arg("--session")
-                        .arg("--dest=org.mpris.MediaPlayer2.vlc")
-                        .arg("--type=method_call")
-                        .arg("--print-reply")
-                        .arg("/org/mpris/MediaPlayer2")
-                        .arg("org.freedesktop.DBus.Properties.Get")
-                        .arg("string:org.mpris.MediaPlayer2.Player")
-                        .arg("string:Position")
-                        .output()
-                        .ok();
-
-                    let current_pos = current_pos_output
-                        .and_then(|output| {
-                            let text = String::from_utf8_lossy(&output.stdout);
-                            text.lines()
-                                .find(|line| line.contains("int64"))
-                                .and_then(|line| line.split_whitespace().last())
-                                .and_then(|s| s.parse::<i64>().ok())
-                        })
-                        .unwrap_or(0);
-
-                    // Get duration
-                    let duration_output = Command::new("timeout")
-                        .arg("1") // 1 second timeout
-                        .arg("dbus-send")
-                        .arg("--session")
-                        .arg("--dest=org.mpris.MediaPlayer2.vlc")
-                        .arg("--type=method_call")
-                        .arg("--print-reply")
-                        .arg("/org/mpris/MediaPlayer2")
-                        .arg("org.freedesktop.DBus.Properties.Get")
-                        .arg("string:org.mpris.MediaPlayer2.Player")
-                        .arg("string:Metadata")
-                        .output()
-                        .ok();
-
-                    let duration = duration_output
-                        .and_then(|output| {
-                            let text = String::from_utf8_lossy(&output.stdout);
-                            text.lines()
-                                .find(|line| line.contains("mpris:length"))
-                                .and_then(|_line| {
-                                    let lines: Vec<&str> = text.lines().collect();
-                                    for (i, l) in lines.iter().enumerate() {
-                                        if l.contains("mpris:length") {
-                                            for j in (i+1)..lines.len() {
-                                                if lines[j].contains("int64") {
-                                                    return lines[j].split_whitespace().last().and_then(|s| s.parse::<i64>().ok());
-                                                }
-                                            }
-                                        }
-                                    }
-                                    None
-                                })
-                        })
-                        .unwrap_or(0);
-
-                    // Calculate the target time in microseconds
-                    let target_time = (position * duration as f64) as i64;
+                    let now = std::time::Instant::now();
+                    let can_seek = unsafe {
+                        if let Some(last_seek) = LAST_SEEK_TIME {
+                            now.duration_since(last_seek).as_millis() >= MIN_SEEK_INTERVAL as u128
+                        } else {
+                            true // First seek, always allow
+                        }
+                    };
                     
-                    // Calculate the seek offset (difference from current position)
-                    let seek_offset = target_time - current_pos;
-                    
-                    eprintln!("[vlc-helper] Executing seek command to position: {} (target time: {} microseconds, current: {}, offset: {}, duration: {})", 
-                             position, target_time, current_pos, seek_offset, duration);
-                    execute_media_player_command("org.mpris.MediaPlayer2.Player.Seek", &[&format!("int64:{}", seek_offset)]);
+                    if can_seek {
+                        // Execute seek immediately
+                        unsafe {
+                            LAST_SEEK_TIME = Some(now);
+                            PENDING_SEEK = None; // Clear any pending seek
+                        }
+                        
+                        eprintln!("[vlc-helper] Executing seek command to position: {} (fast mode, debounced)", position);
+                        
+                        // Use Seek method instead of SetPosition - more reliable
+                        // First get current position and duration to calculate seek offset
+                        if let Some(current_status) = get_vlc_status() {
+                            let duration_microseconds = current_status.duration * 1_000_000;
+                            let target_position_microseconds = (position * duration_microseconds as f64) as i64;
+                            let current_position_microseconds = (current_status.position * duration_microseconds as f64) as i64;
+                            let seek_offset = target_position_microseconds - current_position_microseconds;
+                            
+                            eprintln!("[vlc-helper] Seeking (VLC): current={}μs, target={}μs, offset={}μs", 
+                                     current_position_microseconds, target_position_microseconds, seek_offset);
+                            
+                            // Execute seek command with offset
+                            let success = execute_vlc_command("org.mpris.MediaPlayer2.Player.Seek", &[&format!("int64:{}", seek_offset)]);
+                            
+                            if success {
+                                // IMMEDIATELY send status update to move the header
+                                // This prevents the delay and makes the UI responsive
+                                let mut updated_status = current_status;
+                                updated_status.position = position;
+                                
+                                // Send immediate update to move header
+                                send_status_update(status_sender, &updated_status);
+                                eprintln!("[vlc-helper] Header updated immediately to position: {:.2}%", position * 100.0);
+                            } else {
+                                eprintln!("[vlc-helper] Seek command failed");
+                            }
+                        } else {
+                            eprintln!("[vlc-helper] Failed to get current status for seek");
+                        }
+                    } else {
+                        // Store this seek for later execution
+                        unsafe {
+                            PENDING_SEEK = Some(position);
+                        }
+                        eprintln!("[vlc-helper] Seek throttled: position {} (too soon after last seek, will execute later)", position);
+                        
+                        // Still update header immediately for visual feedback
+                        if let Some(current_status) = get_vlc_status() {
+                            let mut updated_status = current_status;
+                            updated_status.position = position;
+                            send_status_update(status_sender, &updated_status);
+                            eprintln!("[vlc-helper] Header updated immediately (throttled seek: {:.2}%)", position * 100.0);
+                        }
+                    }
                 } else {
                     eprintln!("[vlc-helper] Invalid seek position: {}", position_str);
                 }
@@ -396,9 +652,33 @@ fn handle_command(command: &str) {
         cmd if cmd.starts_with("set_position:") => {
             if let Some(position_str) = cmd.strip_prefix("set_position:") {
                 if let Ok(position) = position_str.parse::<f64>() {
-                    let seek_position = (position * 1_000_000.0) as i64;
                     eprintln!("[vlc-helper] Executing set position command to: {}", position);
-                    execute_media_player_command("org.mpris.MediaPlayer2.Player.SetPosition", &[&format!("objectpath:/org/mpris/MediaPlayer2/TrackList/NoTrack"), &format!("int64:{}", seek_position)]);
+                    
+                    // Use Seek method instead of SetPosition - more reliable
+                    if let Some(current_status) = get_vlc_status() {
+                        let duration_microseconds = current_status.duration * 1_000_000;
+                        let target_position_microseconds = (position * duration_microseconds as f64) as i64;
+                        let current_position_microseconds = (current_status.position * duration_microseconds as f64) as i64;
+                        let seek_offset = target_position_microseconds - current_position_microseconds;
+                        
+                        eprintln!("[vlc-helper] Set position (VLC): current={}μs, target={}μs, offset={}μs", 
+                                 current_position_microseconds, target_position_microseconds, seek_offset);
+                        
+                        // Execute seek command with offset
+                        let success = execute_vlc_command("org.mpris.MediaPlayer2.Player.Seek", &[&format!("int64:{}", seek_offset)]);
+                        
+                        if success {
+                            // IMMEDIATELY send status update to move the header
+                            let mut updated_status = current_status;
+                            updated_status.position = position;
+                            send_status_update(status_sender, &updated_status);
+                            eprintln!("[vlc-helper] Header updated immediately to position: {:.2}%", position * 100.0);
+                } else {
+                            eprintln!("[vlc-helper] Set position command failed");
+                        }
+                    } else {
+                        eprintln!("[vlc-helper] Failed to get current status for set position");
+                    }
                 } else {
                     eprintln!("[vlc-helper] Invalid set position: {}", position_str);
                 }
@@ -408,354 +688,829 @@ fn handle_command(command: &str) {
             eprintln!("[vlc-helper] Unknown command: {}", command);
         }
     }
+    
+    // Process any pending seek if enough time has passed
+    unsafe {
+        if let Some(pending_position) = PENDING_SEEK {
+            if let Some(last_seek) = LAST_SEEK_TIME {
+                let now = std::time::Instant::now();
+                if now.duration_since(last_seek).as_millis() >= MIN_SEEK_INTERVAL as u128 {
+                    eprintln!("[vlc-helper] Processing pending seek to position: {}", pending_position);
+                    
+                    // Execute the pending seek
+                    if let Some(current_status) = get_vlc_status() {
+                        let duration_microseconds = current_status.duration * 1_000_000;
+                        let target_position_microseconds = (pending_position * duration_microseconds as f64) as i64;
+                        let current_position_microseconds = (current_status.position * duration_microseconds as f64) as i64;
+                        let seek_offset = target_position_microseconds - current_position_microseconds;
+                        
+                        eprintln!("[vlc-helper] Executing pending seek (VLC): current={}μs, target={}μs, offset={}μs", 
+                                 current_position_microseconds, target_position_microseconds, seek_offset);
+                        
+                        let success = execute_vlc_command("org.mpris.MediaPlayer2.Player.Seek", &[&format!("int64:{}", seek_offset)]);
+                        
+                        if success {
+                            eprintln!("[vlc-helper] Pending seek executed successfully to position: {:.2}%", pending_position * 100.0);
+                            LAST_SEEK_TIME = Some(now);
+                            PENDING_SEEK = None;
+                        } else {
+                            eprintln!("[vlc-helper] Pending seek failed");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn handle_dragon_player_command(command: &str, status_sender: &Arc<Mutex<Option<UnixStream>>>) {
+    // Command debouncing to prevent spam during fast movement
+    static mut LAST_SEEK_TIME: Option<std::time::Instant> = None;
+    static mut PENDING_SEEK: Option<f64> = None;
+    
+    const MIN_SEEK_INTERVAL: u64 = 150; // Minimum 150ms between seeks
+    
+    match command.trim() {
+        "play_pause" => {
+            eprintln!("[dragon-helper] Executing play/pause command");
+            execute_dragon_player_command("org.mpris.MediaPlayer2.Player.PlayPause", &[]);
+        }
+        "play" => {
+            eprintln!("[dragon-helper] Executing play command");
+            execute_dragon_player_command("org.mpris.MediaPlayer2.Player.Play", &[]);
+        }
+        "pause" => {
+            eprintln!("[dragon-helper] Executing pause command");
+            execute_dragon_player_command("org.mpris.MediaPlayer2.Player.Pause", &[]);
+        }
+        "next" => {
+            eprintln!("[dragon-helper] Executing next command");
+            execute_dragon_player_command("org.mpris.MediaPlayer2.Player.Next", &[]);
+        }
+        "previous" => {
+            eprintln!("[dragon-helper] Executing previous command");
+            execute_dragon_player_command("org.mpris.MediaPlayer2.Player.Previous", &[]);
+        }
+        "stop" => {
+            eprintln!("[dragon-helper] Executing stop command");
+            execute_dragon_player_command("org.mpris.MediaPlayer2.Player.Stop", &[]);
+        }
+        "raise" => {
+            eprintln!("[dragon-helper] Executing raise command");
+            execute_dragon_player_command("org.mpris.MediaPlayer2.Raise", &[]);
+        }
+        "quit" => {
+            eprintln!("[dragon-helper] Executing quit command");
+            execute_dragon_player_command("org.mpris.MediaPlayer2.Quit", &[]);
+        }
+        cmd if cmd.starts_with("seek:") => {
+            if let Some(position_str) = cmd.strip_prefix("seek:") {
+                if let Ok(mut position) = position_str.parse::<f64>() {
+                    // Prevent seeking to exactly 0.0 or 1.0 to avoid media player closing
+                    if position <= 0.001 {
+                        position = 0.001;
+                    } else if position >= 0.999 {
+                        position = 0.999;
+                    }
+                    
+                    let now = std::time::Instant::now();
+                    let can_seek = unsafe {
+                        if let Some(last_seek) = LAST_SEEK_TIME {
+                            now.duration_since(last_seek).as_millis() >= MIN_SEEK_INTERVAL as u128
+                        } else {
+                            true // First seek, always allow
+                        }
+                    };
+                    
+                    if can_seek {
+                        // Execute seek immediately
+                        unsafe {
+                            LAST_SEEK_TIME = Some(now);
+                            PENDING_SEEK = None; // Clear any pending seek
+                        }
+                        
+                        eprintln!("[dragon-helper] Executing seek command to position: {} (fast mode, debounced)", position);
+                        
+                        // Use Seek method instead of SetPosition - more reliable
+                        // First get current position and duration to calculate seek offset
+                        if let Some(current_status) = get_dragon_player_status() {
+                            let duration_milliseconds = current_status.duration * 1_000;
+                            let target_position_milliseconds = (position * duration_milliseconds as f64) as i64;
+                            let current_position_milliseconds = (current_status.position * duration_milliseconds as f64) as i64;
+                            let seek_offset = target_position_milliseconds - current_position_milliseconds;
+                            
+                            eprintln!("[dragon-helper] Seeking (Dragon Player): current={}ms, target={}ms, offset={}ms", 
+                                     current_position_milliseconds, target_position_milliseconds, seek_offset);
+                            
+                            // Execute seek command with offset
+                            let success = execute_dragon_player_command("org.mpris.MediaPlayer2.Player.Seek", &[&format!("int64:{}", seek_offset)]);
+                            
+                            if success {
+                                // IMMEDIATELY send status update to move the header
+                                // This prevents the delay and makes the UI responsive
+                                let mut updated_status = current_status;
+                                updated_status.position = position;
+                                
+                                // Send immediate update to move header
+                                send_status_update(status_sender, &updated_status);
+                                eprintln!("[dragon-helper] Header updated immediately to position: {:.2}%", position * 100.0);
+                            } else {
+                                eprintln!("[dragon-helper] Seek command failed");
+                            }
+                        } else {
+                            eprintln!("[dragon-helper] Failed to get current status for seek");
+                        }
+                    } else {
+                        // Store this seek for later execution
+                        unsafe {
+                            PENDING_SEEK = Some(position);
+                        }
+                        eprintln!("[dragon-helper] Seek throttled: position {} (too soon after last seek, will execute later)", position);
+                        
+                        // Still update header immediately for visual feedback
+                        if let Some(current_status) = get_dragon_player_status() {
+                            let mut updated_status = current_status;
+                            updated_status.position = position;
+                            send_status_update(status_sender, &updated_status);
+                            eprintln!("[dragon-helper] Header updated immediately (throttled seek: {:.2}%)", position * 100.0);
+                        }
+                    }
+                } else {
+                    eprintln!("[dragon-helper] Invalid seek position: {}", position_str);
+                }
+            }
+        }
+        cmd if cmd.starts_with("set_position:") => {
+            if let Some(position_str) = cmd.strip_prefix("set_position:") {
+                if let Ok(position) = position_str.parse::<f64>() {
+                    eprintln!("[dragon-helper] Executing set position command to: {}", position);
+                    
+                    // Use Seek method instead of SetPosition - more reliable
+                    if let Some(current_status) = get_dragon_player_status() {
+                        let duration_milliseconds = current_status.duration * 1_000;
+                        let target_position_milliseconds = (position * duration_milliseconds as f64) as i64;
+                        let current_position_milliseconds = (current_status.position * duration_milliseconds as f64) as i64;
+                        let seek_offset = target_position_milliseconds - current_position_milliseconds;
+                        
+                        eprintln!("[dragon-helper] Set position (Dragon Player): current={}ms, target={}ms, offset={}ms", 
+                                 current_position_milliseconds, target_position_milliseconds, seek_offset);
+                        
+                        // Execute seek command with offset
+                        let success = execute_dragon_player_command("org.mpris.MediaPlayer2.Player.Seek", &[&format!("int64:{}", seek_offset)]);
+                        
+                        if success {
+                            // IMMEDIATELY send status update to move the header
+                            let mut updated_status = current_status;
+                            updated_status.position = position;
+                            send_status_update(status_sender, &updated_status);
+                            eprintln!("[dragon-helper] Header updated immediately to position: {:.2}%", position * 100.0);
+                        } else {
+                            eprintln!("[dragon-helper] Set position command failed");
+                        }
+                    } else {
+                        eprintln!("[dragon-helper] Failed to get current status for set position");
+                    }
+                } else {
+                    eprintln!("[dragon-helper] Invalid set position: {}", position_str);
+                }
+            }
+        }
+        _ => {
+            eprintln!("[dragon-helper] Unknown command: {}", command);
+        }
+    }
+    
+    // Process any pending seek if enough time has passed
+    unsafe {
+        if let Some(pending_position) = PENDING_SEEK {
+            if let Some(last_seek) = LAST_SEEK_TIME {
+                let now = std::time::Instant::now();
+                if now.duration_since(last_seek).as_millis() >= MIN_SEEK_INTERVAL as u128 {
+                    eprintln!("[dragon-helper] Processing pending seek to position: {}", pending_position);
+                    
+                    // Execute the pending seek
+                    if let Some(current_status) = get_dragon_player_status() {
+                        let duration_milliseconds = current_status.duration * 1_000;
+                        let target_position_milliseconds = (pending_position * duration_milliseconds as f64) as i64;
+                        let current_position_milliseconds = (current_status.position * duration_milliseconds as f64) as i64;
+                        let seek_offset = target_position_milliseconds - current_position_milliseconds;
+                        
+                        eprintln!("[dragon-helper] Executing pending seek (Dragon Player): current={}ms, target={}ms, offset={}ms", 
+                                 current_position_milliseconds, target_position_milliseconds, seek_offset);
+                        
+                        let success = execute_dragon_player_command("org.mpris.MediaPlayer2.Player.Seek", &[&format!("int64:{}", seek_offset)]);
+                        
+                        if success {
+                            eprintln!("[dragon-helper] Pending seek executed successfully to position: {:.2}%", pending_position * 100.0);
+                            LAST_SEEK_TIME = Some(now);
+                            PENDING_SEEK = None;
+                        } else {
+                            eprintln!("[dragon-helper] Pending seek failed");
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn monitor_media_player_events(status_sender: Arc<Mutex<Option<UnixStream>>>) {
-    // Event-driven monitoring with smart position polling
-    // Only polls position during playback, stops when paused/stopped
+    // Pure event-driven approach with minimal position polling only during playback
     
-    let mut current_status = VlcStatus::empty();
-    let mut vlc_running = false;
-    
-    // Check initial VLC status
-            if is_media_player_running() {
-        vlc_running = true;
+    // Check initial media player status
+    if is_media_player_running() {
         if let Some(initial_status) = get_media_player_status() {
-            current_status = initial_status.clone();
-            send_status_update(&status_sender, &current_status);
-            eprintln!("[vlc-helper] Initial VLC status detected: playing={}, title={}", current_status.is_playing, current_status.title);
+            send_status_update(&status_sender, &initial_status);
+            
+            let player_name = get_current_media_player_instance()
+                .map(|inst| inst.window_class.clone())
+                .unwrap_or_else(|| "unknown".to_string());
+            
+            eprintln!("[{}] Initial status detected: playing={}, position={:.2}%", 
+                     player_name, initial_status.is_playing, initial_status.position * 100.0);
         }
+    }
+    
+    // Create a shared state for playback status to coordinate between threads
+    let playback_state = Arc::new(Mutex::new((false, MediaStatus::empty())));
+    let playback_state_clone = playback_state.clone();
+    
+    // Initialize shared state with current status if available
+    if let Some(current_status) = get_media_player_status() {
+        if let Ok(mut state) = playback_state.lock() {
+            state.0 = current_status.is_playing;
+            state.1 = current_status.clone();
+        }
+        
+        let player_name = get_current_media_player_instance()
+            .map(|inst| inst.window_class.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        
+        eprintln!("[{}] Shared state initialized: playing={}, position={:.2}%", 
+                 player_name, current_status.is_playing, current_status.position * 100.0);
     }
     
     // Clone status_sender for position updates
     let position_sender = status_sender.clone();
     
-    // Start smart position tracking thread
+    // Start simple position polling thread - ONLY when playing=true
     thread::spawn(move || {
-        let mut last_status = VlcStatus::empty();
-        let mut last_update_time = std::time::Instant::now();
-        
         loop {
-            // Only poll if VLC is actually playing
-            if last_status.is_playing && last_status.duration > 0 {
-                let now = std::time::Instant::now();
-                let elapsed = now.duration_since(last_update_time).as_secs_f64();
-                
-                if elapsed >= 0.5 { // Update every 500ms during playback only
-                    // Get current position from VLC (minimal polling only during playback)
-                    if let Some(status) = get_media_player_status() {
-                        if status.is_playing && status.duration > 0 {
-                            // Only update if position actually changed
-                            if (status.position - last_status.position).abs() > 0.001 {
-                                let position_percent = status.position * 100.0;
-                                send_status_update(&position_sender, &status);
-                                last_status = status;
-                                eprintln!("[media-helper] Position updated: {:.2}%", position_percent);
-                            }
-                        } else {
-                            // Media player stopped playing - stop polling and update status
-                            send_status_update(&position_sender, &status);
-                            last_status = status;
-                            eprintln!("[media-helper] Media player stopped playing - polling stopped");
-                        }
-                    }
-                    
-                    last_update_time = now;
+            // Check if currently playing from shared state
+            let is_playing = {
+                if let Ok(state) = playback_state_clone.lock() {
+                    state.0
+                } else {
+                    false
                 }
-            } else {
-                // Not playing - no polling, just check occasionally for status changes
-                if let Some(status) = get_media_player_status() {
-                    if status != last_status {
-                        let is_playing = status.is_playing;
-                        send_status_update(&position_sender, &status);
-                        last_status = status;
-                        if is_playing {
-                            eprintln!("[media-helper] Media player started playing - polling started");
-                        }
-                    }
-                }
-            }
+            };
             
-            // Small sleep to prevent busy waiting
-            thread::sleep(Duration::from_millis(100));
+            if is_playing {
+                // Get current position and send update
+                if let Some(status) = get_media_player_status() {
+                    if status.is_playing && status.duration > 0 {
+                        send_status_update(&position_sender, &status);
+                        
+                        let player_name = get_current_media_player_instance()
+                            .map(|inst| inst.window_class.clone())
+                            .unwrap_or_else(|| "unknown".to_string());
+                        
+                        eprintln!("[{}] Position polling update: {:.2}%", 
+                                 player_name, status.position * 100.0);
+                    }
+                }
+                
+                // Poll every 1 second when playing
+                thread::sleep(Duration::from_millis(1000));
+            } else {
+                // Not playing - sleep longer and wait for events
+                thread::sleep(Duration::from_millis(500));
+            }
         }
     });
     
-    // Use dbus-monitor to listen for VLC signals
-    let mut dbus_monitor = match Command::new("dbus-monitor")
-        .arg("--session")
-        .arg("type='signal'")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn() {
-            Ok(child) => child,
-            Err(e) => {
-                eprintln!("[vlc-helper] Failed to start dbus-monitor: {}", e);
-                return;
-            }
-        };
-    
-    let stdout = match dbus_monitor.stdout.take() {
-        Some(stdout) => stdout,
-        None => {
-            eprintln!("[vlc-helper] Failed to get dbus-monitor stdout");
-            return;
+    // Start event-driven DBus monitoring
+    let status_sender_clone = status_sender.clone();
+    let playback_state_clone = playback_state.clone();
+    thread::spawn(move || {
+        if let Err(e) = run_dbus_event_monitor(status_sender_clone, playback_state_clone) {
+            eprintln!("[media-helper] DBus event monitor failed: {}, restarting...", e);
+            thread::sleep(Duration::from_millis(1000));
+            monitor_media_player_events(status_sender);
         }
-    };
+    });
+}
+
+fn run_dbus_event_monitor(
+    status_sender: Arc<Mutex<Option<UnixStream>>>, 
+    playback_state: Arc<Mutex<(bool, MediaStatus)>>
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Get the current media player instance to determine which player we're monitoring
+    let instance = get_current_media_player_instance();
     
-    let mut reader = std::io::BufReader::new(stdout);
-    let mut line = String::new();
-    let mut signal_buffer = Vec::new();
-    let mut in_signal = false;
-    let mut signal_sender = "";
+    // Route to the appropriate player-specific DBus event monitor
+    match instance.as_ref().map(|inst| inst.window_class.as_str()) {
+        Some("vlc") => {
+            eprintln!("[media-helper] Routing to VLC-specific DBus event monitor");
+            run_vlc_dbus_event_monitor(status_sender, playback_state)
+        }
+        Some("org.kde.dragonplayer") => {
+            eprintln!("[media-helper] Routing to Dragon Player-specific DBus event monitor");
+            run_dragon_player_dbus_event_monitor(status_sender, playback_state)
+        }
+        _ => {
+            eprintln!("[media-helper] Unknown media player class, defaulting to VLC DBus event monitor");
+            run_vlc_dbus_event_monitor(status_sender, playback_state)
+        }
+    }
+}
+
+fn run_vlc_dbus_event_monitor(
+    status_sender: Arc<Mutex<Option<UnixStream>>>, 
+    playback_state: Arc<Mutex<(bool, MediaStatus)>>
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Create async runtime for zbus
+    let rt = tokio::runtime::Runtime::new()?;
     
-    loop {
-        line.clear();
-        match reader.read_line(&mut line) {
-            Ok(0) => {
-                eprintln!("[vlc-helper] dbus-monitor closed");
-                break;
+    rt.block_on(async {
+        let connection = Connection::session().await?;
+        let mut stream = MessageStream::from(&connection);
+        let dbus_proxy = DBusProxy::new(&connection).await?;
+        
+        // Subscribe to MPRIS signals specifically for VLC
+        let rules = vec![
+            // PropertiesChanged signals for playback status, position, metadata
+            MatchRule::builder()
+                .msg_type(MessageType::Signal)
+                .interface("org.freedesktop.DBus.Properties")?
+                .path_namespace("/org/mpris/MediaPlayer2")?
+                .member("PropertiesChanged")?
+                .build(),
+            // Seeked signals for position changes
+            MatchRule::builder()
+                .msg_type(MessageType::Signal)
+                .interface("org.mpris.MediaPlayer2.Player")?
+                .member("Seeked")?
+                .build(),
+            // NameOwnerChanged signals for VLC service appearance/disappearance
+            MatchRule::builder()
+                .msg_type(MessageType::Signal)
+                .interface("org.freedesktop.DBus")?
+                .member("NameOwnerChanged")?
+                .arg0ns("org.mpris.MediaPlayer2.vlc")?
+                .build(),
+        ];
+        
+        // Add all match rules
+        for rule in rules {
+            if let Err(e) = dbus_proxy.add_match_rule(rule).await {
+                eprintln!("[vlc-helper] Failed to add VLC match rule: {}", e);
             }
-            Ok(_) => {
-                let trimmed = line.trim();
+        }
+        
+        eprintln!("[vlc-helper] VLC-specific DBus signal subscription active");
+        
+        // Process incoming DBus messages
+        while let Some(msg) = stream.next().await {
+            let msg = msg?;
+            let header = msg.header()?;
+            
+            // Only process signal messages
+            if msg.message_type() != MessageType::Signal {
+                continue;
+            }
+            
+            if let (Some(interface), Some(member)) = (header.interface()?, header.member()?) {
+                let interface_str = interface.as_str();
+                let member_str = member.as_str();
                 
-                // Detect signal start
-                if trimmed.starts_with("signal") && (trimmed.contains("org.mpris.MediaPlayer2.vlc") || trimmed.contains("org.mpris.MediaPlayer2.dragonplayer")) {
-                    in_signal = true;
-                    signal_buffer.clear();
-                    
-                    if trimmed.contains("PropertiesChanged") {
-                        signal_sender = "PropertiesChanged";
-                    } else if trimmed.contains("Seeked") {
-                        signal_sender = "Seeked";
-                    } else {
-                        signal_sender = "other";
-                    }
-                    
-                    signal_buffer.push(trimmed.to_string());
-                    eprintln!("[media-helper] Media player signal detected: {}", signal_sender);
-                }
-                // Detect signal end
-                else if in_signal && trimmed.is_empty() {
-                    in_signal = false;
-                    
-                    // Process the complete signal
-                    match signal_sender {
-                        "PropertiesChanged" => {
-                            process_properties_changed_signal(&signal_buffer, &mut current_status, &mut vlc_running, &status_sender);
-                        }
-                        "Seeked" => {
-                            process_seeked_signal(&signal_buffer, &mut current_status, &status_sender);
-                        }
-                        _ => {
-                            if signal_buffer.iter().any(|l| l.contains("NameOwnerChanged")) {
-                                process_name_owner_changed_signal(&signal_buffer, &mut vlc_running, &status_sender);
+                eprintln!("[vlc-helper] Received VLC DBus signal: {}.{}", interface_str, member_str);
+                
+                match (interface_str, member_str) {
+                    ("org.freedesktop.DBus.Properties", "PropertiesChanged") => {
+                        // Handle PropertiesChanged signal for VLC
+                        if let Ok((interface_name, changed_props, _invalidated_props)) = 
+                            msg.body::<(String, std::collections::HashMap<String, zbus::zvariant::Value>, Vec<String>)>() {
+                            
+                            if interface_name == "org.mpris.MediaPlayer2.Player" {
+                                eprintln!("[vlc-helper] VLC player properties changed: {:?}", changed_props);
+                                // Process the changed properties for VLC
+                                process_vlc_properties_changed_signal_dbus(changed_props, &status_sender, &playback_state);
                             }
                         }
                     }
+                    ("org.mpris.MediaPlayer2.Player", "Seeked") => {
+                        // Handle Seeked signal for VLC
+                        if let Ok(position) = msg.body::<i64>() {
+                            eprintln!("[vlc-helper] VLC seeked to position: {} microseconds", position);
+                            process_vlc_seeked_signal_dbus(position, &status_sender, &playback_state);
+                        }
+                    }
+                    ("org.freedesktop.DBus", "NameOwnerChanged") => {
+                        // Handle NameOwnerChanged signal for VLC
+                        if let Ok((name, old_owner, new_owner)) = 
+                            msg.body::<(String, String, String)>() {
+                            
+                            if name.starts_with("org.mpris.MediaPlayer2.vlc") {
+                                eprintln!("[vlc-helper] VLC service changed: {} (old: {}, new: {})", name, old_owner, new_owner);
+                                process_vlc_name_owner_changed_signal_dbus(&name, &old_owner, &new_owner, &status_sender, &playback_state);
+                            }
+                        }
+                    }
+                    _ => {
+                        // Other signals - log for debugging
+                        if let Ok(body) = msg.body::<String>() {
+                            eprintln!("[vlc-helper] Unhandled VLC signal: {}.{} - {}", interface_str, member_str, body);
+                        }
+                    }
+                }
+            }
+        }
+        
+        Ok::<(), zbus::Error>(())
+    })?;
+    
+    Ok(())
+}
+
+fn run_dragon_player_dbus_event_monitor(
+    status_sender: Arc<Mutex<Option<UnixStream>>>, 
+    playback_state: Arc<Mutex<(bool, MediaStatus)>>
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Create async runtime for zbus
+    let rt = tokio::runtime::Runtime::new()?;
+    
+    rt.block_on(async {
+        let connection = Connection::session().await?;
+        let mut stream = MessageStream::from(&connection);
+        let dbus_proxy = DBusProxy::new(&connection).await?;
+        
+        // Subscribe to MPRIS signals specifically for Dragon Player
+        let rules = vec![
+            // PropertiesChanged signals for playback status, position, metadata
+            MatchRule::builder()
+                .msg_type(MessageType::Signal)
+                .interface("org.freedesktop.DBus.Properties")?
+                .path_namespace("/org/mpris/MediaPlayer2")?
+                .member("PropertiesChanged")?
+                .build(),
+            // Seeked signals for position changes
+            MatchRule::builder()
+                .msg_type(MessageType::Signal)
+                .interface("org.mpris.MediaPlayer2.Player")?
+                .member("Seeked")?
+                .build(),
+            // NameOwnerChanged signals for Dragon Player service appearance/disappearance
+            MatchRule::builder()
+                .msg_type(MessageType::Signal)
+                .interface("org.freedesktop.DBus")?
+                .member("NameOwnerChanged")?
+                .arg0ns("org.mpris.MediaPlayer2.dragonplayer")?
+                .build(),
+        ];
+        
+        // Add all match rules
+        for rule in rules {
+            if let Err(e) = dbus_proxy.add_match_rule(rule).await {
+                eprintln!("[dragon-helper] Failed to add Dragon Player match rule: {}", e);
+            }
+        }
+        
+        eprintln!("[dragon-helper] Dragon Player-specific DBus signal subscription active");
+        
+        // Process incoming DBus messages
+        while let Some(msg) = stream.next().await {
+            let msg = msg?;
+            let header = msg.header()?;
+            
+            // Only process signal messages
+            if msg.message_type() != MessageType::Signal {
+                continue;
+            }
+            
+            if let (Some(interface), Some(member)) = (header.interface()?, header.member()?) {
+                let interface_str = interface.as_str();
+                let member_str = member.as_str();
+                
+                eprintln!("[dragon-helper] Received Dragon Player DBus signal: {}.{}", interface_str, member_str);
+                
+                match (interface_str, member_str) {
+                    ("org.freedesktop.DBus.Properties", "PropertiesChanged") => {
+                        // Handle PropertiesChanged signal for Dragon Player
+                        if let Ok((interface_name, changed_props, _invalidated_props)) = 
+                            msg.body::<(String, std::collections::HashMap<String, zbus::zvariant::Value>, Vec<String>)>() {
+                            
+                            if interface_name == "org.mpris.MediaPlayer2.Player" {
+                                eprintln!("[dragon-helper] Dragon Player properties changed: {:?}", changed_props);
+                                // Process the changed properties for Dragon Player
+                                process_dragon_player_properties_changed_signal_dbus(changed_props, &status_sender, &playback_state);
+                            }
+                        }
+                    }
+                    ("org.mpris.MediaPlayer2.Player", "Seeked") => {
+                        // Handle Seeked signal for Dragon Player
+                        if let Ok(position) = msg.body::<i64>() {
+                            eprintln!("[dragon-helper] Dragon Player seeked to position: {} microseconds", position);
+                            process_dragon_player_seeked_signal_dbus(position, &status_sender, &playback_state);
+                        }
+                    }
+                    ("org.freedesktop.DBus", "NameOwnerChanged") => {
+                        // Handle NameOwnerChanged signal for Dragon Player
+                        if let Ok((name, old_owner, new_owner)) = 
+                            msg.body::<(String, String, String)>() {
+                            
+                            if name.starts_with("org.mpris.MediaPlayer2.dragonplayer") {
+                                eprintln!("[dragon-helper] Dragon Player service changed: {} (old: {}, new: {})", name, old_owner, new_owner);
+                                process_dragon_player_name_owner_changed_signal_dbus(&name, &old_owner, &new_owner, &status_sender, &playback_state);
+                            }
+                        }
+                    }
+                    _ => {
+                        // Other signals - log for debugging
+                        if let Ok(body) = msg.body::<String>() {
+                            eprintln!("[dragon-helper] Unhandled Dragon Player signal: {}.{} - {}", interface_str, member_str, body);
+                        }
+                    }
+                }
+            }
+        }
+        
+        Ok::<(), zbus::Error>(())
+    })?;
+    
+    Ok(())
+}
+
+fn process_vlc_properties_changed_signal_dbus(
+    changed_props: std::collections::HashMap<String, zbus::zvariant::Value>, 
+    status_sender: &Arc<Mutex<Option<UnixStream>>>,
+    playback_state: &Arc<Mutex<(bool, MediaStatus)>>
+) {
+    // Process changed properties from DBus signal for VLC
+    for (prop_name, prop_value) in changed_props {
+        match prop_name.as_str() {
+            "PlaybackStatus" => {
+                if let Some(status_str) = prop_value.downcast::<String>() {
+                    let is_playing = status_str == "Playing";
+                    eprintln!("[vlc-helper] VLC playback status changed to: {}", status_str);
                     
-                    signal_buffer.clear();
-                }
-                // Collect signal lines
-                else if in_signal {
-                    signal_buffer.push(trimmed.to_string());
-                }
-                
-                // Also check for any media player-related activity and get status if needed
-                if (trimmed.contains("org.mpris.MediaPlayer2.vlc") || trimmed.contains("org.mpris.MediaPlayer2.dragonplayer")) && !vlc_running {
-                    vlc_running = true;
-                    if let Some(status) = get_media_player_status() {
-                        current_status = status.clone();
-                        send_status_update(&status_sender, &current_status);
-                        eprintln!("[media-helper] Media player detected and status updated: playing={}, title={}", current_status.is_playing, current_status.title);
-                    }
-                }
-                
-                // If we see media player activity but haven't received any status updates, try to get current status
-                if (trimmed.contains("org.mpris.MediaPlayer2.vlc") || trimmed.contains("org.mpris.MediaPlayer2.dragonplayer")) && vlc_running && current_status.title.is_empty() {
-                    if let Some(status) = get_media_player_status() {
-                        current_status = status.clone();
-                        send_status_update(&status_sender, &current_status);
-                        eprintln!("[media-helper] Media player status retrieved: playing={}, title={}", current_status.is_playing, current_status.title);
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("[vlc-helper] Error reading from dbus-monitor: {}", e);
-                break;
-            }
-        }
-    }
-    
-    eprintln!("[media-helper] Restarting dbus-monitor...");
-    monitor_media_player_events(status_sender);
-}
-
-fn process_properties_changed_signal(signal_lines: &[String], current_status: &mut VlcStatus, _vlc_running: &mut bool, status_sender: &Arc<Mutex<Option<UnixStream>>>) {
-    let signal_text = signal_lines.join("\n");
-    eprintln!("[vlc-helper] Processing PropertiesChanged signal: {}", signal_text);
-    
-    let mut status_updated = false;
-    
-    // Extract changed properties from the signal
-    if signal_text.contains("PlaybackStatus") {
-        if let Some(status) = extract_playback_status(&signal_text) {
-            let was_playing = current_status.is_playing;
-            current_status.is_playing = status == "Playing";
-            
-            if current_status.is_playing && !was_playing {
-                // Started playing - record start time and position
-                // This is now handled by the smart polling thread
-            } else if !current_status.is_playing && was_playing {
-                // Stopped playing - clear start time
-                // This is now handled by the smart polling thread
-            }
-            
-            eprintln!("[vlc-helper] Playback status changed to: {}", status);
-            status_updated = true;
-        }
-    }
-    
-    if signal_text.contains("Position") {
-        if let Some(position) = extract_position(&signal_text) {
-            let duration = current_status.duration * 1_000_000; // Convert to microseconds
-            current_status.position = if duration > 0 { position as f64 / duration as f64 } else { 0.0 };
-            
-            // Update playback start time with new position
-            // This is now handled by the smart polling thread
-            
-            eprintln!("[vlc-helper] Position changed to: {}", current_status.position);
-            status_updated = true;
-        }
-    }
-    
-    if signal_text.contains("Metadata") {
-        // Extract metadata changes
-        if let Some(title) = extract_metadata_value(&signal_text, "xesam:title") {
-            current_status.title = title;
-            eprintln!("[vlc-helper] Title changed to: {}", current_status.title);
-            status_updated = true;
-        }
-        
-        if let Some(artist) = extract_metadata_value(&signal_text, "xesam:artist") {
-            current_status.artist = artist;
-            eprintln!("[vlc-helper] Artist changed to: {}", current_status.artist);
-            status_updated = true;
-        }
-        
-        if let Some(duration) = extract_metadata_value(&signal_text, "mpris:length") {
-            if let Ok(duration_int) = duration.parse::<i64>() {
-                current_status.duration = duration_int / 1_000_000; // Convert to seconds
-                eprintln!("[vlc-helper] Duration changed to: {} seconds", current_status.duration);
-                status_updated = true;
-            }
-        }
-    }
-    
-    // If any property changed, send the updated status
-    if status_updated {
-        send_status_update(status_sender, current_status);
-        eprintln!("[vlc-helper] Status updated and sent: playing={}, position={}, title={}", 
-                 current_status.is_playing, current_status.position, current_status.title);
-    }
-}
-
-fn process_seeked_signal(signal_lines: &[String], current_status: &mut VlcStatus, status_sender: &Arc<Mutex<Option<UnixStream>>>) {
-    let signal_text = signal_lines.join("\n");
-    
-    // Extract position from Seeked signal
-    if let Some(position) = extract_position(&signal_text) {
-        let duration = current_status.duration * 1_000_000; // Convert to microseconds
-        current_status.position = if duration > 0 { position as f64 / duration as f64 } else { 0.0 };
-        
-        // Update playback start time with new position
-        // This is now handled by the smart polling thread
-        
-        eprintln!("[vlc-helper] Seeked to position: {}", current_status.position);
-        send_status_update(status_sender, current_status);
-    }
-}
-
-fn process_name_owner_changed_signal(signal_lines: &[String], vlc_running: &mut bool, status_sender: &Arc<Mutex<Option<UnixStream>>>) {
-    let signal_text = signal_lines.join("\n");
-    
-    // Check if VLC service appeared or disappeared
-    if signal_text.contains("org.mpris.MediaPlayer2.vlc") {
-        let new_vlc_running = !signal_text.contains(":1.") || signal_text.contains(":1.") && !signal_text.contains("unix:abstract=");
-        
-        if new_vlc_running != *vlc_running {
-            *vlc_running = new_vlc_running;
-            eprintln!("[vlc-helper] VLC running state changed: {}", new_vlc_running);
-            
-            if !new_vlc_running {
-                // VLC stopped, send empty status
-                let empty_status = VlcStatus::empty();
-                send_status_update(status_sender, &empty_status);
-            }
-        }
-    }
-}
-
-fn extract_playback_status(signal_text: &str) -> Option<String> {
-    // Parse the signal to extract PlaybackStatus value
-    for line in signal_text.lines() {
-        if line.contains("PlaybackStatus") {
-            // Look for the next line with a quoted string
-            let lines: Vec<&str> = signal_text.lines().collect();
-            for (i, l) in lines.iter().enumerate() {
-                if l.contains("PlaybackStatus") {
-                    for j in (i+1)..lines.len() {
-                        let trimmed = lines[j].trim();
-                        if trimmed.starts_with('"') && trimmed.ends_with('"') {
-                            return Some(trimmed[1..trimmed.len()-1].to_string());
+                    // Get current VLC status and update
+                    if let Some(mut status) = get_vlc_status() {
+                        status.is_playing = is_playing;
+                        
+                        // Update shared playback state
+                        if let Ok(mut state) = playback_state.lock() {
+                            state.0 = is_playing;
+                            state.1 = status.clone();
+                        }
+                        
+                        send_status_update(status_sender, &status);
+                        
+                        if is_playing {
+                            eprintln!("[vlc-helper] VLC playback started - position polling activated");
+                        } else {
+                            eprintln!("[vlc-helper] VLC playback stopped - position polling deactivated");
                         }
                     }
                 }
             }
+            "Position" => {
+                if let Some(position) = prop_value.downcast::<i64>() {
+                    eprintln!("[vlc-helper] VLC position changed to: {} microseconds", position);
+                    
+                    // Get current VLC status and update position immediately
+                    if let Some(mut status) = get_vlc_status() {
+                        let duration = status.duration * 1_000_000; // Convert to microseconds
+                        status.position = if duration > 0 { position as f64 / duration as f64 } else { 0.0 };
+                        
+                        // Update shared playback state
+                        if let Ok(mut state) = playback_state.lock() {
+                            state.1 = status.clone();
+                        }
+                        
+                        // Send immediate update for instant header movement
+                        send_status_update(status_sender, &status);
+                        eprintln!("[vlc-helper] VLC position updated via DBus signal: {:.2}% (immediate)", status.position * 100.0);
+                    }
+                }
+            }
+            "Metadata" => {
+                eprintln!("[vlc-helper] VLC metadata changed");
+                
+                // Get updated VLC status with new metadata
+                if let Some(status) = get_vlc_status() {
+                    // Update shared playback state
+                    if let Ok(mut state) = playback_state.lock() {
+                        state.1 = status.clone();
+                    }
+                    
+                    send_status_update(status_sender, &status);
+                }
+            }
+            _ => {
+                eprintln!("[vlc-helper] VLC property changed: {} = {:?}", prop_name, prop_value);
+            }
         }
     }
-    None
 }
 
-fn extract_position(signal_text: &str) -> Option<i64> {
-    // Parse the signal to extract Position value
-    for line in signal_text.lines() {
-        if line.contains("Position") && line.contains("int64") {
-            return line.split_whitespace().last().and_then(|s| s.parse::<i64>().ok());
+fn process_vlc_seeked_signal_dbus(
+    position: i64, 
+    status_sender: &Arc<Mutex<Option<UnixStream>>>,
+    playback_state: &Arc<Mutex<(bool, MediaStatus)>>
+) {
+    // Process seeked signal from DBus for VLC - use the position directly from the signal
+    // This avoids an extra DBus call and makes the response immediate
+    
+    // Get current VLC status to get duration and other metadata
+    if let Some(mut status) = get_vlc_status() {
+        let duration = status.duration * 1_000_000; // Convert to microseconds
+        status.position = if duration > 0 { position as f64 / duration as f64 } else { 0.0 };
+        
+        // Update shared playback state
+        if let Ok(mut state) = playback_state.lock() {
+            state.1 = status.clone();
         }
+        
+        eprintln!("[vlc-helper] VLC seeked to position: {:.2}% (from DBus signal)", status.position * 100.0);
+        send_status_update(status_sender, &status);
     }
-    None
 }
 
-fn extract_metadata_value(signal_text: &str, key: &str) -> Option<String> {
-    // Parse the signal to extract metadata values
-    for line in signal_text.lines() {
-        if line.contains(key) {
-            // Look for the next line with a quoted string
-            let lines: Vec<&str> = signal_text.lines().collect();
-            for (i, l) in lines.iter().enumerate() {
-                if l.contains(key) {
-                    for j in (i+1)..lines.len() {
-                        let trimmed = lines[j].trim();
-                        if trimmed.starts_with('"') && trimmed.ends_with('"') {
-                            return Some(trimmed[1..trimmed.len()-1].to_string());
+fn process_vlc_name_owner_changed_signal_dbus(
+    name: &str, 
+    _old_owner: &str, 
+    new_owner: &str, 
+    status_sender: &Arc<Mutex<Option<UnixStream>>>,
+    playback_state: &Arc<Mutex<(bool, MediaStatus)>>
+) {
+    // Process name owner changed signal from DBus for VLC
+    let vlc_running = !new_owner.is_empty();
+    
+    if vlc_running {
+        eprintln!("[vlc-helper] VLC service appeared: {}", name);
+        // Get initial VLC status
+        if let Some(status) = get_vlc_status() {
+            // Update shared playback state
+            if let Ok(mut state) = playback_state.lock() {
+                state.0 = status.is_playing;
+                state.1 = status.clone();
+            }
+            
+            send_status_update(status_sender, &status);
+        }
+    } else {
+        eprintln!("[vlc-helper] VLC service disappeared: {}", name);
+        // Send empty status and update shared state
+        let empty_status = MediaStatus::empty();
+        
+        if let Ok(mut state) = playback_state.lock() {
+            state.0 = false;
+            state.1 = empty_status.clone();
+        }
+        
+        send_status_update(status_sender, &empty_status);
+    }
+}
+
+fn process_dragon_player_properties_changed_signal_dbus(
+    changed_props: std::collections::HashMap<String, zbus::zvariant::Value>, 
+    status_sender: &Arc<Mutex<Option<UnixStream>>>,
+    playback_state: &Arc<Mutex<(bool, MediaStatus)>>
+) {
+    // Process changed properties from DBus signal for Dragon Player
+    for (prop_name, prop_value) in changed_props {
+        match prop_name.as_str() {
+            "PlaybackStatus" => {
+                if let Some(status_str) = prop_value.downcast::<String>() {
+                    let is_playing = status_str == "Playing";
+                    eprintln!("[dragon-helper] Dragon Player playback status changed to: {}", status_str);
+                    
+                    // Get current Dragon Player status and update
+                    if let Some(mut status) = get_dragon_player_status() {
+                        status.is_playing = is_playing;
+                        
+                        // Update shared playback state
+                        if let Ok(mut state) = playback_state.lock() {
+                            state.0 = is_playing;
+                            state.1 = status.clone();
+                        }
+                        
+                        send_status_update(status_sender, &status);
+                        
+                        if is_playing {
+                            eprintln!("[dragon-helper] Dragon Player playback started - position polling activated");
+                        } else {
+                            eprintln!("[dragon-helper] Dragon Player playback stopped - position polling deactivated");
                         }
                     }
                 }
             }
+            "Position" => {
+                if let Some(position) = prop_value.downcast::<i64>() {
+                    eprintln!("[dragon-helper] Dragon Player position changed to: {} milliseconds", position);
+                    
+                    // Get current Dragon Player status and update position immediately
+                    if let Some(mut status) = get_dragon_player_status() {
+                        let duration = status.duration * 1_000; // Convert to milliseconds
+                        status.position = if duration > 0 { position as f64 / duration as f64 } else { 0.0 };
+                        
+                        // Update shared playback state
+                        if let Ok(mut state) = playback_state.lock() {
+                            state.1 = status.clone();
+                        }
+                        
+                        // Send immediate update for instant header movement
+                        send_status_update(status_sender, &status);
+                        eprintln!("[dragon-helper] Dragon Player position updated via DBus signal: {:.2}% (immediate)", status.position * 100.0);
+                    }
+                }
+            }
+            "Metadata" => {
+                eprintln!("[dragon-helper] Dragon Player metadata changed");
+                
+                // Get updated Dragon Player status with new metadata
+                if let Some(status) = get_dragon_player_status() {
+                    // Update shared playback state
+                    if let Ok(mut state) = playback_state.lock() {
+                        state.1 = status.clone();
+                    }
+                    
+                    send_status_update(status_sender, &status);
+                }
+            }
+            _ => {
+                eprintln!("[dragon-helper] Dragon Player property changed: {} = {:?}", prop_name, prop_value);
+            }
         }
     }
-    None
 }
 
-fn send_status_update(status_sender: &Arc<Mutex<Option<UnixStream>>>, status: &VlcStatus) {
+fn process_dragon_player_seeked_signal_dbus(
+    position: i64, 
+    status_sender: &Arc<Mutex<Option<UnixStream>>>,
+    playback_state: &Arc<Mutex<(bool, MediaStatus)>>
+) {
+    // Process seeked signal from DBus for Dragon Player - use the position directly from the signal
+    // This avoids an extra DBus call and makes the response immediate
+    
+    // Get current Dragon Player status to get duration and other metadata
+    if let Some(mut status) = get_dragon_player_status() {
+        let duration = status.duration * 1_000; // Dragon Player uses milliseconds, convert to milliseconds
+        status.position = if duration > 0 { position as f64 / duration as f64 } else { 0.0 };
+        
+        // Update shared playback state
+        if let Ok(mut state) = playback_state.lock() {
+            state.1 = status.clone();
+        }
+        
+        eprintln!("[dragon-helper] Dragon Player seeked to position: {:.2}% (from DBus signal)", status.position * 100.0);
+        send_status_update(status_sender, &status);
+    }
+}
+
+fn process_dragon_player_name_owner_changed_signal_dbus(
+    name: &str, 
+    _old_owner: &str, 
+    new_owner: &str, 
+    status_sender: &Arc<Mutex<Option<UnixStream>>>,
+    playback_state: &Arc<Mutex<(bool, MediaStatus)>>
+) {
+    // Process name owner changed signal from DBus for Dragon Player
+    let dragon_player_running = !new_owner.is_empty();
+    
+    if dragon_player_running {
+        eprintln!("[dragon-helper] Dragon Player service appeared: {}", name);
+        // Get initial Dragon Player status
+        if let Some(status) = get_dragon_player_status() {
+            // Update shared playback state
+            if let Ok(mut state) = playback_state.lock() {
+                state.0 = status.is_playing;
+                state.1 = status.clone();
+            }
+            
+            send_status_update(status_sender, &status);
+        }
+    } else {
+        eprintln!("[dragon-helper] Dragon Player service disappeared: {}", name);
+        // Send empty status and update shared state
+        let empty_status = MediaStatus::empty();
+        
+        if let Ok(mut state) = playback_state.lock() {
+            state.0 = false;
+            state.1 = empty_status.clone();
+        }
+        
+        send_status_update(status_sender, &empty_status);
+    }
+}
+
+fn send_status_update(status_sender: &Arc<Mutex<Option<UnixStream>>>, status: &MediaStatus) {
     if let Ok(mut sender_guard) = status_sender.lock() {
         if let Some(ref mut stream) = *sender_guard {
             let status_json = json!({
                 "is_playing": status.is_playing,
                 "position": status.position,
-                "title": status.title,
-                "artist": status.artist,
                 "duration": status.duration
             });
             
@@ -776,10 +1531,20 @@ fn main() -> std::io::Result<()> {
         eprintln!("[vlc-helper] DBUS_SESSION_BUS_ADDRESS is not set");
     }
     
-    // Get the window class and window ID from environment variables
+    // Get the window class, ID, and PID from environment variables
     if let Ok(window_class) = std::env::var("TINY_DFR_WINDOW_CLASS") {
         eprintln!("[vlc-helper] Window class: {}", window_class);
-        set_current_media_player(&window_class);
+        
+        // Get window PID for instance matching
+        let window_pid = std::env::var("TINY_DFR_WINDOW_PID")
+            .ok()
+            .and_then(|pid_str| pid_str.parse::<u32>().ok());
+        
+        if let Some(pid) = window_pid {
+            eprintln!("[vlc-helper] Window PID: {}", pid);
+        }
+        
+        set_current_media_player(&window_class, window_pid);
         
         // Also read window ID for future use
         if let Ok(window_id_str) = std::env::var("TINY_DFR_WINDOW_ID") {
@@ -848,7 +1613,7 @@ fn main() -> std::io::Result<()> {
                     if !command.is_empty() {
                         eprintln!("[vlc-helper] Received command: {}", command);
                         // Execute command immediately (event-driven)
-                        handle_command(command);
+                        handle_command(command, &status_sender);
                     }
                 }
             }

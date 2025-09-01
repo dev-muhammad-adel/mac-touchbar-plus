@@ -296,8 +296,7 @@ impl EventRunner {
                         ));
                     }
                     
-                    eprintln!("[helper] Socket connection attempt {} failed, waiting {:?} before retry...", 
-                             retry_count, backoff_delay);
+                 
                     
                     // Use exponential backoff: 10ms, 20ms, 40ms, 80ms, 160ms, 320ms, 640ms, 1.28s, 2.56s, 5.12s
                     thread::sleep(backoff_delay);
@@ -728,11 +727,7 @@ impl HyprlandWindowMonitor {
                         let line = line.trim();
                         if line.starts_with("pid:") {
                             let pid_str = line[4..].trim();
-                            eprintln!("[helper] Found PID line: '{}', extracted: '{}', length: {}", line, pid_str, pid_str.len());
-                            eprintln!("[helper] PID line bytes: {:?}", line.as_bytes());
-                            eprintln!("[helper] Extracted PID bytes: {:?}", pid_str.as_bytes());
-                            eprintln!("[helper] PID line hex: {:02x?}", line.as_bytes());
-                            eprintln!("[helper] Extracted PID hex: {:02x?}", pid_str.as_bytes());
+                          
                             if let Ok(pid) = pid_str.parse::<u32>() {
                                 return Some(pid);
                             }
@@ -750,12 +745,10 @@ impl HyprlandWindowMonitor {
     
     fn run_event_monitor(tx: mpsc::Sender<WindowInfo>) -> Result<()> {
         let socket_path = Self::get_socket_path()?;
-        eprintln!("[helper] Connecting to Hyprland socket: {}", socket_path);
         
         let mut stream = UnixStream::connect(&socket_path)?;
         // Keep socket blocking for pure event-driven behavior
         stream.write_all(b"subscribe\n")?;
-        eprintln!("[helper] Subscribed to events, waiting for window changes...");
         
         use std::io::{BufRead, BufReader};
         let reader = BufReader::new(stream);
@@ -772,20 +765,16 @@ impl HyprlandWindowMonitor {
                     if line.starts_with("activewindowv2>>") {
                         // Extract window ID from activewindowv2 event
                         let window_id = &line[16..];
-                        eprintln!("[helper] activewindowv2>> event, ID: '{}'", window_id);
                         
                         if !window_id.trim().is_empty() {
                             last_window_id = Some(window_id.to_string());
-                            eprintln!("[helper] Set last_window_id to: '{}'", window_id);
                             
                             // If we have both class and ID now, send the complete info
                             if let Some(class) = &last_window_class {
-                                eprintln!("[helper] We have class '{}', sending complete info", class);
                                 if let Ok(window_id_u64) = u64::from_str_radix(window_id, 16) {
                                     // Get PID for this window
                                     let pid = Self::get_window_pid(window_id_u64);
                                     let _ = tx.send(WindowInfo::new(class.clone(), Some(window_id_u64), pid));
-                                    eprintln!("[helper] Sent WindowInfo: {}:{}:{:?}", class, window_id_u64, pid);
                                 }
                             } else {
                                 eprintln!("[helper] No class yet, waiting for activewindow>> event");
@@ -799,26 +788,21 @@ impl HyprlandWindowMonitor {
                             &line[14..]
                         };
                         
-                        eprintln!("[helper] activewindow>> event, class: '{}'", window_info);
                         
                         if window_info.trim().is_empty() {
-                            eprintln!("[helper] Empty window info, sending Desktop");
                             last_window_id = None;
                             last_window_class = None;
                             let _ = tx.send(WindowInfo::desktop());
                         } else {
                             last_window_class = Some(window_info.to_string());
-                            eprintln!("[helper] Set last_window_class to: '{}'", window_info);
                             
                             // Always wait for both class and ID before sending
                             if let Some(id) = &last_window_id {
-                                eprintln!("[helper] We have ID '{}', sending complete info", id);
                                 // Convert hex string to u64
                                 if let Ok(window_id_u64) = u64::from_str_radix(id, 16) {
                                     // Get PID for this window
                                     let pid = Self::get_window_pid(window_id_u64);
                                     let _ = tx.send(WindowInfo::new(window_info.to_string(), Some(window_id_u64), pid));
-                                    eprintln!("[helper] Sent WindowInfo: {}:{}:{:?}", window_info, window_id_u64, pid);
                                 } else {
                                     eprintln!("[helper] Failed to parse ID, waiting for valid ID");
                                     // Don't send anything until we have a valid ID
@@ -845,7 +829,6 @@ impl HyprlandWindowMonitor {
 
 impl WindowMonitor for HyprlandWindowMonitor {
     fn get_initial_window_info(&self) -> Result<WindowInfo> {
-        eprintln!("[helper] Getting initial window info for Hyprland...");
         
         // Try to get current window info using hyprctl (more reliable than socket)
         let output = std::process::Command::new("hyprctl")
@@ -856,7 +839,6 @@ impl WindowMonitor for HyprlandWindowMonitor {
             Ok(output) => {
                 if output.status.success() {
                     let stdout = String::from_utf8_lossy(&output.stdout);
-                    eprintln!("[helper] hyprctl output: {}", stdout);
                     
                     let lines: Vec<&str> = stdout.lines().collect();
                     
@@ -867,11 +849,9 @@ impl WindowMonitor for HyprlandWindowMonitor {
                     
                     for line in lines {
                         let line = line.trim();
-                        eprintln!("[helper] Parsing line: '{}'", line);
                         
                         if line.starts_with("class:") {
                             let class = line[6..].trim();
-                            eprintln!("[helper] Found class: '{}'", class);
                             if !class.is_empty() && class != "null" {
                                 window_class = Some(class.to_string());
                             }
@@ -880,34 +860,28 @@ impl WindowMonitor for HyprlandWindowMonitor {
                             if let Some(start) = line.find("Window ") {
                                 if let Some(end) = line[start..].find(" ->") {
                                     let id_str = &line[start + 7..start + end];
-                                    eprintln!("[helper] Found window ID: '{}'", id_str);
-                                                                if let Ok(id) = u64::from_str_radix(id_str, 16) {
-                                window_id = Some(id);
-                                eprintln!("[helper] Parsed window ID: {}", id);
-                            }
+                                    if let Ok(id) = u64::from_str_radix(id_str, 16) {
+                                        window_id = Some(id);
+                                    }
                                 }
                             }
                         } else if line.starts_with("pid:") {
                             let pid_str = line[4..].trim();
                             if let Ok(pid) = pid_str.parse::<u32>() {
                                 window_pid = Some(pid);
-                                eprintln!("[helper] Parsed PID: {}", pid);
                             }
                         }
                     }
                     
-                    eprintln!("[helper] Final window_class: {:?}, window_id: {:?}, window_pid: {:?}", window_class, window_id, window_pid);
                     
                     if let Some(class) = window_class {
                         if class.is_empty() || class == "null" {
                             eprintln!("[helper] Returning Desktop (empty/null class)");
                             return Ok(WindowInfo::desktop());
                         } else {
-                            eprintln!("[helper] Returning WindowInfo: class='{}', id={:?}, pid={:?}", class, window_id, window_pid);
                             return Ok(WindowInfo::new(class, window_id, window_pid));
                         }
                     } else {
-                        eprintln!("[helper] No window class found, returning Desktop");
                         return Ok(WindowInfo::desktop());
                     }
                 } else {

@@ -822,17 +822,12 @@ impl BrowserHelperManager {
         // Get environment variables using the bash script approach
         let env_vars = get_env_from_session(user, leader_pid);
         
-        // Debug: print all environment variables being passed
-        println!("[main] Environment variables for browser helper:");
-        for (key, value) in &env_vars {
-            println!("[main]   {}={}", key, value);
-        }
+      
 
         let helper_path = "/usr/bin/tiny-dfr-browser-helper";
 
         // Check if helper binary exists
         if !std::path::Path::new(helper_path).exists() {
-            println!("[BrowserHelperManager::start] ERROR: Browser helper binary not found at: {}", helper_path);
             self.process_info.status = ProcessStatus::Failed;
             self.process_info.consecutive_failures += 1;
             return None;
@@ -865,7 +860,6 @@ impl BrowserHelperManager {
         cmd.env("TINY_DFR_WINDOW_ID", &window_id.to_string());
         cmd.env("TINY_DFR_WINDOW_PID", &pid.to_string());
         
-        println!("[main] Spawning browser helper: {} (as user {}) for window class: {} (ID: {}, PID: {})", helper_path, user, window_class, window_id, pid);
         let child = match cmd.spawn() {
             Ok(child) => child,
             Err(e) => {
@@ -881,7 +875,6 @@ impl BrowserHelperManager {
 
     pub fn stop(&mut self) {
         if let Some(mut child) = self.process.take() {
-            println!("[BrowserHelperManager::stop] Stopping browser helper process with PID: {}", child.id());
             
             // Kill the entire process group to handle D-Bus connections and child processes
             let result = unsafe { libc::killpg(child.id() as i32, libc::SIGTERM) };
@@ -920,7 +913,6 @@ impl BrowserHelperManager {
             match child.try_wait() {
                 Ok(Some(exit_status)) => {
                     // Process has exited
-                    println!("[BrowserHelperManager] Browser helper process has exited with status: {:?}", exit_status);
                     self.process = None;
                     self.process_info.status = ProcessStatus::Failed;
                     self.process_info.consecutive_failures += 1;
@@ -961,17 +953,13 @@ impl BrowserHelperManager {
     /// Schedule a restart attempt
     fn schedule_restart(&mut self) {
         if self.process_info.restart_count >= MAX_RESTART_ATTEMPTS {
-            println!("[BrowserHelperManager] Max restart attempts reached ({}), giving up", MAX_RESTART_ATTEMPTS);
             self.process_info.status = ProcessStatus::Failed;
             return;
         }
         
         self.process_info.status = ProcessStatus::Restarting;
         self.process_info.restart_count += 1;
-        
-        println!("[BrowserHelperManager] Scheduling restart attempt {}/{} in {} seconds", 
-                self.process_info.restart_count, MAX_RESTART_ATTEMPTS, RESTART_DELAY_SECONDS);
-        
+    
         // In a real implementation, you might use a timer or async task
         // For now, we'll just mark it as restarting and let the main loop handle it
     }
@@ -981,9 +969,7 @@ impl BrowserHelperManager {
         if self.process_info.status != ProcessStatus::Restarting {
             return false;
         }
-        
-        println!("[BrowserHelperManager] Attempting restart {}/{}", 
-                self.process_info.restart_count, MAX_RESTART_ATTEMPTS);
+     
         
         // Clean up any existing process
         self.stop();
@@ -1103,7 +1089,6 @@ fn get_env_from_session(user: &str, leader_pid: u32) -> HashMap<String, String> 
         main_level_pids.push(pid as u32);
     }
     
-    println!("[get_env_from_session] Found {} processes (leader + first two children at each level): {:?}", main_level_pids.len(), main_level_pids);
     
     // Accumulate environment from each main tree level, with later levels overriding earlier ones
     for (i, &pid) in main_level_pids.iter().enumerate() {
@@ -1131,12 +1116,11 @@ fn get_env_from_session(user: &str, leader_pid: u32) -> HashMap<String, String> 
     }
     
     // Debug: Show key environment variables collected
-    println!("[get_env_from_session] Key env vars collected:");
     for key in ["DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "HYPRLAND_INSTANCE_SIGNATURE", "NIRI_SOCKET", "SWAYSOCK", "I3SOCK", "XDG_CURRENT_DESKTOP"] {
         if let Some(value) = env.get(key) {
-            println!("[get_env_from_session]   {}={}", key, value);
+            // println!("[get_env_from_session]   {}={}", key, value);
         } else {
-            println!("[get_env_from_session]   {} (not found)", key);
+            // println!("[get_env_from_session]   {} (not found)", key);
         }
     }
     
@@ -1148,7 +1132,6 @@ fn get_env_from_session(user: &str, leader_pid: u32) -> HashMap<String, String> 
         if let Ok(Some(userinfo)) = User::from_name(user) {
             let xdg_runtime_dir = format!("/run/user/{}", userinfo.uid);
             if std::path::Path::new(&xdg_runtime_dir).exists() {
-                println!("[get_env_from_session] Setting XDG_RUNTIME_DIR fallback: {}", xdg_runtime_dir);
                 env.insert("XDG_RUNTIME_DIR".to_string(), xdg_runtime_dir);
             }
         }
@@ -1160,7 +1143,6 @@ fn get_env_from_session(user: &str, leader_pid: u32) -> HashMap<String, String> 
             let dbus_socket_path = format!("{}/bus", xdg_runtime);
             if std::path::Path::new(&dbus_socket_path).exists() {
                 let dbus_address = format!("unix:path={}", dbus_socket_path);
-                println!("[get_env_from_session] Setting DBUS_SESSION_BUS_ADDRESS fallback: {}", dbus_address);
                 env.insert("DBUS_SESSION_BUS_ADDRESS".to_string(), dbus_address);
             }
         }
@@ -1184,7 +1166,6 @@ fn get_env_from_session(user: &str, leader_pid: u32) -> HashMap<String, String> 
                                 let suffix = &name[8..name.len()-5]; // Remove "wayland-" prefix and ".sock" suffix
                                 // Check if the suffix is numeric
                                 if suffix.chars().all(|c| c.is_ascii_digit()) {
-                                    println!("[get_env_from_session] Found wayland socket: {}, setting WAYLAND_DISPLAY={}", name, name);
                                     wayland_display = Some(name.to_string());
                                     break;
                                 }
@@ -1200,7 +1181,6 @@ fn get_env_from_session(user: &str, leader_pid: u32) -> HashMap<String, String> 
                 for wayland_name in &common_wayland_names {
                     let wayland_path = format!("{}/{}", xdg_runtime, wayland_name);
                     if std::path::Path::new(&wayland_path).exists() {
-                        println!("[get_env_from_session] Setting WAYLAND_DISPLAY fallback: {}", wayland_name);
                         wayland_display = Some(wayland_name.to_string());
                         break;
                     }
@@ -1228,7 +1208,6 @@ fn get_env_from_session(user: &str, leader_pid: u32) -> HashMap<String, String> 
                         if let Some(name) = file_name.to_str() {
                             if name.starts_with("niri.") && name.ends_with(".sock") {
                                 let niri_socket_path = format!("{}/{}", xdg_runtime, name);
-                                println!("[get_env_from_session] Found niri socket: {}, setting NIRI_SOCKET={}", name, niri_socket_path);
                                 env.insert("NIRI_SOCKET".to_string(), niri_socket_path);
                                 break;
                             }
@@ -1252,7 +1231,6 @@ fn get_env_from_session(user: &str, leader_pid: u32) -> HashMap<String, String> 
                         if let Some(name) = file_name.to_str() {
                             if name.starts_with("sway-ipc.") && name.ends_with(".sock") {
                                 let sway_socket_path = format!("{}/{}", xdg_runtime, name);
-                                println!("[get_env_from_session] Found sway socket: {}, setting SWAYSOCK={}", name, sway_socket_path);
                                 env.insert("SWAYSOCK".to_string(), sway_socket_path);
                                 break;
                             }
@@ -1290,7 +1268,6 @@ fn get_env_from_session(user: &str, leader_pid: u32) -> HashMap<String, String> 
     if !env.contains_key("GNOME_DESKTOP_SESSION_ID") {
         if let Some(desktop_session) = env.get("DESKTOP_SESSION") {
             if desktop_session.to_lowercase().contains("gnome") {
-                println!("[get_env_from_session] Detected GNOME from DESKTOP_SESSION, setting GNOME_DESKTOP_SESSION_ID=gnome");
                 env.insert("GNOME_DESKTOP_SESSION_ID".to_string(), "gnome".to_string());
             }
         }
