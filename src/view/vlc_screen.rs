@@ -1,6 +1,18 @@
 use cairo::Context;
 use crate::helper::MediaStatus;
 
+fn format_duration(seconds: i64) -> String {
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    let secs = seconds % 60;
+    
+    if hours > 0 {
+        format!("{}:{:02}:{:02}", hours, minutes, secs)
+    } else {
+        format!("{}:{:02}", minutes, secs)
+    }
+}
+
 // All constants removed as they were unused
 
 pub struct VlcScreen {
@@ -126,11 +138,12 @@ impl VlcScreen {
             } else {
                 0
             };
-            let current_time_str = format!("{}:{:02}", current_seconds / 60, current_seconds % 60);
+            let current_time_str = format_duration(current_seconds);
+            println!("[vlc-screen] Current time: {} ({}s / {}s) - position ratio: {:.6}", current_time_str, current_seconds, status.duration, status.position);
             
             // Calculate total time first to ensure proper spacing
             let total_time_seconds = status.duration;
-            let total_time_str = format!("{}:{:02}", total_time_seconds / 60, total_time_seconds % 60);
+            let total_time_str = format_duration(total_time_seconds);
             
             // Get text extents for both time displays to ensure proper spacing
             c.save().unwrap();
