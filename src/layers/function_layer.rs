@@ -172,7 +172,7 @@ impl FunctionLayer {
         (bot, top)
     }
 
-    pub fn draw(&mut self, config: &Config, width: i32, height: i32, surface: &Surface, pixel_shift: (f64, f64), complete_redraw: bool, modules_only_redraw: bool, session_state: Option<&SessionState>, layer_index: Option<LayerKey>, app_layer3_slide_progress: f64, current_window_class: Option<&str>, app_ui_manager: Option<&mut AppUiManager>, vlc_drag_position: Option<f64>) -> FunctionLayerResult<Vec<ClipRect>> {
+    pub fn draw(&mut self, config: &Config, width: i32, height: i32, surface: &Surface, pixel_shift: (f64, f64), complete_redraw: bool, modules_only_redraw: bool, session_state: Option<&SessionState>, layer_index: Option<LayerKey>, app_layer3_slide_progress: f64, current_window_class: Option<&str>, app_ui_manager: Option<&mut AppUiManager>, media_player_drag_position: Option<f64>) -> FunctionLayerResult<Vec<ClipRect>> {
         // Check if this is LayerKeys1 (Media layer) and has split layout
         if let Some(LayerKey::Media) = layer_index {
             if let Some(split) = &mut self.split {
@@ -180,7 +180,7 @@ impl FunctionLayer {
                 Self::draw_function_layer_keys1_split_static(
                     config, width, height, surface, pixel_shift, complete_redraw, modules_only_redraw,
                     session_state, layer_index, app_layer3_slide_progress, current_window_class,
-                    app_ui_manager, vlc_drag_position, split
+                    app_ui_manager, media_player_drag_position, split
                 )
             } else {
                 // LayerKeys1 should have split layout, but fallback to standard if missing
@@ -200,7 +200,7 @@ impl FunctionLayer {
 
     /// Draws FunctionLayerKeys1 (App Layer 1) with split layout between modules and media
     /// This is a static method to avoid borrow checker issues
-    fn draw_function_layer_keys1_split_static(config: &Config, width: i32, height: i32, surface: &Surface, pixel_shift: (f64, f64), complete_redraw: bool, modules_only_redraw: bool, session_state: Option<&SessionState>, layer_index: Option<LayerKey>, _app_layer3_slide_progress: f64, current_window_class: Option<&str>, app_ui_manager: Option<&mut AppUiManager>, vlc_drag_position: Option<f64>, split: &mut SplitLayout) -> FunctionLayerResult<Vec<ClipRect>> {
+    fn draw_function_layer_keys1_split_static(config: &Config, width: i32, height: i32, surface: &Surface, pixel_shift: (f64, f64), complete_redraw: bool, modules_only_redraw: bool, session_state: Option<&SessionState>, layer_index: Option<LayerKey>, _app_layer3_slide_progress: f64, current_window_class: Option<&str>, app_ui_manager: Option<&mut AppUiManager>, media_player_drag_position: Option<f64>, split: &mut SplitLayout) -> FunctionLayerResult<Vec<ClipRect>> {
         let c = Self::safe_cairo_context(surface)?;
         let mut modified_regions = if complete_redraw {
             vec![ClipRect::new(0, 0, height as u16, width as u16)]
@@ -254,7 +254,7 @@ impl FunctionLayer {
         // Draw modules section (left side of split layout)
         let modules_result = Self::draw_modules_section_static(
             &c, left_edge, bot, layout_info.modules_width, top - bot, BUTTON_RADIUS,
-            session_state, current_window_class, app_ui_manager, vlc_drag_position, &mut modified_regions
+            session_state, current_window_class, app_ui_manager, media_player_drag_position, &mut modified_regions
         );
         if let Err(e) = modules_result {
             return Err(e);
@@ -393,13 +393,13 @@ impl FunctionLayer {
         Ok(modified_regions)
     }
 
-    fn draw_modules_section_static(c: &Context, left_edge: f64, bot: f64, modules_width: f64, modules_height: f64, radius: f64, session_state: Option<&SessionState>, current_window_class: Option<&str>, mut app_ui_manager: Option<&mut AppUiManager>, vlc_drag_position: Option<f64>, modified_regions: &mut Vec<ClipRect>) -> FunctionLayerResult<()> {
+    fn draw_modules_section_static(c: &Context, left_edge: f64, bot: f64, modules_width: f64, modules_height: f64, radius: f64, session_state: Option<&SessionState>, current_window_class: Option<&str>, mut app_ui_manager: Option<&mut AppUiManager>, media_player_drag_position: Option<f64>, modified_regions: &mut Vec<ClipRect>) -> FunctionLayerResult<()> {
         match session_state {
             Some(state) if state.is_logged_in => {
                 if let Some(app_ui_manager) = &mut app_ui_manager {
                     app_ui_manager.draw_app_ui(
                         c, left_edge, bot, modules_width, modules_height, radius,
-                        1.0, current_window_class.as_deref(), vlc_drag_position, modified_regions
+                        1.0, current_window_class.as_deref(), media_player_drag_position, modified_regions
                     );
                 }
             }

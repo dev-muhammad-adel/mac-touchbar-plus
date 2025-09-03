@@ -55,7 +55,7 @@ pub struct HelperManager {
     socket_path: String,
 }
 
-pub struct VlcHelperManager {
+pub struct MediaPlayerHelperManager {
     process: Option<Child>,
     listener: Option<UnixListener>,
     process_info: ProcessInfo,
@@ -425,9 +425,9 @@ impl HelperManager {
     }
 }
 
-impl VlcHelperManager {
+impl MediaPlayerHelperManager {
     pub fn new() -> Self {
-        VlcHelperManager {
+        MediaPlayerHelperManager {
             process: None,
             listener: None,
             process_info: ProcessInfo::new(),
@@ -454,7 +454,7 @@ impl VlcHelperManager {
         let listener = match UnixListener::bind(socket_path) {
             Ok(listener) => listener,
             Err(e) => {
-                println!("[VlcHelperManager::start] ERROR: Failed to bind VLC socket: {}", e);
+                println!("[MediaPlayerHelperManager::start] ERROR: Failed to bind Media Player socket: {}", e);
                 self.process_info.status = ProcessStatus::Failed;
                 self.process_info.consecutive_failures += 1;
                 return None;
@@ -462,7 +462,7 @@ impl VlcHelperManager {
         };
 
         if let Err(e) = listener.set_nonblocking(true) {
-            println!("[VlcHelperManager::start] ERROR: Failed to set VLC socket non-blocking: {}", e);
+            println!("[MediaPlayerHelperManager::start] ERROR: Failed to set Media Player socket non-blocking: {}", e);
             self.process_info.status = ProcessStatus::Failed;
             self.process_info.consecutive_failures += 1;
             return None;
@@ -472,7 +472,7 @@ impl VlcHelperManager {
         let userinfo = match User::from_name(user) {
             Ok(Some(userinfo)) => userinfo,
             _ => {
-                println!("[VlcHelperManager::start] ERROR: Could not find user info for: {}", user);
+                println!("[MediaPlayerHelperManager::start] ERROR: Could not find user info for: {}", user);
                 self.process_info.status = ProcessStatus::Failed;
                 self.process_info.consecutive_failures += 1;
                 return None;
@@ -481,7 +481,7 @@ impl VlcHelperManager {
 
         // Change ownership of the socket to the logged-in user
         if let Err(e) = chown(std::path::Path::new(socket_path), Some(userinfo.uid), Some(userinfo.gid)) {
-            println!("[VlcHelperManager::start] WARNING: Failed to change VLC socket ownership: {}", e);
+            println!("[MediaPlayerHelperManager::start] WARNING: Failed to change Media Player socket ownership: {}", e);
             // Continue anyway, this is not critical
         }
 
@@ -492,7 +492,7 @@ impl VlcHelperManager {
         let env_vars = get_env_from_session(user, leader_pid);
         
         // Debug: print all environment variables being passed
-        println!("[main] Environment variables for VLC helper:");
+        println!("[main] Environment variables for Media Player helper:");
         for (key, value) in &env_vars {
             println!("[main]   {}={}", key, value);
         }
@@ -501,7 +501,7 @@ impl VlcHelperManager {
 
         // Check if helper binary exists
         if !std::path::Path::new(helper_path).exists() {
-            println!("[VlcHelperManager::start] ERROR: VLC helper binary not found at: {}", helper_path);
+            println!("[MediaPlayerHelperManager::start] ERROR: Media Player helper binary not found at: {}", helper_path);
             self.process_info.status = ProcessStatus::Failed;
             self.process_info.consecutive_failures += 1;
             return None;
@@ -534,11 +534,11 @@ impl VlcHelperManager {
         cmd.env("TINY_DFR_WINDOW_ID", &window_id.to_string());
         cmd.env("TINY_DFR_WINDOW_PID", &pid.to_string());
         
-        println!("[main] Spawning VLC helper: {} (as user {}) for window class: {} (ID: {}, PID: {})", helper_path, user, window_class, window_id, pid);
+        println!("[main] Spawning Media Player helper: {} (as user {}) for window class: {} (ID: {}, PID: {})", helper_path, user, window_class, window_id, pid);
         let child = match cmd.spawn() {
             Ok(child) => child,
             Err(e) => {
-                println!("[VlcHelperManager] Failed to start VLC helper: {}", e);
+                println!("[MediaPlayerHelperManager] Failed to start Media Player helper: {}", e);
                 return None;
             }
         };
@@ -550,7 +550,7 @@ impl VlcHelperManager {
 
     pub fn stop(&mut self) {
         if let Some(mut child) = self.process.take() {
-            println!("[VlcHelperManager::stop] Stopping VLC helper process with PID: {}", child.id());
+            println!("[MediaPlayerHelperManager::stop] Stopping Media Player helper process with PID: {}", child.id());
             
             // Kill the entire process group to handle D-Bus connections and child processes
             let result = unsafe { libc::killpg(child.id() as i32, libc::SIGTERM) };
@@ -558,7 +558,7 @@ impl VlcHelperManager {
                 let errno = std::io::Error::last_os_error();
                 // Only log error if it's not "No such process" (process already dead)
                 if errno.raw_os_error() != Some(3) { // ESRCH = 3
-                    println!("[VlcHelperManager::stop] WARNING: Failed to send SIGTERM: {}", errno);
+                    println!("[MediaPlayerHelperManager::stop] WARNING: Failed to send SIGTERM: {}", errno);
                 }
             }
             
@@ -573,7 +573,7 @@ impl VlcHelperManager {
         self.process_info.status = ProcessStatus::Stopped;
     }
     
-    /// Check if the VLC helper process is still running and clean up zombies
+    /// Check if the Media Player helper process is still running and clean up zombies
     pub fn check_process_status(&mut self) -> bool {
         let now = Instant::now();
         
@@ -589,7 +589,7 @@ impl VlcHelperManager {
             match child.try_wait() {
                 Ok(Some(exit_status)) => {
                     // Process has exited
-                    println!("[VlcHelperManager] VLC helper process has exited with status: {:?}", exit_status);
+                    println!("[MediaPlayerHelperManager] Media Player helper process has exited with status: {:?}", exit_status);
                     self.process = None;
                     self.process_info.status = ProcessStatus::Failed;
                     self.process_info.consecutive_failures += 1;
@@ -608,7 +608,7 @@ impl VlcHelperManager {
                 }
                 Err(e) => {
                     // Error checking process status
-                    println!("[VlcHelperManager] Error checking process status: {}", e);
+                    println!("[MediaPlayerHelperManager] Error checking process status: {}", e);
                     self.process = None;
                     self.process_info.status = ProcessStatus::Failed;
                     self.process_info.consecutive_failures += 1;
@@ -630,7 +630,7 @@ impl VlcHelperManager {
     /// Schedule a restart attempt
     fn schedule_restart(&mut self) {
         if self.process_info.restart_count >= MAX_RESTART_ATTEMPTS {
-            println!("[VlcHelperManager] Max restart attempts reached ({}), giving up", MAX_RESTART_ATTEMPTS);
+            println!("[MediaPlayerHelperManager] Max restart attempts reached ({}), giving up", MAX_RESTART_ATTEMPTS);
             self.process_info.status = ProcessStatus::Failed;
             return;
         }
@@ -638,20 +638,20 @@ impl VlcHelperManager {
         self.process_info.status = ProcessStatus::Restarting;
         self.process_info.restart_count += 1;
         
-        println!("[VlcHelperManager] Scheduling restart attempt {}/{} in {} seconds", 
+        println!("[MediaPlayerHelperManager] Scheduling restart attempt {}/{} in {} seconds", 
                 self.process_info.restart_count, MAX_RESTART_ATTEMPTS, RESTART_DELAY_SECONDS);
         
         // In a real implementation, you might use a timer or async task
         // For now, we'll just mark it as restarting and let the main loop handle it
     }
 
-    /// Attempt to restart the VLC helper process
+    /// Attempt to restart the Media Player helper process
     pub fn attempt_restart(&mut self, user: &str, leader_pid: u32) -> bool {
         if self.process_info.status != ProcessStatus::Restarting {
             return false;
         }
         
-        println!("[VlcHelperManager] Attempting restart {}/{}", 
+        println!("[MediaPlayerHelperManager] Attempting restart {}/{}", 
                 self.process_info.restart_count, MAX_RESTART_ATTEMPTS);
         
         // Clean up any existing process
@@ -666,15 +666,15 @@ impl VlcHelperManager {
             let window_id = *window_id;
             let pid = *pid;
             if let Some(_fd) = self.start(user, leader_pid, &window_class, window_id, pid) {
-                println!("[VlcHelperManager] Restart successful");
+                println!("[MediaPlayerHelperManager] Restart successful");
                 true
             } else {
-                println!("[VlcHelperManager] Restart failed");
+                println!("[MediaPlayerHelperManager] Restart failed");
                 self.process_info.status = ProcessStatus::Failed;
                 false
             }
         } else {
-            println!("[VlcHelperManager] Cannot restart: no window information available");
+            println!("[MediaPlayerHelperManager] Cannot restart: no window information available");
             self.process_info.status = ProcessStatus::Failed;
             false
         }
@@ -684,7 +684,7 @@ impl VlcHelperManager {
         if let Some(listener) = &self.listener {
             if let Ok((stream, _)) = listener.accept() {
                 if let Err(e) = stream.set_nonblocking(true) {
-            println!("[VlcHelperManager] Failed to set VLC stream non-blocking: {}", e);
+            println!("[MediaPlayerHelperManager] Failed to set Media Player stream non-blocking: {}", e);
             return None;
         }
                 return Some(stream);
@@ -693,7 +693,7 @@ impl VlcHelperManager {
         None
     }
     
-    /// Check if the VLC helper process is still running
+    /// Check if the Media Player helper process is still running
     pub fn is_process_running(&self) -> bool {
         self.process.is_some() && self.process_info.status == ProcessStatus::Running
     }
@@ -711,13 +711,13 @@ impl VlcHelperManager {
     /// Enable/disable auto-restart
     pub fn set_auto_restart(&mut self, enabled: bool) {
         self.auto_restart_enabled = enabled;
-        println!("[VlcHelperManager] Auto-restart {}", if enabled { "enabled" } else { "disabled" });
+        println!("[MediaPlayerHelperManager] Auto-restart {}", if enabled { "enabled" } else { "disabled" });
     }
 
     /// Force cleanup of any zombie processes
     pub fn force_cleanup(&mut self) {
         if let Some(mut child) = self.process.take() {
-            println!("[VlcHelperManager] Force cleaning up VLC helper process");
+            println!("[MediaPlayerHelperManager] Force cleaning up Media Player helper process");
             
             // Force kill the process
             let result = unsafe { libc::killpg(child.id() as i32, libc::SIGKILL) };
@@ -725,16 +725,16 @@ impl VlcHelperManager {
                 let errno = std::io::Error::last_os_error();
                 // Only log as warning if it's not "No such process" (process already dead)
                 if errno.raw_os_error() != Some(3) { // ESRCH = 3
-                    println!("[VlcHelperManager] WARNING: Failed to send SIGKILL: {}", errno);
+                    println!("[MediaPlayerHelperManager] WARNING: Failed to send SIGKILL: {}", errno);
                 } else {
-                    println!("[VlcHelperManager] VLC helper process {} already terminated", child.id());
+                    println!("[MediaPlayerHelperManager] Media Player helper process {} already terminated", child.id());
                 }
             }
             
             // Wait for it to die (non-blocking)
             match child.try_wait() {
                 Ok(Some(status)) => {
-                    println!("[VlcHelperManager] VLC helper process {} exited with status: {:?}", child.id(), status);
+                    println!("[MediaPlayerHelperManager] Media Player helper process {} exited with status: {:?}", child.id(), status);
                 }
                 Ok(None) => {
                     // Process still running, wait a bit more
@@ -744,7 +744,7 @@ impl VlcHelperManager {
                     });
                 }
                 Err(e) => {
-                    println!("[VlcHelperManager] Error waiting for VLC helper process {}: {}", child.id(), e);
+                    println!("[MediaPlayerHelperManager] Error waiting for Media Player helper process {}: {}", child.id(), e);
                 }
             }
         }

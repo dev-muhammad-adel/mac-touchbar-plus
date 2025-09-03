@@ -22,15 +22,601 @@ use std::io::{Write, Read};
 use std::thread;
 use std::time::Duration;
 
-use std::process::Command;
+
 use std::sync::{Arc, Mutex};
 use serde_json::json;
 
-// DBus imports for proper event-driven monitoring
-use zbus::{Connection, MessageType, MessageStream, MatchRule};
+// DBus imports for native MPRIS communication
+use zbus::{Connection, MessageType, MessageStream, MatchRule, Proxy};
 use zbus::fdo::DBusProxy;
 use futures_lite::stream::StreamExt;
+use std::collections::HashMap;
+use tokio::runtime::Runtime;
+use lazy_static::lazy_static;
 
+// OOP Architecture for Media Players
+// =================================
+
+/// Enum-based Media Player for better OOP without dyn compatibility issues
+#[derive(Debug)]
+enum MediaPlayerType {
+    Vlc(VlcPlayer),
+    Dragon(DragonPlayer),
+}
+
+impl MediaPlayerType {
+    /// Get the MPRIS destination for this player
+    fn get_mpris_destination(&self) -> String {
+        match self {
+            MediaPlayerType::Vlc(player) => player.get_mpris_destination(),
+            MediaPlayerType::Dragon(player) => player.get_mpris_destination(),
+        }
+    }
+    
+    /// Check if this player is currently running
+    fn is_running(&self) -> bool {
+        match self {
+            MediaPlayerType::Vlc(player) => player.is_running(),
+            MediaPlayerType::Dragon(player) => player.is_running(),
+        }
+    }
+    
+    /// Get current media status
+    fn get_status(&self) -> Option<MediaStatus> {
+        match self {
+            MediaPlayerType::Vlc(player) => player.get_status(),
+            MediaPlayerType::Dragon(player) => player.get_status(),
+        }
+    }
+    
+    /// Get current media status asynchronously (for use in async contexts)
+    async fn get_status_async(&self) -> Option<MediaStatus> {
+        match self {
+            MediaPlayerType::Vlc(player) => player.get_status_async().await,
+            MediaPlayerType::Dragon(player) => player.get_status_async().await,
+        }
+    }
+    
+    /// Execute a command on this player
+    fn execute_command(&self, command: &str, args: &[&str]) -> bool {
+        match self {
+            MediaPlayerType::Vlc(player) => player.execute_command(command, args),
+            MediaPlayerType::Dragon(player) => player.execute_command(command, args),
+        }
+    }
+    
+    /// Get player-specific status from MPRIS destination
+    fn get_status_from_dest(&self, mpris_dest: &str) -> Option<MediaStatus> {
+        match self {
+            MediaPlayerType::Vlc(player) => player.get_status_from_dest(mpris_dest),
+            MediaPlayerType::Dragon(player) => player.get_status_from_dest(mpris_dest),
+        }
+    }
+    
+    /// Handle player-specific commands
+    fn handle_command(&self, command: &str, status_sender: &Arc<Mutex<Option<UnixStream>>>) {
+        match self {
+            MediaPlayerType::Vlc(player) => player.handle_command(command, status_sender),
+            MediaPlayerType::Dragon(player) => player.handle_command(command, status_sender),
+        }
+    }
+    
+    /// Monitor player-specific events
+    fn monitor_events(&self, status_sender: Arc<Mutex<Option<UnixStream>>>) {
+        match self {
+            MediaPlayerType::Vlc(player) => player.monitor_events(status_sender),
+            MediaPlayerType::Dragon(player) => player.monitor_events(status_sender),
+        }
+    }
+    
+    /// Run player-specific D-Bus event monitor
+    fn run_dbus_event_monitor(
+        &self,
+        status_sender: Arc<Mutex<Option<UnixStream>>>, 
+        playback_state: Arc<Mutex<(bool, MediaStatus)>>
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        match self {
+            MediaPlayerType::Vlc(player) => player.run_dbus_event_monitor(status_sender, playback_state),
+            MediaPlayerType::Dragon(player) => player.run_dbus_event_monitor(status_sender, playback_state),
+        }
+    }
+    
+    /// Get the player's window class name
+    fn get_window_class(&self) -> &str {
+        match self {
+            MediaPlayerType::Vlc(player) => player.get_window_class(),
+            MediaPlayerType::Dragon(player) => player.get_window_class(),
+        }
+    }
+}
+
+/// VLC Media Player implementation
+#[derive(Debug)]
+struct VlcPlayer {
+    instance: Option<MediaPlayerInstance>,
+}
+
+impl VlcPlayer {
+    fn new(instance: Option<MediaPlayerInstance>) -> Self {
+        Self { instance }
+    }
+    
+    fn get_mpris_destination(&self) -> String {
+        if let Some(ref instance) = self.instance {
+            if let Some(pid) = instance.pid {
+                let instance_name = format!("org.mpris.MediaPlayer2.vlc.instance{}", pid);
+                eprintln!("[VlcPlayer] Using VLC instance-specific MPRIS: {}", instance_name);
+                instance_name
+            } else {
+                eprintln!("[VlcPlayer] No PID available, using legacy VLC MPRIS");
+                "org.mpris.MediaPlayer2.vlc".to_string()
+            }
+        } else {
+            eprintln!("[VlcPlayer] No instance available, using legacy VLC MPRIS");
+            "org.mpris.MediaPlayer2.vlc".to_string()
+        }
+    }
+    
+    fn is_running(&self) -> bool {
+        self.instance.as_ref()
+            .map(|instance| instance.window_class == "vlc")
+            .unwrap_or(false)
+    }
+    
+    fn get_status(&self) -> Option<MediaStatus> {
+        let instance = self.instance.as_ref()?;
+        if instance.window_class != "vlc" {
+            return None;
+        }
+        
+        let primary_dest = &instance.mpris_name;
+        let fallback_dest = "org.mpris.MediaPlayer2.vlc";
+        
+        let destinations = if primary_dest != fallback_dest {
+            vec![primary_dest.as_str(), fallback_dest]
+        } else {
+            vec![primary_dest.as_str()]
+        };
+        
+        for (i, mpris_dest) in destinations.iter().enumerate() {
+            if i == 0 {
+                eprintln!("[VlcPlayer] Getting VLC status from: {} (primary)", mpris_dest);
+            } else {
+                eprintln!("[VlcPlayer] Trying VLC fallback: {}", mpris_dest);
+            }
+            
+            if let Some(status) = self.get_status_from_dest(mpris_dest) {
+                eprintln!("[VlcPlayer] Successfully connected to: {}", mpris_dest);
+                return Some(status);
+            }
+        }
+        
+        eprintln!("[VlcPlayer] All VLC MPRIS destinations failed");
+        None
+    }
+    
+    async fn get_status_async(&self) -> Option<MediaStatus> {
+        let instance = self.instance.as_ref()?;
+        if instance.window_class != "vlc" {
+            return None;
+        }
+        let primary_dest = &instance.mpris_name;
+        let fallback_dest = "org.mpris.MediaPlayer2.vlc";
+        let destinations = if primary_dest != fallback_dest {
+            vec![primary_dest.as_str(), fallback_dest]
+        } else {
+            vec![primary_dest.as_str()]
+        };
+        for (i, mpris_dest) in destinations.iter().enumerate() {
+            if i == 0 {
+                eprintln!("[VlcPlayer] Getting VLC status from: {} (primary, async)", mpris_dest);
+            } else {
+                eprintln!("[VlcPlayer] Trying VLC fallback (async): {}", mpris_dest);
+            }
+            if let Some(status) = get_status_from_dest_native(mpris_dest).await {
+                eprintln!("[VlcPlayer] Successfully connected (async) to: {}", mpris_dest);
+                return Some(status);
+            }
+        }
+        eprintln!("[VlcPlayer] All VLC MPRIS destinations failed (async)");
+        None
+    }
+    
+    fn execute_command(&self, command: &str, args: &[&str]) -> bool {
+        let instance = match &self.instance {
+            Some(instance) => instance,
+            None => {
+                eprintln!("[VlcPlayer] No VLC instance detected");
+                return false;
+            }
+        };
+        
+        let primary_dest = &instance.mpris_name;
+        let fallback_dest = "org.mpris.MediaPlayer2.vlc";
+        
+        let destinations = if primary_dest != fallback_dest {
+            vec![primary_dest.as_str(), fallback_dest]
+        } else {
+            vec![primary_dest.as_str()]
+        };
+        
+        for (i, mpris_dest) in destinations.iter().enumerate() {
+            if i == 0 {
+                eprintln!("[VlcPlayer] Executing VLC command on: {} (primary)", mpris_dest);
+            } else {
+                eprintln!("[VlcPlayer] Trying VLC command fallback: {}", mpris_dest);
+            }
+            
+            if try_execute_command_on_destination(command, args, mpris_dest) {
+                eprintln!("[VlcPlayer] Command executed successfully on: {}", mpris_dest);
+                return true;
+            }
+        }
+        
+        eprintln!("[VlcPlayer] All VLC command destinations failed");
+        false
+    }
+    
+    fn get_status_from_dest(&self, mpris_dest: &str) -> Option<MediaStatus> {
+        // Use native D-Bus implementation with shared runtime
+        eprintln!("[VlcPlayer] Getting VLC status from DBus destination: {}", mpris_dest);
+        TOKIO_RT.block_on(get_status_from_dest_native(mpris_dest))
+    }
+    
+    fn handle_command(&self, command: &str, status_sender: &Arc<Mutex<Option<UnixStream>>>) {
+        // Forward to the existing VLC command handler implementation
+        handle_vlc_command(command, status_sender)
+    }
+    
+    fn monitor_events(&self, status_sender: Arc<Mutex<Option<UnixStream>>>) {
+        // Forward to the existing VLC event monitoring implementation
+        monitor_vlc_events(status_sender)
+    }
+    
+    fn run_dbus_event_monitor(
+        &self,
+        status_sender: Arc<Mutex<Option<UnixStream>>>, 
+        playback_state: Arc<Mutex<(bool, MediaStatus)>>
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Forward to the existing VLC D-Bus event monitor implementation
+        run_vlc_dbus_event_monitor(status_sender, playback_state)
+    }
+    
+    fn get_window_class(&self) -> &str {
+        if let Some(ref instance) = self.instance {
+            instance.window_class.as_str()
+        } else {
+            "vlc"
+        }
+    }
+}
+
+/// Dragon Player implementation
+#[derive(Debug)]
+struct DragonPlayer {
+    instance: Option<MediaPlayerInstance>,
+}
+
+impl DragonPlayer {
+    fn new(instance: Option<MediaPlayerInstance>) -> Self {
+        Self { instance }
+    }
+    
+    fn get_mpris_destination(&self) -> String {
+        // Dragon Player typically exposes only the base MPRIS name; instance-specific names are not activatable
+        eprintln!("[DragonPlayer] Using Dragon Player base MPRIS: org.mpris.MediaPlayer2.dragonplayer");
+        "org.mpris.MediaPlayer2.dragonplayer".to_string()
+    }
+    
+    fn is_running(&self) -> bool {
+        self.instance.as_ref()
+            .map(|instance| instance.window_class == "org.kde.dragonplayer" || instance.window_class == "dragonplayer")
+            .unwrap_or(false)
+    }
+    
+    fn get_status(&self) -> Option<MediaStatus> {
+        let instance = self.instance.as_ref()?;
+        if instance.window_class != "org.kde.dragonplayer" && instance.window_class != "dragonplayer" {
+            return None;
+        }
+        
+        let mpris_dest = "org.mpris.MediaPlayer2.dragonplayer";
+        eprintln!("[DragonPlayer] Getting Dragon Player status from: {}", mpris_dest);
+        
+        if let Some(status) = self.get_status_from_dest(mpris_dest) {
+            eprintln!("[DragonPlayer] Successfully connected to: {}", mpris_dest);
+            Some(status)
+        } else {
+            eprintln!("[DragonPlayer] Failed to connect to Dragon Player MPRIS");
+            None
+        }
+    }
+    
+    async fn get_status_async(&self) -> Option<MediaStatus> {
+        let instance = self.instance.as_ref()?;
+        if instance.window_class != "org.kde.dragonplayer" && instance.window_class != "dragonplayer" {
+            return None;
+        }
+        
+        let mpris_dest = "org.mpris.MediaPlayer2.dragonplayer";
+        eprintln!("[DragonPlayer] Getting Dragon Player status from: {} (async)", mpris_dest);
+        
+        if let Some(status) = get_status_from_dest_native(mpris_dest).await {
+            eprintln!("[DragonPlayer] Successfully connected (async) to: {}", mpris_dest);
+            Some(status)
+        } else {
+            eprintln!("[DragonPlayer] Failed to connect to Dragon Player MPRIS (async)");
+            None
+        }
+    }
+    
+    fn execute_command(&self, command: &str, args: &[&str]) -> bool {
+        if self.instance.is_none() {
+            eprintln!("[DragonPlayer] No Dragon Player instance detected");
+            return false;
+        }
+        
+        let mpris_dest = "org.mpris.MediaPlayer2.dragonplayer";
+        eprintln!("[DragonPlayer] Executing Dragon Player command on: {}", mpris_dest);
+        
+        if try_execute_command_on_destination(command, args, mpris_dest) {
+            eprintln!("[DragonPlayer] Command executed successfully on: {}", mpris_dest);
+            true
+        } else {
+            eprintln!("[DragonPlayer] Dragon Player command failed");
+            false
+        }
+    }
+    
+    fn get_status_from_dest(&self, mpris_dest: &str) -> Option<MediaStatus> {
+        // Use native D-Bus implementation with shared runtime
+        eprintln!("[DragonPlayer] Getting Dragon Player status from DBus destination: {}", mpris_dest);
+        TOKIO_RT.block_on(get_status_from_dest_native(mpris_dest))
+    }
+    
+    fn handle_command(&self, command: &str, status_sender: &Arc<Mutex<Option<UnixStream>>>) {
+        // Forward to the existing Dragon Player command handler implementation
+        handle_dragon_player_command(command, status_sender)
+    }
+    
+    fn monitor_events(&self, status_sender: Arc<Mutex<Option<UnixStream>>>) {
+        // Forward to the existing Dragon Player event monitoring implementation
+        monitor_dragon_player_events(status_sender)
+    }
+    
+    fn run_dbus_event_monitor(
+        &self,
+        status_sender: Arc<Mutex<Option<UnixStream>>>, 
+        playback_state: Arc<Mutex<(bool, MediaStatus)>>
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Forward to the existing Dragon Player D-Bus event monitor implementation
+        run_dragon_player_dbus_event_monitor(status_sender, playback_state)
+    }
+    
+    fn get_window_class(&self) -> &str {
+        if let Some(ref instance) = self.instance {
+            instance.window_class.as_str()
+        } else {
+            "org.kde.dragonplayer"
+        }
+    }
+}
+
+/// Media Player Factory for creating appropriate player instances
+struct MediaPlayerFactory;
+
+impl MediaPlayerFactory {
+    fn create_player(window_class: &str, instance: Option<MediaPlayerInstance>) -> MediaPlayerType {
+        match window_class {
+            "vlc" => MediaPlayerType::Vlc(VlcPlayer::new(instance)),
+            "org.kde.dragonplayer" | "dragonplayer" => MediaPlayerType::Dragon(DragonPlayer::new(instance)),
+            _ => {
+                eprintln!("[MediaPlayerFactory] Unknown player class '{}', defaulting to VLC", window_class);
+                MediaPlayerType::Vlc(VlcPlayer::new(instance))
+            }
+        }
+    }
+}
+
+/// Manager for the current active media player
+struct MediaPlayerManager {
+    current_player: Option<MediaPlayerType>,
+}
+
+impl MediaPlayerManager {
+    fn new() -> Self {
+        Self { current_player: None }
+    }
+    
+    fn set_current_player(&mut self, window_class: &str, instance: Option<MediaPlayerInstance>) {
+        self.current_player = Some(MediaPlayerFactory::create_player(window_class, instance));
+    }
+    
+    fn get_current_player(&self) -> Option<&MediaPlayerType> {
+        self.current_player.as_ref()
+    }
+    
+    fn clear_current_player(&mut self) {
+        self.current_player = None;
+    }
+}
+
+// Global media player manager
+static mut MEDIA_PLAYER_MANAGER: Option<MediaPlayerManager> = None;
+
+fn get_media_player_manager() -> &'static mut MediaPlayerManager {
+    unsafe {
+        if MEDIA_PLAYER_MANAGER.is_none() {
+            MEDIA_PLAYER_MANAGER = Some(MediaPlayerManager::new());
+        }
+        MEDIA_PLAYER_MANAGER.as_mut().unwrap()
+    }
+}
+
+// Helper functions for native D-Bus implementation
+
+fn extract_interface_from_method(method: &str) -> &str {
+    if method.starts_with("org.mpris.MediaPlayer2.Player.") {
+        "org.mpris.MediaPlayer2.Player"
+    } else if method.starts_with("org.mpris.MediaPlayer2.") {
+        "org.mpris.MediaPlayer2"
+    } else {
+        "org.mpris.MediaPlayer2.Player" // Default to Player interface
+    }
+}
+
+fn extract_method_name(method: &str) -> String {
+    method.split('.').last().unwrap_or(method).to_string()
+}
+
+
+
+// Global connection for reuse across async contexts
+static mut SHARED_DBUS_CONNECTION: Option<Connection> = None;
+
+// Shared Tokio runtime for all async DBus work
+lazy_static! {
+    static ref TOKIO_RT: Runtime = Runtime::new().expect("Failed to create shared Tokio runtime");
+}
+
+async fn get_shared_connection() -> Result<Connection, zbus::Error> {
+    // Try to reuse shared connection if available, otherwise create a new one
+    unsafe {
+        if let Some(ref conn) = SHARED_DBUS_CONNECTION {
+            // Try to clone the existing connection
+            Ok(conn.clone())
+        } else {
+            // Create a new connection
+            let conn = Connection::session().await?;
+            SHARED_DBUS_CONNECTION = Some(conn.clone());
+            Ok(conn)
+        }
+    }
+}
+
+// Native D-Bus implementations
+async fn get_status_from_dest_native(mpris_dest: &str) -> Option<MediaStatus> {
+    let connection = match get_shared_connection().await {
+        Ok(conn) => conn,
+        Err(e) => {
+            eprintln!("[media-helper] Failed to get D-Bus connection: {}", e);
+            return None;
+        }
+    };
+    
+    let proxy = match Proxy::new(
+        &connection,
+        mpris_dest,
+        "/org/mpris/MediaPlayer2",
+        "org.mpris.MediaPlayer2.Player",
+    ).await {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("[media-helper] Failed to create proxy for {}: {}", mpris_dest, e);
+            return None;
+        }
+    };
+    
+    // Get individual properties using get_property
+    let playback_status: String = match proxy.get_property("PlaybackStatus").await {
+        Ok(status) => status,
+        Err(e) => {
+            eprintln!("[media-helper] Failed to get PlaybackStatus: {}", e);
+            return None;
+        }
+    };
+    
+    let position_raw: i64 = proxy.get_property("Position").await.unwrap_or(0);
+    
+    let metadata: HashMap<String, zbus::zvariant::Value> = proxy
+        .get_property("Metadata")
+        .await
+        .unwrap_or_else(|_| HashMap::new());
+    
+    let length_raw = metadata.get("mpris:length")
+        .and_then(|v| Some(v.clone()))
+        .and_then(|v| i64::try_from(v).ok())
+        .unwrap_or(0);
+    
+    // Dragon Player uses milliseconds, VLC uses microseconds
+    let is_dragon = mpris_dest.contains("dragonplayer");
+    let duration_seconds = if is_dragon { (length_raw / 1_000) } else { (length_raw / 1_000_000) };
+    let position_seconds = if is_dragon { (position_raw as f64 / 1_000.0) } else { (position_raw as f64 / 1_000_000.0) };
+    let is_playing = playback_status == "Playing";
+    let position_ratio = if duration_seconds > 0 { position_seconds / duration_seconds as f64 } else { 0.0 };
+    
+    Some(MediaStatus {
+        is_playing,
+        position: position_ratio,
+        duration: duration_seconds,
+    })
+}
+
+async fn try_execute_command_on_destination_native(command: &str, args: &[&str], mpris_dest: &str) -> bool {
+    let connection = match get_shared_connection().await {
+        Ok(conn) => conn,
+        Err(e) => {
+            eprintln!("[media-helper] Failed to get D-Bus connection: {}", e);
+            return false;
+        }
+    };
+    
+    let interface = extract_interface_from_method(command);
+    let proxy = match Proxy::new(
+        &connection,
+        mpris_dest,
+        "/org/mpris/MediaPlayer2",
+        interface,
+    ).await {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("[media-helper] Failed to create proxy for {}: {}", mpris_dest, e);
+            return false;
+        }
+    };
+    
+    let method_name = extract_method_name(command);
+    
+    // Handle different method signatures
+    let result = match method_name.as_str() {
+        "PlayPause" | "Play" | "Pause" | "Stop" | "Next" | "Previous" => {
+            proxy.call_method(method_name.as_str(), &()).await
+        }
+        "Seek" => {
+            if let Some(arg) = args.get(0) {
+                if let Some(offset_str) = arg.strip_prefix("int64:") {
+                    if let Ok(offset) = offset_str.parse::<i64>() {
+                        proxy.call_method(method_name.as_str(), &(offset,)).await
+                    } else {
+                        return false;
+                    }
+                } else {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+        "Raise" | "Quit" => {
+            proxy.call_method(method_name.as_str(), &()).await
+        }
+        _ => {
+            eprintln!("[media-helper] Unknown method: {}", method_name);
+            return false;
+        }
+    };
+    
+    match result {
+        Ok(_) => {
+            eprintln!("[media-helper] Command '{}' executed successfully on {}", command, mpris_dest);
+            true
+        }
+        Err(e) => {
+            eprintln!("[media-helper] Command '{}' failed on {}: {}", command, mpris_dest, e);
+            false
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 struct MediaStatus {
@@ -77,19 +663,65 @@ fn set_current_media_player(class: &str, pid: Option<u32>) {
     let mpris_dest = get_mpris_destination(class, pid);
     eprintln!("[media-helper] Determined MPRIS destination: {}", mpris_dest);
     
+    let instance = MediaPlayerInstance::new(mpris_dest, class.to_string(), pid);
+    
+    // Update the old global instance for backward compatibility
     unsafe {
-        CURRENT_MEDIA_PLAYER_INSTANCE = Some(MediaPlayerInstance::new(
-            mpris_dest,
-            class.to_string(),
-            pid,
-        ));
+        CURRENT_MEDIA_PLAYER_INSTANCE = Some(instance.clone());
         eprintln!("[media-helper] Set current media player instance to: {:?}", CURRENT_MEDIA_PLAYER_INSTANCE);
     }
+    
+    // Update the new OOP manager
+    let manager = get_media_player_manager();
+    manager.set_current_player(class, Some(instance));
 }
 
 fn get_current_media_player_instance() -> Option<MediaPlayerInstance> {
     unsafe {
         CURRENT_MEDIA_PLAYER_INSTANCE.clone()
+    }
+}
+
+// OOP wrapper functions for easier migration
+fn get_current_player() -> Option<&'static MediaPlayerType> {
+    get_media_player_manager().get_current_player()
+}
+
+fn get_current_player_status() -> Option<MediaStatus> {
+    get_current_player()?.get_status()
+}
+
+async fn get_current_player_status_async() -> Option<MediaStatus> {
+    // We need to handle the async case differently since we can't hold references across await
+    if let Some(instance) = get_current_media_player_instance() {
+        let window_class = instance.window_class.clone();
+        let player = MediaPlayerFactory::create_player(&window_class, Some(instance));
+        player.get_status_async().await
+    } else {
+        None
+    }
+}
+
+fn execute_current_player_command(command: &str, args: &[&str]) -> bool {
+    match get_current_player() {
+        Some(player) => player.execute_command(command, args),
+        None => false,
+    }
+}
+
+fn handle_current_player_command(command: &str, status_sender: &Arc<Mutex<Option<UnixStream>>>) {
+    if let Some(player) = get_current_player() {
+        player.handle_command(command, status_sender);
+    }
+}
+
+fn monitor_current_player_events(status_sender: Arc<Mutex<Option<UnixStream>>>) {
+    if let Some(player) = get_current_player() {
+        player.monitor_events(status_sender);
+    } else {
+        eprintln!("[OOP] No current player to monitor, defaulting to VLC");
+        let vlc_player = MediaPlayerType::Vlc(VlcPlayer::new(None));
+        vlc_player.monitor_events(status_sender);
     }
 }
 
@@ -143,6 +775,34 @@ fn get_vlc_status() -> Option<MediaStatus> {
     None
 }
 
+// Async variant for use inside async DBus handlers (avoids block_on re-entry)
+async fn get_vlc_status_async() -> Option<MediaStatus> {
+    let instance = get_current_media_player_instance()?;
+    if instance.window_class != "vlc" {
+        return None;
+    }
+    let primary_dest = &instance.mpris_name;
+    let fallback_dest = "org.mpris.MediaPlayer2.vlc";
+    let destinations = if primary_dest != fallback_dest {
+        vec![primary_dest.as_str(), fallback_dest]
+    } else {
+        vec![primary_dest.as_str()]
+    };
+    for (i, mpris_dest) in destinations.iter().enumerate() {
+        if i == 0 {
+            eprintln!("[vlc-helper] Getting VLC status from: {} (primary, async)", mpris_dest);
+        } else {
+            eprintln!("[vlc-helper] Trying VLC fallback (async): {}", mpris_dest);
+        }
+        if let Some(status) = get_status_from_dest_native(mpris_dest).await {
+            eprintln!("[vlc-helper] Successfully connected (async) to: {}", mpris_dest);
+            return Some(status);
+        }
+    }
+    eprintln!("[vlc-helper] All VLC MPRIS destinations failed (async)");
+    None
+}
+
 fn execute_vlc_command(command: &str, args: &[&str]) -> bool {
     let instance = match get_current_media_player_instance() {
         Some(instance) => instance,
@@ -183,36 +843,32 @@ fn execute_vlc_command(command: &str, args: &[&str]) -> bool {
 }
 
 // Dragon Player-specific functions
-fn get_dragon_player_mpris_destination(pid: Option<u32>) -> String {
-    if let Some(pid) = pid {
-        let instance_name = format!("org.mpris.MediaPlayer2.dragonplayer.instance{}", pid);
-        eprintln!("[dragon-helper] Using Dragon Player instance-specific MPRIS: {}", instance_name);
-        instance_name
-    } else {
-        eprintln!("[dragon-helper] No PID available, using legacy Dragon Player MPRIS");
+fn get_dragon_player_mpris_destination(_pid: Option<u32>) -> String {
+    // Dragon Player typically exposes only the base MPRIS name; instance-specific names are not activatable
+    eprintln!("[dragon-helper] Using Dragon Player base MPRIS name");
         "org.mpris.MediaPlayer2.dragonplayer".to_string()
-    }
 }
 
 fn is_dragon_player_running() -> bool {
     get_current_media_player_instance()
-        .map(|instance| instance.window_class == "org.kde.dragonplayer")
+        .map(|instance| instance.window_class == "org.kde.dragonplayer" || instance.window_class == "dragonplayer")
         .unwrap_or(false)
 }
 
 fn get_dragon_player_status() -> Option<MediaStatus> {
     let instance = get_current_media_player_instance()?;
-    if instance.window_class != "org.kde.dragonplayer" {
+    if instance.window_class != "org.kde.dragonplayer" && instance.window_class != "dragonplayer" {
         return None;
     }
     
     let primary_dest = &instance.mpris_name;
     let fallback_dest = "org.mpris.MediaPlayer2.dragonplayer";
     
+    // Prefer base name first; Dragon Player instance names often aren't activatable
     let destinations = if primary_dest != fallback_dest {
-        vec![primary_dest.as_str(), fallback_dest]
+        vec![fallback_dest, primary_dest.as_str()]
     } else {
-        vec![primary_dest.as_str()]
+        vec![fallback_dest]
     };
     
     for (i, mpris_dest) in destinations.iter().enumerate() {
@@ -232,6 +888,35 @@ fn get_dragon_player_status() -> Option<MediaStatus> {
     None
 }
 
+// Async variant for use inside async DBus handlers
+async fn get_dragon_player_status_async() -> Option<MediaStatus> {
+    let instance = get_current_media_player_instance()?;
+    if instance.window_class != "org.kde.dragonplayer" && instance.window_class != "dragonplayer" {
+        return None;
+    }
+    let primary_dest = &instance.mpris_name;
+    let fallback_dest = "org.mpris.MediaPlayer2.dragonplayer";
+    // Prefer base name first in async path as well
+    let destinations = if primary_dest != fallback_dest {
+        vec![fallback_dest, primary_dest.as_str()]
+    } else {
+        vec![fallback_dest]
+    };
+    for (i, mpris_dest) in destinations.iter().enumerate() {
+        if i == 0 {
+            eprintln!("[dragon-helper] Getting Dragon Player status from: {} (primary, async)", mpris_dest);
+        } else {
+            eprintln!("[dragon-helper] Trying Dragon Player fallback (async): {}", mpris_dest);
+        }
+        if let Some(status) = get_status_from_dest_native(mpris_dest).await {
+            eprintln!("[dragon-helper] Successfully connected (async) to: {}", mpris_dest);
+            return Some(status);
+        }
+    }
+    eprintln!("[dragon-helper] All Dragon Player MPRIS destinations failed (async)");
+    None
+}
+
 fn execute_dragon_player_command(command: &str, args: &[&str]) -> bool {
     let instance = match get_current_media_player_instance() {
         Some(instance) => instance,
@@ -241,7 +926,7 @@ fn execute_dragon_player_command(command: &str, args: &[&str]) -> bool {
         }
     };
     
-    if instance.window_class != "org.kde.dragonplayer" {
+    if instance.window_class != "org.kde.dragonplayer" && instance.window_class != "dragonplayer" {
         eprintln!("[dragon-helper] Instance is not Dragon Player: {}", instance.window_class);
         return false;
     }
@@ -249,10 +934,11 @@ fn execute_dragon_player_command(command: &str, args: &[&str]) -> bool {
     let primary_dest = &instance.mpris_name;
     let fallback_dest = "org.mpris.MediaPlayer2.dragonplayer";
     
+    // Prefer base name first for commands too
     let destinations = if primary_dest != fallback_dest {
-        vec![primary_dest.as_str(), fallback_dest]
+        vec![fallback_dest, primary_dest.as_str()]
     } else {
-        vec![primary_dest.as_str()]
+        vec![fallback_dest]
     };
     
     for (i, mpris_dest) in destinations.iter().enumerate() {
@@ -277,7 +963,7 @@ fn get_mpris_destination(class: &str, pid: Option<u32>) -> String {
     
     match class {
         "vlc" => get_vlc_mpris_destination(pid),
-        "org.kde.dragonplayer" => get_dragon_player_mpris_destination(pid),
+        "org.kde.dragonplayer" | "dragonplayer" => get_dragon_player_mpris_destination(pid),
         _ => {
             eprintln!("[media-helper] Unknown media player class: {}, using VLC fallback", class);
             get_vlc_mpris_destination(pid)
@@ -285,251 +971,41 @@ fn get_mpris_destination(class: &str, pid: Option<u32>) -> String {
     }
 }
 
-fn is_media_player_running() -> bool {
-    // Check if we have a current media player instance
-    get_current_media_player_instance().is_some()
-}
 
-fn get_media_player_status() -> Option<MediaStatus> {
-    let instance = get_current_media_player_instance()?;
-    
-    // Route to the appropriate player-specific function
-    match instance.window_class.as_str() {
-        "vlc" => get_vlc_status(),
-        "org.kde.dragonplayer" => get_dragon_player_status(),
-        _ => {
-            eprintln!("[media-helper] Unknown media player class: {}, defaulting to VLC", instance.window_class);
-            get_vlc_status()
-        }
-    }
-}
-
-fn execute_media_player_command(command: &str, args: &[&str]) -> bool {
-    let instance = match get_current_media_player_instance() {
-        Some(instance) => instance,
-        None => {
-            eprintln!("[media-helper] No media player instance detected");
-            return false;
-        }
-    };
-    
-    // Route to the appropriate player-specific function
-    match instance.window_class.as_str() {
-        "vlc" => execute_vlc_command(command, args),
-        "org.kde.dragonplayer" => execute_dragon_player_command(command, args),
-        _ => {
-            eprintln!("[media-helper] Unknown media player class: {}, defaulting to VLC", instance.window_class);
-            execute_vlc_command(command, args)
-        }
-    }
-}
 
 fn get_vlc_status_from_dest(mpris_dest: &str) -> Option<MediaStatus> {
-    // Get all properties in a single DBus call to reduce latency
-    let output = Command::new("timeout")
-        .arg("1") // 1 second timeout
-        .arg("dbus-send")
-        .arg("--session")
-        .arg(format!("--dest={}", mpris_dest))
-        .arg("--type=method_call")
-        .arg("--print-reply")
-        .arg("/org/mpris/MediaPlayer2")
-        .arg("org.freedesktop.DBus.Properties.GetAll")
-        .arg("string:org.mpris.MediaPlayer2.Player")
-        .output()
-        .ok()?;
+    // Use native D-Bus implementation with Handle to current runtime
+    eprintln!("[vlc-helper] Getting VLC status from DBus destination: {}", mpris_dest);
     
-    if !output.status.success() {
-        return None;
-    }
-    
-    let text = String::from_utf8_lossy(&output.stdout);
-    let lines: Vec<&str> = text.lines().collect();
-    
-    // Extract playback status
-    let is_playing = lines.iter().any(|line| line.contains("Playing"));
-    
-    // Extract position
-    let position = lines.iter()
-        .find(|line| line.contains("Position"))
-        .and_then(|line| {
-            // Look for the next line with int64 value
-            if let Some(pos) = lines.iter().position(|l| l == line) {
-                for i in (pos + 1)..lines.len() {
-                    if lines[i].contains("int64") {
-                        return lines[i].split_whitespace().last().and_then(|s| s.parse::<i64>().ok());
-                    }
-                }
-            }
-            None
-        })
-        .unwrap_or(0);
-
-    // Extract duration from metadata
-    let duration = lines.iter()
-        .find(|line| line.contains("mpris:length"))
-        .and_then(|line| {
-            if let Some(pos) = lines.iter().position(|l| l == line) {
-                for i in (pos + 1)..lines.len() {
-                    if lines[i].contains("int64") {
-                        return lines[i].split_whitespace().last().and_then(|s| s.parse::<i64>().ok());
-                    }
-                }
-            }
-            None
-        })
-        .unwrap_or(0);
-    
-    // Calculate progress
-    let progress = if duration > 0 { position as f64 / duration as f64 } else { 0.0 };
-    
-    Some(MediaStatus {
-        is_playing,
-        position: progress,
-        duration: duration / 1_000_000, // Convert to seconds
-    })
+    // Always use shared runtime
+    TOKIO_RT.block_on(get_status_from_dest_native(mpris_dest))
 }
+
+
 
 fn get_dragon_player_status_from_dest(mpris_dest: &str) -> Option<MediaStatus> {
-    // Get all properties in a single DBus call to reduce latency
-    let output = Command::new("timeout")
-        .arg("1") // 1 second timeout
-        .arg("dbus-send")
-        .arg("--session")
-        .arg(format!("--dest={}", mpris_dest))
-        .arg("--type=method_call")
-        .arg("--print-reply")
-        .arg("/org/mpris/MediaPlayer2")
-        .arg("org.freedesktop.DBus.Properties.GetAll")
-        .arg("string:org.mpris.MediaPlayer2.Player")
-        .output()
-        .ok()?;
+    // Use native D-Bus implementation with Handle to current runtime
+    eprintln!("[dragon-helper] Getting Dragon Player status from DBus destination: {}", mpris_dest);
     
-    if !output.status.success() {
-        return None;
-    }
-    
-    let text = String::from_utf8_lossy(&output.stdout);
-    let lines: Vec<&str> = text.lines().collect();
-    
-    // Extract playback status
-    let is_playing = lines.iter().any(|line| line.contains("Playing"));
-    
-    // Extract position
-    let position = lines.iter()
-        .find(|line| line.contains("Position"))
-        .and_then(|line| {
-            // Look for the next line with int64 value
-            if let Some(pos) = lines.iter().position(|l| l == line) {
-                for i in (pos + 1)..lines.len() {
-                    if lines[i].contains("int64") {
-                        return lines[i].split_whitespace().last().and_then(|s| s.parse::<i64>().ok());
-                    }
-                }
-            }
-            None
-        })
-        .unwrap_or(0);
-    
-    // Extract duration from metadata
-    let duration = lines.iter()
-        .find(|line| line.contains("mpris:length"))
-        .and_then(|line| {
-            if let Some(pos) = lines.iter().position(|l| l == line) {
-                for i in (pos + 1)..lines.len() {
-                    if lines[i].contains("int64") {
-                        return lines[i].split_whitespace().last().and_then(|s| s.parse::<i64>().ok());
-                    }
-                }
-            }
-            None
-        })
-        .unwrap_or(0);
-    
-    // Calculate progress
-    let progress = if duration > 0 { position as f64 / duration as f64 } else { 0.0 };
-    
-    Some(MediaStatus {
-        is_playing,
-        position: progress,
-        duration: duration / 1_000, // Dragon Player uses milliseconds, convert to seconds
-    })
+    // Always use shared runtime
+    TOKIO_RT.block_on(get_status_from_dest_native(mpris_dest))
 }
 
-fn get_media_player_status_from_dest(mpris_dest: &str) -> Option<MediaStatus> {
-    // Get the current media player instance to determine the class
-    let instance = get_current_media_player_instance();
-    
-    // Determine which function to use based on the window class name
-    match instance.as_ref().map(|inst| inst.window_class.as_str()) {
-        Some("vlc") => get_vlc_status_from_dest(mpris_dest),
-        Some("org.kde.dragonplayer") => get_dragon_player_status_from_dest(mpris_dest),
-        _ => {
-            // Fallback: try to determine from MPRIS destination if no instance info
-            if mpris_dest.contains("vlc") {
-                get_vlc_status_from_dest(mpris_dest)
-            } else if mpris_dest.contains("dragonplayer") {
-                get_dragon_player_status_from_dest(mpris_dest)
-        } else {
-                // Default fallback to VLC
-                get_vlc_status_from_dest(mpris_dest)
-            }
-        }
-    }
-}
+
+
+
 
 fn try_execute_command_on_destination(command: &str, args: &[&str], mpris_dest: &str) -> bool {
-    let mut cmd = Command::new("timeout");
-    cmd.arg("1") // 1 second timeout
-       .arg("dbus-send")
-       .arg("--session")
-       .arg(format!("--dest={}", mpris_dest))
-       .arg("--type=method_call")
-       .arg("--print-reply")
-       .arg("/org/mpris/MediaPlayer2")
-       .arg(command);
-    
-    for arg in args {
-        cmd.arg(arg);
-    }
-    
-    match cmd.output() {
-        Ok(output) => {
-            if output.status.success() {
-                eprintln!("[media-helper] Command '{}' executed successfully on {}", command, mpris_dest);
-                true
-            } else {
-                eprintln!("[media-helper] Command '{}' failed on {}: {:?}", command, mpris_dest, String::from_utf8_lossy(&output.stderr));
-                false
-            }
-        }
-        Err(e) => {
-            eprintln!("[media-helper] Failed to execute command '{}' on {}: {}", command, mpris_dest, e);
-            false
-        }
-    }
+    // Use native D-Bus implementation with Handle to current runtime
+    TOKIO_RT.block_on(try_execute_command_on_destination_native(command, args, mpris_dest))
 }
 
+
+
 fn handle_command(command: &str, status_sender: &Arc<Mutex<Option<UnixStream>>>) {
-    // Get the current media player instance to determine which player we're working with
-    let player_info = get_current_media_player_instance();
-    let player_name = player_info.as_ref().map(|inst| inst.window_class.as_str()).unwrap_or("unknown");
-    
-    // Route to the appropriate player-specific command handler
-    match player_name {
-        "vlc" => {
-            eprintln!("[media-helper] Routing to VLC-specific command handler");
-            handle_vlc_command(command, status_sender)
-        }
-        "org.kde.dragonplayer" => {
-            eprintln!("[media-helper] Routing to Dragon Player-specific command handler");
-            handle_dragon_player_command(command, status_sender)
-        }
-        _ => {
-            eprintln!("[media-helper] Unknown media player class: {}, defaulting to VLC command handler", player_name);
-            handle_vlc_command(command, status_sender)
-        }
-    }
+    // Use OOP approach for command handling
+    eprintln!("[OOP] Handling command '{}' using OOP approach", command);
+    handle_current_player_command(command, status_sender);
 }
 
 fn handle_vlc_command(command: &str, status_sender: &Arc<Mutex<Option<UnixStream>>>) {
@@ -543,14 +1019,24 @@ fn handle_vlc_command(command: &str, status_sender: &Arc<Mutex<Option<UnixStream
         "play_pause" => {
             eprintln!("[vlc-helper] Executing play/pause command");
             execute_vlc_command("org.mpris.MediaPlayer2.Player.PlayPause", &[]);
+            // Immediate UI feedback
+            if let Some(status) = get_vlc_status() {
+                send_status_update(status_sender, &status);
+            }
         }
         "play" => {
             eprintln!("[vlc-helper] Executing play command");
             execute_vlc_command("org.mpris.MediaPlayer2.Player.Play", &[]);
+            if let Some(status) = get_vlc_status() {
+                send_status_update(status_sender, &status);
+            }
         }
         "pause" => {
             eprintln!("[vlc-helper] Executing pause command");
             execute_vlc_command("org.mpris.MediaPlayer2.Player.Pause", &[]);
+            if let Some(status) = get_vlc_status() {
+                send_status_update(status_sender, &status);
+            }
         }
         "next" => {
             eprintln!("[vlc-helper] Executing next command");
@@ -563,6 +1049,9 @@ fn handle_vlc_command(command: &str, status_sender: &Arc<Mutex<Option<UnixStream
         "stop" => {
             eprintln!("[vlc-helper] Executing stop command");
             execute_vlc_command("org.mpris.MediaPlayer2.Player.Stop", &[]);
+            if let Some(status) = get_vlc_status() {
+                send_status_update(status_sender, &status);
+            }
         }
         "raise" => {
             eprintln!("[vlc-helper] Executing raise command");
@@ -734,14 +1223,23 @@ fn handle_dragon_player_command(command: &str, status_sender: &Arc<Mutex<Option<
         "play_pause" => {
             eprintln!("[dragon-helper] Executing play/pause command");
             execute_dragon_player_command("org.mpris.MediaPlayer2.Player.PlayPause", &[]);
+            if let Some(status) = get_dragon_player_status() {
+                send_status_update(status_sender, &status);
+            }
         }
         "play" => {
             eprintln!("[dragon-helper] Executing play command");
             execute_dragon_player_command("org.mpris.MediaPlayer2.Player.Play", &[]);
+            if let Some(status) = get_dragon_player_status() {
+                send_status_update(status_sender, &status);
+            }
         }
         "pause" => {
             eprintln!("[dragon-helper] Executing pause command");
             execute_dragon_player_command("org.mpris.MediaPlayer2.Player.Pause", &[]);
+            if let Some(status) = get_dragon_player_status() {
+                send_status_update(status_sender, &status);
+            }
         }
         "next" => {
             eprintln!("[dragon-helper] Executing next command");
@@ -754,6 +1252,9 @@ fn handle_dragon_player_command(command: &str, status_sender: &Arc<Mutex<Option<
         "stop" => {
             eprintln!("[dragon-helper] Executing stop command");
             execute_dragon_player_command("org.mpris.MediaPlayer2.Player.Stop", &[]);
+            if let Some(status) = get_dragon_player_status() {
+                send_status_update(status_sender, &status);
+            }
         }
         "raise" => {
             eprintln!("[dragon-helper] Executing raise command");
@@ -914,20 +1415,15 @@ fn handle_dragon_player_command(command: &str, status_sender: &Arc<Mutex<Option<
     }
 }
 
-fn monitor_media_player_events(status_sender: Arc<Mutex<Option<UnixStream>>>) {
-    // Pure event-driven approach with minimal position polling only during playback
+fn monitor_vlc_events(status_sender: Arc<Mutex<Option<UnixStream>>>) {
+    // VLC-specific event monitoring with position polling
     
-    // Check initial media player status
-    if is_media_player_running() {
-        if let Some(initial_status) = get_media_player_status() {
+    // Check initial VLC status
+    if is_vlc_running() {
+        if let Some(initial_status) = get_vlc_status() {
             send_status_update(&status_sender, &initial_status);
-            
-            let player_name = get_current_media_player_instance()
-                .map(|inst| inst.window_class.clone())
-                .unwrap_or_else(|| "unknown".to_string());
-            
-            eprintln!("[{}] Initial status detected: playing={}, position={:.2}%", 
-                     player_name, initial_status.is_playing, initial_status.position * 100.0);
+            eprintln!("[vlc] Initial status detected: playing={}, position={:.2}%", 
+                     initial_status.is_playing, initial_status.position * 100.0);
         }
     }
     
@@ -935,25 +1431,21 @@ fn monitor_media_player_events(status_sender: Arc<Mutex<Option<UnixStream>>>) {
     let playback_state = Arc::new(Mutex::new((false, MediaStatus::empty())));
     let playback_state_clone = playback_state.clone();
     
-    // Initialize shared state with current status if available
-    if let Some(current_status) = get_media_player_status() {
+    // Initialize shared state with current VLC status if available
+    if let Some(current_status) = get_vlc_status() {
         if let Ok(mut state) = playback_state.lock() {
             state.0 = current_status.is_playing;
             state.1 = current_status.clone();
         }
         
-        let player_name = get_current_media_player_instance()
-            .map(|inst| inst.window_class.clone())
-            .unwrap_or_else(|| "unknown".to_string());
-        
-        eprintln!("[{}] Shared state initialized: playing={}, position={:.2}%", 
-                 player_name, current_status.is_playing, current_status.position * 100.0);
+        eprintln!("[vlc] Shared state initialized: playing={}, position={:.2}%", 
+                 current_status.is_playing, current_status.position * 100.0);
     }
     
     // Clone status_sender for position updates
     let position_sender = status_sender.clone();
     
-    // Start simple position polling thread - ONLY when playing=true
+    // Start VLC position polling thread - VLC needs polling for smooth updates
     thread::spawn(move || {
         loop {
             // Check if currently playing from shared state
@@ -966,22 +1458,16 @@ fn monitor_media_player_events(status_sender: Arc<Mutex<Option<UnixStream>>>) {
             };
             
             if is_playing {
-                // Get current position and send update
-                if let Some(status) = get_media_player_status() {
+                // Get VLC position using polling
+                if let Some(status) = get_vlc_status() {
                     if status.is_playing && status.duration > 0 {
                         send_status_update(&position_sender, &status);
-                        
-                        let player_name = get_current_media_player_instance()
-                            .map(|inst| inst.window_class.clone())
-                            .unwrap_or_else(|| "unknown".to_string());
-                        
-                        eprintln!("[{}] Position polling update: {:.2}%", 
-                                 player_name, status.position * 100.0);
+                        eprintln!("[vlc] Position polling update: {:.2}%", status.position * 100.0);
                     }
                 }
                 
-                // Poll every 1 second when playing
-                thread::sleep(Duration::from_millis(1000));
+                // Poll every 100ms for VLC smooth progress updates
+                thread::sleep(Duration::from_millis(100));
             } else {
                 // Not playing - sleep longer and wait for events
             thread::sleep(Duration::from_millis(500));
@@ -989,51 +1475,80 @@ fn monitor_media_player_events(status_sender: Arc<Mutex<Option<UnixStream>>>) {
         }
     });
     
-    // Start event-driven DBus monitoring
+    // Start VLC-specific DBus event monitoring
     let status_sender_clone = status_sender.clone();
     let playback_state_clone = playback_state.clone();
     thread::spawn(move || {
-        if let Err(e) = run_dbus_event_monitor(status_sender_clone, playback_state_clone) {
-            eprintln!("[media-helper] DBus event monitor failed: {}, restarting...", e);
+        let result = run_vlc_dbus_event_monitor(status_sender_clone.clone(), playback_state_clone.clone());
+        
+        if let Err(e) = result {
+            eprintln!("[vlc-helper] VLC DBus event monitor failed: {}, restarting...", e);
             thread::sleep(Duration::from_millis(1000));
-            monitor_media_player_events(status_sender);
+            monitor_vlc_events(status_sender);
         }
     });
 }
 
-fn run_dbus_event_monitor(
-    status_sender: Arc<Mutex<Option<UnixStream>>>, 
-    playback_state: Arc<Mutex<(bool, MediaStatus)>>
-) -> Result<(), Box<dyn std::error::Error>> {
-    // Get the current media player instance to determine which player we're monitoring
-    let instance = get_current_media_player_instance();
+fn monitor_dragon_player_events(status_sender: Arc<Mutex<Option<UnixStream>>>) {
+    // Dragon Player-specific event monitoring - fully event-driven, no polling needed
     
-    // Route to the appropriate player-specific DBus event monitor
-    match instance.as_ref().map(|inst| inst.window_class.as_str()) {
-        Some("vlc") => {
-            eprintln!("[media-helper] Routing to VLC-specific DBus event monitor");
-            run_vlc_dbus_event_monitor(status_sender, playback_state)
-        }
-        Some("org.kde.dragonplayer") => {
-            eprintln!("[media-helper] Routing to Dragon Player-specific DBus event monitor");
-            run_dragon_player_dbus_event_monitor(status_sender, playback_state)
-        }
-        _ => {
-            eprintln!("[media-helper] Unknown media player class, defaulting to VLC DBus event monitor");
-            run_vlc_dbus_event_monitor(status_sender, playback_state)
+    // Check initial Dragon Player status
+    if is_dragon_player_running() {
+        if let Some(initial_status) = get_dragon_player_status() {
+            send_status_update(&status_sender, &initial_status);
+            eprintln!("[dragon-helper] Initial status detected: playing={}, position={:.2}%", 
+                     initial_status.is_playing, initial_status.position * 100.0);
         }
     }
+    
+    // Create a shared state for playback status to coordinate between threads
+    let playback_state = Arc::new(Mutex::new((false, MediaStatus::empty())));
+    
+    // Initialize shared state with current Dragon Player status if available
+    if let Some(current_status) = get_dragon_player_status() {
+        if let Ok(mut state) = playback_state.lock() {
+            state.0 = current_status.is_playing;
+            state.1 = current_status.clone();
+        }
+        
+        eprintln!("[dragon-helper] Shared state initialized: playing={}, position={:.2}%", 
+                 current_status.is_playing, current_status.position * 100.0);
+    }
+    
+    // Start Dragon Player-specific DBus event monitoring (no polling thread needed)
+    let status_sender_clone = status_sender.clone();
+    let playback_state_clone = playback_state.clone();
+    thread::spawn(move || {
+        let result = run_dragon_player_dbus_event_monitor(status_sender_clone.clone(), playback_state_clone.clone());
+        
+        if let Err(e) = result {
+            eprintln!("[dragon-helper] Dragon Player DBus event monitor failed: {}, restarting...", e);
+            thread::sleep(Duration::from_millis(1000));
+            monitor_dragon_player_events(status_sender);
+        }
+    });
 }
+
+fn monitor_media_player_events(status_sender: Arc<Mutex<Option<UnixStream>>>) {
+    // Use OOP approach for monitoring events
+    eprintln!("[OOP] Starting media player event monitoring using OOP approach");
+    monitor_current_player_events(status_sender);
+}
+
+
 
 fn run_vlc_dbus_event_monitor(
     status_sender: Arc<Mutex<Option<UnixStream>>>, 
     playback_state: Arc<Mutex<(bool, MediaStatus)>>
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Create async runtime for zbus
-    let rt = tokio::runtime::Runtime::new()?;
-    
-    rt.block_on(async {
+    // Use shared async runtime for zbus
+    TOKIO_RT.block_on(async {
         let connection = Connection::session().await?;
+        
+        // Initialize shared connection for native D-Bus calls
+        unsafe {
+            SHARED_DBUS_CONNECTION = Some(connection.clone());
+        }
         let mut stream = MessageStream::from(&connection);
         let dbus_proxy = DBusProxy::new(&connection).await?;
         
@@ -1095,7 +1610,7 @@ fn run_vlc_dbus_event_monitor(
                             if interface_name == "org.mpris.MediaPlayer2.Player" {
                                 eprintln!("[vlc-helper] VLC player properties changed: {:?}", changed_props);
                                 // Process the changed properties for VLC
-                                process_vlc_properties_changed_signal_dbus(changed_props, &status_sender, &playback_state);
+                                process_vlc_properties_changed_signal_dbus(changed_props, &status_sender, &playback_state).await;
                             }
                         }
                     }
@@ -1103,7 +1618,7 @@ fn run_vlc_dbus_event_monitor(
                         // Handle Seeked signal for VLC
                         if let Ok(position) = msg.body::<i64>() {
                             eprintln!("[vlc-helper] VLC seeked to position: {} microseconds", position);
-                            process_vlc_seeked_signal_dbus(position, &status_sender, &playback_state);
+                            process_vlc_seeked_signal_dbus(position, &status_sender, &playback_state).await;
                         }
                     }
                     ("org.freedesktop.DBus", "NameOwnerChanged") => {
@@ -1113,7 +1628,7 @@ fn run_vlc_dbus_event_monitor(
                             
                             if name.starts_with("org.mpris.MediaPlayer2.vlc") {
                                 eprintln!("[vlc-helper] VLC service changed: {} (old: {}, new: {})", name, old_owner, new_owner);
-                                process_vlc_name_owner_changed_signal_dbus(&name, &old_owner, &new_owner, &status_sender, &playback_state);
+                                process_vlc_name_owner_changed_signal_dbus(&name, &old_owner, &new_owner, &status_sender, &playback_state).await;
                             }
                         }
                     }
@@ -1137,11 +1652,16 @@ fn run_dragon_player_dbus_event_monitor(
     status_sender: Arc<Mutex<Option<UnixStream>>>, 
     playback_state: Arc<Mutex<(bool, MediaStatus)>>
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Create async runtime for zbus
-    let rt = tokio::runtime::Runtime::new()?;
-    
-    rt.block_on(async {
+    // Use shared async runtime for zbus
+    TOKIO_RT.block_on(async {
         let connection = Connection::session().await?;
+        
+        // Initialize shared connection for native D-Bus calls
+        unsafe {
+            if SHARED_DBUS_CONNECTION.is_none() {
+                SHARED_DBUS_CONNECTION = Some(connection.clone());
+            }
+        }
         let mut stream = MessageStream::from(&connection);
         let dbus_proxy = DBusProxy::new(&connection).await?;
         
@@ -1203,7 +1723,7 @@ fn run_dragon_player_dbus_event_monitor(
                             if interface_name == "org.mpris.MediaPlayer2.Player" {
                                 eprintln!("[dragon-helper] Dragon Player properties changed: {:?}", changed_props);
                                 // Process the changed properties for Dragon Player
-                                process_dragon_player_properties_changed_signal_dbus(changed_props, &status_sender, &playback_state);
+                                process_dragon_player_properties_changed_signal_dbus(changed_props, &status_sender, &playback_state).await;
                             }
                         }
                     }
@@ -1211,7 +1731,7 @@ fn run_dragon_player_dbus_event_monitor(
                         // Handle Seeked signal for Dragon Player
                         if let Ok(position) = msg.body::<i64>() {
                             eprintln!("[dragon-helper] Dragon Player seeked to position: {} microseconds", position);
-                            process_dragon_player_seeked_signal_dbus(position, &status_sender, &playback_state);
+                            process_dragon_player_seeked_signal_dbus(position, &status_sender, &playback_state).await;
                         }
                     }
                     ("org.freedesktop.DBus", "NameOwnerChanged") => {
@@ -1221,7 +1741,7 @@ fn run_dragon_player_dbus_event_monitor(
                             
                             if name.starts_with("org.mpris.MediaPlayer2.dragonplayer") {
                                 eprintln!("[dragon-helper] Dragon Player service changed: {} (old: {}, new: {})", name, old_owner, new_owner);
-                                process_dragon_player_name_owner_changed_signal_dbus(&name, &old_owner, &new_owner, &status_sender, &playback_state);
+                                process_dragon_player_name_owner_changed_signal_dbus(&name, &old_owner, &new_owner, &status_sender, &playback_state).await;
                             }
                         }
                     }
@@ -1241,8 +1761,8 @@ fn run_dragon_player_dbus_event_monitor(
     Ok(())
 }
 
-fn process_vlc_properties_changed_signal_dbus(
-    changed_props: std::collections::HashMap<String, zbus::zvariant::Value>, 
+async fn process_vlc_properties_changed_signal_dbus(
+    changed_props: std::collections::HashMap<String, zbus::zvariant::Value<'_>>, 
     status_sender: &Arc<Mutex<Option<UnixStream>>>,
     playback_state: &Arc<Mutex<(bool, MediaStatus)>>
 ) {
@@ -1255,7 +1775,7 @@ fn process_vlc_properties_changed_signal_dbus(
                     eprintln!("[vlc-helper] VLC playback status changed to: {}", status_str);
                     
                     // Get current VLC status and update
-                    if let Some(mut status) = get_vlc_status() {
+                    if let Some(mut status) = get_vlc_status_async().await {
                         status.is_playing = is_playing;
                         
                         // Update shared playback state
@@ -1279,7 +1799,7 @@ fn process_vlc_properties_changed_signal_dbus(
                     eprintln!("[vlc-helper] VLC position changed to: {} microseconds", position);
                     
                     // Get current VLC status and update position immediately
-                    if let Some(mut status) = get_vlc_status() {
+                    if let Some(mut status) = get_vlc_status_async().await {
                         let duration = status.duration * 1_000_000; // Convert to microseconds
                         status.position = if duration > 0 { position as f64 / duration as f64 } else { 0.0 };
                         
@@ -1298,7 +1818,7 @@ fn process_vlc_properties_changed_signal_dbus(
                 eprintln!("[vlc-helper] VLC metadata changed");
                 
                 // Get updated VLC status with new metadata
-                if let Some(status) = get_vlc_status() {
+                if let Some(status) = get_vlc_status_async().await {
                     // Update shared playback state
                     if let Ok(mut state) = playback_state.lock() {
                         state.1 = status.clone();
@@ -1314,7 +1834,7 @@ fn process_vlc_properties_changed_signal_dbus(
     }
 }
 
-fn process_vlc_seeked_signal_dbus(
+async fn process_vlc_seeked_signal_dbus(
     position: i64, 
     status_sender: &Arc<Mutex<Option<UnixStream>>>,
     playback_state: &Arc<Mutex<(bool, MediaStatus)>>
@@ -1323,7 +1843,7 @@ fn process_vlc_seeked_signal_dbus(
     // This avoids an extra DBus call and makes the response immediate
     
     // Get current VLC status to get duration and other metadata
-    if let Some(mut status) = get_vlc_status() {
+    if let Some(mut status) = get_vlc_status_async().await {
         let duration = status.duration * 1_000_000; // Convert to microseconds
         status.position = if duration > 0 { position as f64 / duration as f64 } else { 0.0 };
         
@@ -1337,7 +1857,7 @@ fn process_vlc_seeked_signal_dbus(
     }
 }
 
-fn process_vlc_name_owner_changed_signal_dbus(
+async fn process_vlc_name_owner_changed_signal_dbus(
     name: &str, 
     _old_owner: &str, 
     new_owner: &str, 
@@ -1350,7 +1870,7 @@ fn process_vlc_name_owner_changed_signal_dbus(
     if vlc_running {
         eprintln!("[vlc-helper] VLC service appeared: {}", name);
         // Get initial VLC status
-        if let Some(status) = get_vlc_status() {
+        if let Some(status) = get_vlc_status_async().await {
             // Update shared playback state
             if let Ok(mut state) = playback_state.lock() {
                 state.0 = status.is_playing;
@@ -1373,8 +1893,8 @@ fn process_vlc_name_owner_changed_signal_dbus(
     }
 }
 
-fn process_dragon_player_properties_changed_signal_dbus(
-    changed_props: std::collections::HashMap<String, zbus::zvariant::Value>, 
+async fn process_dragon_player_properties_changed_signal_dbus(
+    changed_props: std::collections::HashMap<String, zbus::zvariant::Value<'_>>, 
     status_sender: &Arc<Mutex<Option<UnixStream>>>,
     playback_state: &Arc<Mutex<(bool, MediaStatus)>>
 ) {
@@ -1387,7 +1907,7 @@ fn process_dragon_player_properties_changed_signal_dbus(
                     eprintln!("[dragon-helper] Dragon Player playback status changed to: {}", status_str);
                     
                     // Get current Dragon Player status and update
-                    if let Some(mut status) = get_dragon_player_status() {
+                    if let Some(mut status) = get_dragon_player_status_async().await {
                         status.is_playing = is_playing;
                         
                         // Update shared playback state
@@ -1430,7 +1950,7 @@ fn process_dragon_player_properties_changed_signal_dbus(
                 eprintln!("[dragon-helper] Dragon Player metadata changed");
                 
                 // Get updated Dragon Player status with new metadata
-                if let Some(status) = get_dragon_player_status() {
+                if let Some(status) = get_dragon_player_status_async().await {
                     // Update shared playback state
                     if let Ok(mut state) = playback_state.lock() {
                         state.1 = status.clone();
@@ -1446,7 +1966,7 @@ fn process_dragon_player_properties_changed_signal_dbus(
     }
 }
 
-fn process_dragon_player_seeked_signal_dbus(
+async fn process_dragon_player_seeked_signal_dbus(
     position: i64, 
     status_sender: &Arc<Mutex<Option<UnixStream>>>,
     playback_state: &Arc<Mutex<(bool, MediaStatus)>>
@@ -1455,7 +1975,7 @@ fn process_dragon_player_seeked_signal_dbus(
     // This avoids an extra DBus call and makes the response immediate
     
     // Get current Dragon Player status to get duration and other metadata
-    if let Some(mut status) = get_dragon_player_status() {
+    if let Some(mut status) = get_dragon_player_status_async().await {
         let duration = status.duration * 1_000; // Dragon Player uses milliseconds, convert to milliseconds
         status.position = if duration > 0 { position as f64 / duration as f64 } else { 0.0 };
         
@@ -1469,7 +1989,7 @@ fn process_dragon_player_seeked_signal_dbus(
     }
 }
 
-fn process_dragon_player_name_owner_changed_signal_dbus(
+async fn process_dragon_player_name_owner_changed_signal_dbus(
     name: &str, 
     _old_owner: &str, 
     new_owner: &str, 
@@ -1482,7 +2002,7 @@ fn process_dragon_player_name_owner_changed_signal_dbus(
     if dragon_player_running {
         eprintln!("[dragon-helper] Dragon Player service appeared: {}", name);
         // Get initial Dragon Player status
-        if let Some(status) = get_dragon_player_status() {
+        if let Some(status) = get_dragon_player_status_async().await {
             // Update shared playback state
             if let Ok(mut state) = playback_state.lock() {
                 state.0 = status.is_playing;

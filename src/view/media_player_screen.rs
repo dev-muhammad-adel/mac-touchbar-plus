@@ -15,12 +15,12 @@ fn format_duration(seconds: i64) -> String {
 
 // All constants removed as they were unused
 
-pub struct VlcScreen {
+pub struct MediaPlayerScreen {
     pub last_status: Option<MediaStatus>,
     pub is_dragging: bool,
 }
 
-impl VlcScreen {
+impl MediaPlayerScreen {
     pub fn new() -> Self {
         Self {
             last_status: None,
@@ -139,7 +139,6 @@ impl VlcScreen {
                 0
             };
             let current_time_str = format_duration(current_seconds);
-            println!("[vlc-screen] Current time: {} ({}s / {}s) - position ratio: {:.6}", current_time_str, current_seconds, status.duration, status.position);
             
             // Calculate total time first to ensure proper spacing
             let total_time_seconds = status.duration;
@@ -148,7 +147,6 @@ impl VlcScreen {
             // Get text extents for both time displays to ensure proper spacing
             c.save().unwrap();
             c.set_font_size(18.0);
-            c.select_font_face("SF Pro Display", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
             
             let current_time_ext = c.text_extents(&current_time_str).unwrap();
             let total_time_ext = c.text_extents(&total_time_str).unwrap();
@@ -165,7 +163,6 @@ impl VlcScreen {
             // Draw current time
             c.save().unwrap();
             c.set_font_size(18.0);
-            c.select_font_face("SF Pro Display", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
             c.set_source_rgba(0.95, 0.95, 0.95, anim_progress);
             c.move_to(current_time_center_x, current_time_y);
             c.show_text(&current_time_str).unwrap();
@@ -182,7 +179,8 @@ impl VlcScreen {
             let total_time_margin = 20.0; // Space between progress bar and total time
             // Use fixed estimated width for total time to prevent width fluctuations during dragging
             let estimated_total_time_width = 60.0; // Fixed width instead of measuring total_time_ext.width()
-            let progress_w = pill_w - (progress_x - pill_x) - (estimated_total_time_width + total_time_margin + 16.0); // Use full available width minus margins
+            let min_progress_width = 50.0; // Minimum progress bar width
+            let progress_w = (pill_w - (progress_x - pill_x) - (estimated_total_time_width + total_time_margin + 16.0)).max(min_progress_width); // Use full available width minus margins, with minimum width
             
             // Ensure total time doesn't go beyond the right edge
             let actual_total_time_x = progress_x + progress_w + total_time_margin; // Position total time after progress bar
@@ -229,7 +227,7 @@ impl VlcScreen {
 
             // Progress bar head (white, 6px wide, rounded)
             let head_position = drag_position.unwrap_or(status.position);
-            if head_position > 0.0 {
+            if head_position >= 0.0 {
                 c.save().unwrap();
                 c.set_source_rgba(1.0, 1.0, 1.0, anim_progress);
                 let head_x = inner_x + (inner_w * head_position) - 3.0;
@@ -245,10 +243,9 @@ impl VlcScreen {
                 c.restore().unwrap();
             }
 
-            // 4. Total time (macOS system font style) - positioned to prevent overlap
+            // 4. Total time - positioned to prevent overlap
             c.save().unwrap();
             c.set_font_size(18.0);
-            c.select_font_face("SF Pro Display", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
             c.set_source_rgba(0.95, 0.95, 0.95, anim_progress);
             
             // Center the total time text within its allocated width
@@ -258,23 +255,23 @@ impl VlcScreen {
             c.show_text(&total_time_str).unwrap();
             c.restore().unwrap();
         } else {
-            // Draw "VLC" text when no status available
+            // Draw "Media Player" text when no status available
             c.save().unwrap();
             c.set_font_size(14.0);
             c.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
             c.set_source_rgba(1.0, 1.0, 1.0, anim_progress);
             
-            let ext = c.text_extents("VLC").unwrap();
+            let ext = c.text_extents("Media Player").unwrap();
             let text_x = pill_x + (pill_w - ext.width()) / 2.0;
             let text_y = pill_y + (pill_h + ext.height()) / 2.0;
             
             c.move_to(text_x, text_y);
-            c.show_text("VLC").unwrap();
+            c.show_text("Media Player").unwrap();
             c.restore().unwrap();
         }
     }
 
-    pub fn hit_test(&mut self, touch_x: f64, touch_y: f64, x: f64, y: f64, width: f64, height: f64, radius: f64) -> Option<VlcAction> {
+    pub fn hit_test(&mut self, touch_x: f64, touch_y: f64, x: f64, y: f64, width: f64, height: f64, radius: f64) -> Option<MediaPlayerAction> {
         // touch_x and touch_y are now relative to the modules area
         // Use same calculation as draw function
         let pill_x = x; // Same as draw function
@@ -330,20 +327,22 @@ impl VlcScreen {
                 }
             }
             
-            return Some(VlcAction::TogglePlayPause);
+            return Some(MediaPlayerAction::TogglePlayPause);
         }
         
-        // Check progress bar (2px more vertical padding)
-        let current_time_x = icon_x + icon_width + 12.0;
-        let progress_x = current_time_x + 75.0; // Approximate width for current time with larger font
+        // Check progress bar (use same calculations as draw function)
+        let current_time_x = icon_x + icon_width + 20.0; // Match drawing: +20.0
+        let estimated_current_time_width = 60.0; // Fixed width for current time display
+        let progress_x = current_time_x + estimated_current_time_width + 24.0; // Match drawing: +24.0
         let progress_y = pill_y + 2.0; // Use same positioning as drawing code
         let progress_h = pill_h - 4.0; // Reduced height for 2px padding on top and bottom
         
         // Calculate progress bar width dynamically to match the drawing function exactly
-        // Use approximate values for hit testing since we don't have access to text extents here
+        // Use same values as drawing function for consistency
         let total_time_margin = 20.0; // Same margin as drawing function
         let estimated_total_time_width = 60.0; // Estimated width for total time display
-        let progress_w = pill_w - (progress_x - pill_x) - (estimated_total_time_width + total_time_margin + 16.0); // Use full available width minus margins
+        let min_progress_width = 50.0; // Same minimum as drawing function
+        let progress_w = (pill_w - (progress_x - pill_x) - (estimated_total_time_width + total_time_margin + 16.0)).max(min_progress_width); // Use full available width minus margins, with minimum width
         
         // Check if touch is on the progress bar area
         if touch_x >= progress_x && touch_x <= progress_x + progress_w &&
@@ -369,17 +368,17 @@ impl VlcScreen {
                     touch_y >= head_y && touch_y <= head_y + head_height) ||
                    distance_from_position <= 15.0 {
                     self.is_dragging = true;
-                    return Some(VlcAction::DragHead(progress_ratio));
+                    return Some(MediaPlayerAction::DragHead(progress_ratio));
                 }
                 
                 // If we're already dragging, continue dragging regardless of position
                 if self.is_dragging {
-                    return Some(VlcAction::DragHead(progress_ratio));
+                    return Some(MediaPlayerAction::DragHead(progress_ratio));
                 }
             }
             
             // For any other touch on progress bar, treat as seek
-            return Some(VlcAction::Seek(progress_ratio));
+            return Some(MediaPlayerAction::Seek(progress_ratio));
         }
         
         None
@@ -387,7 +386,7 @@ impl VlcScreen {
 }
 
 #[derive(Debug, Clone)]
-pub enum VlcAction {
+pub enum MediaPlayerAction {
     TogglePlayPause,
     Seek(f64), // 0.0 to 1.0
     DragHead(f64), // 0.0 to 1.0 - for dragging the progress bar head

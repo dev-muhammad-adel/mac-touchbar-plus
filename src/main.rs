@@ -36,7 +36,7 @@ use chrono::{Local, Timelike};
 use crate::services::sessionmanager::{SessionState, monitor_sessions};
 use tokio::sync::{watch, mpsc};
 
-use view::app_ui_manager::AppUiManager;
+use view::app_ui_manager::{AppUiManager, is_media_player_window_class, is_browser_window_class};
 
 
 // Import the utils module
@@ -318,7 +318,7 @@ fn perform_redraw(
     current_session: Option<&SessionState>,
     current_window_class: Option<&str>,
     app_ui_manager: &mut AppUiManager,
-    vlc_drag_position: Option<f64>,
+            media_player_drag_position: Option<f64>,
     needs_complete_redraw: bool,
     any_changed: bool,
     browser_buttons_changed: bool,
@@ -348,7 +348,7 @@ fn perform_redraw(
     let start_time = std::time::Instant::now();
     
     // Draw only the current active layer (layer 3 during slide-out)
-    // VLC drag position is handled in the drawing functions
+    // media player drag position is handled in the drawing functions
     let clips = get_active_layer_mut(layers, active_layer)?.draw(
         cfg, 
         width as i32, 
@@ -362,7 +362,7 @@ fn perform_redraw(
         app_layer3_slide_progress, 
         current_window_class, 
         Some(app_ui_manager), 
-        vlc_drag_position
+        media_player_drag_position
     )?;
     
     // Performance optimization: Batch DRM operations
@@ -441,7 +441,7 @@ fn handle_epoll_events(
                                 println!("[main] User logged in, starting 1 second delay before helper");
                             }
                             
-                            // VLC helper will be started when VLC window gains focus
+                            // Media Player helper will be started when Media Player window gains focus
                             
                             // Switch to Media layer when user logs in
                             if *active_layer != LayerKey::Media {
@@ -473,7 +473,7 @@ fn handle_epoll_events(
                                 }
                                 *helper_reader = None;
                             }
-                            // VLC helper will be stopped when VLC window loses focus
+                            // Media Player helper will be stopped when Media Player window loses focus
                             if debug_logging {
                                 println!("[main] Stopping main helper");
                             }
@@ -597,7 +597,7 @@ pub mod view;
 pub mod services;
 pub mod helper;
 
-use crate::helper::manager::{HelperManager, VlcHelperManager, BrowserHelperManager};
+use crate::helper::manager::{HelperManager, MediaPlayerHelperManager, BrowserHelperManager};
 
 
 const TIMEOUT_MS: i32 = 10 * 1000;
@@ -706,18 +706,18 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
     let mut last_redraw_minute = Local::now().minute();
     let mut pixel_shift = PixelShiftManager::new();
     let mut helper_manager = HelperManager::new();
-    let mut vlc_helper_manager = VlcHelperManager::new();
+    let mut media_player_helper_manager = MediaPlayerHelperManager::new();
     let mut browser_helper_manager = BrowserHelperManager::new();
     let mut browser_helper_listener_fd: Option<i32> = None;
     let mut browser_helper_stream: Option<UnixStream> = None;
     let mut browser_helper_reader: Option<BufReader<UnixStream>> = None;
     
-    // Add focus-based VLC/Dragon Player helper management
-    let mut vlc_window_focused = false;
+    // Add focus-based Media Player helper management
+    let mut media_player_window_focused = false;
     let mut browser_window_focused = false;
     let _last_window_class: Option<String> = None;
     let mut current_user: Option<String> = None;
-    let mut current_vlc_window_id: Option<u64> = None; // Track current VLC/Dragon Player window ID
+    let mut current_media_player_window_id: Option<u64> = None; // Track current Media Player window ID
     let mut current_browser_window_id: Option<u64> = None; // Track current browser window ID
 
     // Safe surface creation
@@ -741,16 +741,16 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
     let mut helper_listener_fd: Option<i32> = None;
     let mut helper_stream: Option<UnixStream> = None;
     let mut helper_reader: Option<BufReader<UnixStream>> = None;
-    let mut vlc_helper_listener_fd: Option<i32> = None;
-    let mut vlc_helper_stream: Option<UnixStream> = None;
-    let mut vlc_helper_reader: Option<BufReader<UnixStream>> = None;
+    let mut media_player_helper_listener_fd: Option<i32> = None;
+    let mut media_player_helper_stream: Option<UnixStream> = None;
+    let mut media_player_helper_reader: Option<BufReader<UnixStream>> = None;
     let mut current_window_class: Option<String> = None;
     let mut current_window_id: Option<u64> = None;
     let mut needs_complete_redraw = false;
     let mut app_layer3_slide_anim = Animation::new(0.18, 16.0); // 60fps for smooth slide
     let mut app_ui_manager = AppUiManager::new();
-    let mut vlc_touch_active = false; // Track if VLC/Dragon Player touch interaction is active
-    let mut vlc_drag_position: Option<f64> = None; // Track current drag position for visual feedback
+    let mut media_player_touch_active = false; // Track if Media Player touch interaction is active
+    let mut media_player_drag_position: Option<f64> = None; // Track current drag position for visual feedback
 
     // --- main event loop ---
     loop {
@@ -827,7 +827,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                 current_session.as_ref(),
                 current_window_class.as_deref(),
                 &mut app_ui_manager,
-                vlc_drag_position,
+                media_player_drag_position,
                 needs_complete_redraw,
                 any_changed,
                 browser_buttons_changed,
@@ -891,7 +891,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                     println!("[main] User logged in, starting 1 second delay before helper");
                                 }
                                 
-                                // VLC helper will be started when VLC window gains focus
+                                // Media Player helper will be started when Media Player window gains focus
                                 
                                 // Switch to Media layer when user logs in
                                 if active_layer != LayerKey::Media {
@@ -923,7 +923,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                     }
                                     helper_reader = None;
                                 }
-                                // VLC helper will be stopped when VLC window loses focus
+                                // Media Player helper will be stopped when Media Player window loses focus
                                 if DEBUG_LOGGING {
                                     println!("[main] Stopping main helper");
                                 }
@@ -943,8 +943,8 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                 
                                 // Clear current window class when user logs out
                                 current_window_class = None;
-                                // Clear VLC and browser window IDs when user logs out
-                                current_vlc_window_id = None;
+                                // Clear Media Player and browser window IDs when user logs out
+                                current_media_player_window_id = None;
                                 current_browser_window_id = None;
                             }
                             // No animation needed - just update session state
@@ -1070,122 +1070,121 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                            
                                            println!("[main] Parsed window info - class: '{}', id: {:?}, pid: {:?}", class, window_id, pid);
                                            
-                                           // Check if VLC/Dragon Player window focus changed
-                                           let new_vlc_focused = class == "vlc" || class == "org.kde.dragonplayer";
-                                           let vlc_focus_changed = new_vlc_focused != vlc_window_focused;
-                                           let vlc_window_id_changed = if new_vlc_focused && vlc_window_focused {
-                                               // VLC is still focused, check if window ID changed
-                                               current_vlc_window_id != window_id
+                                                                                        // Check if Media Player window focus changed
+                                             let new_media_player_focused = is_media_player_window_class(class);
+                                             let media_player_focus_changed = new_media_player_focused != media_player_window_focused;
+                                             let media_player_window_id_changed = if new_media_player_focused && media_player_window_focused {
+                                                 // Media Player is still focused, check if window ID changed
+                                                 current_media_player_window_id != window_id
                                            } else {
                                                false
                                            };
                                            
-                                           if vlc_focus_changed || vlc_window_id_changed {
-                                               if vlc_focus_changed {
-                                               vlc_window_focused = new_vlc_focused;
+                                                                                      if media_player_focus_changed || media_player_window_id_changed {
+                                               if media_player_focus_changed {
+                                                   media_player_window_focused = new_media_player_focused;
                                                }
                                                
-                                               if vlc_window_id_changed {
-                                                   println!("[main] VLC/Dragon Player window ID changed from {:?} to {:?}, restarting VLC helper", current_vlc_window_id, window_id);
-                                                   println!("[main] Stopping existing VLC helper and clearing state...");
+                                               if media_player_window_id_changed {
+                                                   println!("[main] Media Player window ID changed from {:?} to {:?}, restarting Media Player helper", current_media_player_window_id, window_id);
+                                                   println!("[main] Stopping existing Media Player helper and clearing state...");
                                                }
                                                
-                                               if new_vlc_focused {
-                                                   // VLC window gained focus or ID changed - start/restart VLC helper
-                                                   if vlc_window_id_changed {
+                                               if new_media_player_focused {
+                                                   // Media Player window gained focus or ID changed - start/restart Media Player helper
+                                                   if media_player_window_id_changed {
                                                        // Stop existing helper first if ID changed
-                                                       if let Some(stream) = vlc_helper_stream.take() {
+                                                       if let Some(stream) = media_player_helper_stream.take() {
                                                            if let Err(e) = safe_epoll_delete(&epoll, &stream) {
-                                                               eprintln!("[main] Failed to remove VLC stream from epoll: {}", e);
+                                                               eprintln!("[main] Failed to remove Media Player stream from epoll: {}", e);
                                                            }
                                                        }
-                                                       vlc_helper_reader = None;
-                                                       if let Some(fd) = vlc_helper_listener_fd.take() {
+                                                       media_player_helper_reader = None;
+                                                       if let Some(fd) = media_player_helper_listener_fd.take() {
                                                            let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
                                                            if let Err(e) = safe_epoll_delete(&epoll, &listener_fd_obj) {
-                                                               eprintln!("[main] Failed to remove VLC listener from epoll: {}", e);
+                                                               eprintln!("[main] Failed to remove Media Player listener from epoll: {}", e);
                                                            }
                                                        }
-                                                       if vlc_helper_manager.is_process_running() {
-                                                           vlc_helper_manager.stop();
-                                                           println!("[main] VLC helper stopped due to window ID change");
+                                                                               if media_player_helper_manager.is_process_running() {
+                            media_player_helper_manager.stop();
+                            println!("[main] Media Player helper stopped due to window ID change");
                                                        } else {
-                                                           println!("[main] VLC helper was not running, no need to stop");
+                                                           println!("[main] Media Player helper was not running, no need to stop");
                                                        }
-                                                       // Clear VLC drag position when switching windows
-                                                       vlc_drag_position = None;
+                                                                                                          // Clear Media Player drag position when switching windows
+                                                   media_player_drag_position = None;
                                                    }
                                                    
-                                                   if vlc_window_id_changed {
-                                                       println!("[main] VLC helper restarted for new window ID: {:?}", window_id);
+                                                   if media_player_window_id_changed {
+                                                       println!("[main] Media Player helper restarted for new window ID: {:?}", window_id);
                                                    } else {
-                                                       if current_vlc_window_id.is_none() {
-                                                           println!("[main] VLC/Dragon Player window focused for the first time, starting VLC helper");
+                                                       if current_media_player_window_id.is_none() {
+                                                           println!("[main] Media Player window focused for the first time, starting Media Player helper");
                                                        } else {
-                                                           println!("[main] VLC/Dragon Player window focused, starting VLC helper");
+                                                           println!("[main] Media Player window focused, starting Media Player helper");
                                                        }
                                                    }
                                                    if let Some(user) = &current_user {
-                                                       if let Some(fd) = vlc_helper_manager.start(user, current_session.as_ref().and_then(|s| s.leader).unwrap_or(0), class, window_id.unwrap_or(0), pid.unwrap_or(0)) {
+                                                       if let Some(fd) = media_player_helper_manager.start(user, current_session.as_ref().and_then(|s| s.leader).unwrap_or(0), class, window_id.unwrap_or(0), pid.unwrap_or(0)) {
                                                            let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
                                                            if let Err(e) = safe_epoll_add(&epoll, &listener_fd_obj, EpollEvent::new(EpollFlags::EPOLLIN, 6)) {
-                                                               eprintln!("[main] Failed to add VLC helper listener to epoll: {}", e);
+                                                               eprintln!("[main] Failed to add Media Player helper listener to epoll: {}", e);
                                                            } else {
-                                                               vlc_helper_listener_fd = Some(listener_fd_obj.into_raw_fd());
-                                                               if vlc_window_id_changed {
-                                                                   println!("[main] VLC helper restarted successfully for window ID: {:?}", window_id);
+                                                               media_player_helper_listener_fd = Some(listener_fd_obj.into_raw_fd());
+                                                               if media_player_window_id_changed {
+                                                                   println!("[main] Media Player helper restarted successfully for window ID: {:?}", window_id);
                                                                } else {
-                                                                   println!("[main] VLC helper started successfully for window ID: {:?}", window_id);
+                                                                   println!("[main] Media Player helper started successfully for window ID: {:?}", window_id);
                                                            }
                                                            }
                                                        } else {
-                                                           println!("[main] Failed to start VLC helper for user: {}", user);
+                                                           println!("[main] Failed to start Media Player helper for user: {}", user);
                                                        }
                                                    } else {
-                                                       println!("[main] No current user available for VLC helper");
+                                                       println!("[main] No current user available for Media Player helper");
                                                    }
                                                } else {
-                                                   // VLC/Dragon Player window lost focus - stop VLC helper
-                                                   println!("[main] VLC/Dragon Player window lost focus, stopping VLC helper");
-                                                   if let Some(stream) = vlc_helper_stream.take() {
+                                                   // Media Player window lost focus - stop Media Player helper
+                                                   println!("[main] Media Player window lost focus, stopping Media Player helper");
+                                                   if let Some(stream) = media_player_helper_stream.take() {
                                                        if let Err(e) = safe_epoll_delete(&epoll, &stream) {
-                                                           eprintln!("[main] Failed to remove VLC stream from epoll: {}", e);
+                                                           eprintln!("[main] Failed to remove Media Player stream from epoll: {}", e);
                                                        }
                                                    }
-                                                   vlc_helper_reader = None;
-                                                   if let Some(fd) = vlc_helper_listener_fd.take() {
+                                                   media_player_helper_reader = None;
+                                                   if let Some(fd) = media_player_helper_listener_fd.take() {
                                                        let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
                                                        if let Err(e) = safe_epoll_delete(&epoll, &listener_fd_obj) {
-                                                           eprintln!("[main] Failed to remove VLC listener from epoll: {}", e);
+                                                           eprintln!("[main] Failed to remove Media Player listener from epoll: {}", e);
                                                        }
                                                    }
-                                                   if vlc_helper_manager.is_process_running() {
-                                                   vlc_helper_manager.stop();
-                                                       println!("[main] VLC helper stopped due to losing focus");
+                                                   if media_player_helper_manager.is_process_running() {
+                                                   media_player_helper_manager.stop();
+                                                       println!("[main] Media Player helper stopped due to losing focus");
                                                    } else {
-                                                       println!("[main] VLC helper was not running, no need to stop");
+                                                       println!("[main] Media Player helper was not running, no need to stop");
                                                    }
-                                                   // Clear VLC drag position when losing focus
-                                                   vlc_drag_position = None;
+                                                   // Clear Media Player drag position when losing focus
+                                                   media_player_drag_position = None;
                                                }
                                                
-                                               // Update the current VLC/Dragon Player window ID
-                                               if new_vlc_focused {
-                                                   if current_vlc_window_id != window_id {
-                                                       println!("[main] VLC/Dragon Player window ID updated: {:?} -> {:?}", current_vlc_window_id, window_id);
+                                               // Update the current Media Player window ID
+                                               if new_media_player_focused {
+                                                   if current_media_player_window_id != window_id {
+                                                       println!("[main] Media Player window ID updated: {:?} -> {:?}", current_media_player_window_id, window_id);
                                                    }
-                                                   current_vlc_window_id = window_id;
+                                                   current_media_player_window_id = window_id;
                                                } else {
-                                                   if current_vlc_window_id.is_some() {
-                                                       println!("[main] VLC/Dragon Player window ID cleared (lost focus)");
+                                                   if current_media_player_window_id.is_some() {
+                                                       println!("[main] Media Player window ID cleared (lost focus)");
                                                    }
-                                                   current_vlc_window_id = None;
+                                                   current_media_player_window_id = None;
                                                }
                                            }
                                            
                                            // Check if browser window focus changed
-                                           let class_lower = class.to_lowercase();
-                                           let new_browser_focused = class_lower == "firefox" || class_lower == "chrome" || class_lower == "chromium" || class_lower == "brave" || class_lower == "brave-browser" || class_lower == "edge" || class_lower == "safari" || class_lower == "opera" || class_lower == "google-chrome";
+                                           let new_browser_focused = is_browser_window_class(class);
                                            let browser_focus_changed = new_browser_focused != browser_window_focused;
                                            let browser_window_id_changed = if new_browser_focused && browser_window_focused {
                                                // Browser is still focused, check if window ID changed
@@ -1333,8 +1332,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                            current_window_class = Some(class.to_string());
                                            current_window_id = window_id;
                                            
-                                           // Update app UI manager with new window class
-                                           app_ui_manager.update_app(&class).await;
+
                                            
                                            needs_complete_redraw = true;
                                        }
@@ -1358,45 +1356,45 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                         }
                     }
                 }
-                6 => { // VLC helper listener event
-                    if let Some(stream) = vlc_helper_manager.accept_connection() {
+                6 => { // Media Player helper listener event
+                    if let Some(stream) = media_player_helper_manager.accept_connection() {
                         if let Err(e) = stream.set_nonblocking(true) {
-                            eprintln!("[main] Failed to set VLC stream non-blocking: {}", e);
+                                                          eprintln!("[main] Failed to set Media Player stream non-blocking: {}", e);
                             continue;
                         }
-                        println!("[main] VLC helper connected to socket.");
+                        println!("[main] Media Player helper connected to socket.");
                         if let Err(e) = epoll.add(&stream, EpollEvent::new(EpollFlags::EPOLLIN, 7)) {
-                            eprintln!("[main] Failed to add VLC stream to epoll: {}", e);
+                            eprintln!("[main] Failed to add Media Player stream to epoll: {}", e);
                             continue;
                         }
                         if let Ok(stream_clone) = stream.try_clone() {
-                            vlc_helper_reader = Some(BufReader::new(stream_clone));
-                            vlc_helper_stream = Some(stream);
+                            media_player_helper_reader = Some(BufReader::new(stream_clone));
+                                                                               media_player_helper_stream = Some(stream);
                             // Stop listening for new connections
-                            if let Some(fd) = vlc_helper_listener_fd.take() {
+                            if let Some(fd) = media_player_helper_listener_fd.take() {
                                 let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
                                 if let Err(e) = safe_epoll_delete(&epoll, &listener_fd_obj) {
-                                    eprintln!("[main] Failed to remove VLC listener from epoll: {}", e);
+                                    eprintln!("[main] Failed to remove Media Player listener from epoll: {}", e);
                                 }
                             }
                         } else {
-                            eprintln!("[main] Failed to clone VLC stream");
+                            eprintln!("[main] Failed to clone Media Player stream");
                         }
                     }
                 }
-                7 => { // VLC helper stream event
-                    if let Some(reader) = &mut vlc_helper_reader {
+                7 => { // Media Player helper stream event
+                    if let Some(reader) = &mut media_player_helper_reader {
                         loop {
                            let mut buf = vec![0; 1024];
                            match reader.get_mut().read(&mut buf) {
                                Ok(0) => { // EOF
-                                   println!("[main] VLC helper disconnected.");
-                                   if let Some(stream) = vlc_helper_stream.take() {
+                                   println!("[main] Media Player helper disconnected.");
+                                   if let Some(stream) = media_player_helper_stream.take() {
                                        if let Err(e) = safe_epoll_delete(&epoll, &stream) {
-                                           eprintln!("[main] Failed to remove VLC stream from epoll: {}", e);
+                                           eprintln!("[main] Failed to remove Media Player stream from epoll: {}", e);
                                        }
                                    }
-                                   vlc_helper_reader = None;
+                                   media_player_helper_reader = None;
                                    break;
                                },
                                Ok(n) => {
@@ -1408,30 +1406,30 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                continue;
                                            }
                                            
-                                           // Handle VLC status message (plain JSON format)
-                                           if let Ok(vlc_status) = serde_json::from_str::<serde_json::Value>(part) {
-                                               // Update VLC screen with the status
-                                               if let Some(is_playing) = vlc_status.get("is_playing").and_then(|v| v.as_bool()) {
-                                                   if let Some(position) = vlc_status.get("position").and_then(|v| v.as_f64()) {
-                                                       if let Some(duration) = vlc_status.get("duration").and_then(|v| v.as_i64()) {
-                                                                                              // Create a MediaStatus struct and update the VLC screen
+                                           // Handle Media Player status message (plain JSON format)
+                                           if let Ok(media_player_status) = serde_json::from_str::<serde_json::Value>(part) {
+                                               // Update Media Player screen with the status
+                                               if let Some(is_playing) = media_player_status.get("is_playing").and_then(|v| v.as_bool()) {
+                                                   if let Some(position) = media_player_status.get("position").and_then(|v| v.as_f64()) {
+                                                       if let Some(duration) = media_player_status.get("duration").and_then(|v| v.as_i64()) {
+                                                                                              // Create a MediaStatus struct and update the Media Player screen
                                    let status = crate::helper::MediaStatus {
                                                                is_playing,
                                                                position,
                                                                duration,
                                                            };
                                                            
-                                                           // If we have a drag position and VLC has updated to a new position,
+                                                           // If we have a drag position and Media Player has updated to a new position,
                                                            // gradually fade out the drag position
-                                                           if let Some(drag_pos) = vlc_drag_position {
+                                                           if let Some(drag_pos) = media_player_drag_position {
                                                                if (position - drag_pos).abs() < 0.01 {
-                                                                   // VLC has caught up to the drag position, clear it
-                                                                   vlc_drag_position = None;
-                                                                   println!("[main] VLC caught up to drag position, clearing drag");
+                                                                   // Media Player has caught up to the drag position, clear it
+                                                                   media_player_drag_position = None;
+                                                                   println!("[main] Media Player caught up to drag position, clearing drag");
                                                                }
                                                            }
                                                            
-                                                           app_ui_manager.vlc_screen.last_status = Some(status);
+                                                           app_ui_manager.media_player_screen.last_status = Some(status);
                                                            needs_complete_redraw = true;
                                                        }
                                                    }
@@ -1439,20 +1437,20 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                            }
                                        }
                                    } else {
-                                       eprintln!("[main] DEBUG: Received invalid UTF-8 data from VLC helper");
+                                       eprintln!("[main] DEBUG: Received invalid UTF-8 data from Media Player helper");
                                    }
                                },
                                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                                    break; // No more data right now
                                },
                                Err(e) => {
-                                   eprintln!("[main] VLC helper stream error: {}", e);
-                                   if let Some(stream) = vlc_helper_stream.take() {
+                                   eprintln!("[main] Media Player helper stream error: {}", e);
+                                   if let Some(stream) = media_player_helper_stream.take() {
                                        if let Err(e) = safe_epoll_delete(&epoll, &stream) {
-                                           eprintln!("[main] Failed to remove VLC stream from epoll: {}", e);
+                                           eprintln!("[main] Failed to remove Media Player stream from epoll: {}", e);
                                        }
                                    }
-                                   vlc_helper_reader = None;
+                                   media_player_helper_reader = None;
                                    break;
                                }
                            }
@@ -1603,9 +1601,9 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                 &mut uinput,
                 &current_window_class,
                 &mut app_ui_manager,
-                &mut vlc_touch_active,
-                &mut vlc_drag_position,
-                &mut vlc_helper_stream,
+                        &mut media_player_touch_active,
+        &mut media_player_drag_position,
+        &mut media_player_helper_stream,
                 &mut browser_helper_stream,
                 &mut needs_complete_redraw,
                 cfg.enable_pixel_shift
@@ -1622,11 +1620,11 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
         })) {
             eprintln!("[main] Error during helper manager status check: {:?}", e);
         }
-        if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            vlc_helper_manager.check_process_status();
-        })) {
-            eprintln!("[main] Error during VLC/Dragon Player helper manager status check: {:?}", e);
-        }
+                  if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+              media_player_helper_manager.check_process_status();
+          })) {
+              eprintln!("[main] Error during Media Player helper manager status check: {:?}", e);
+          }
         if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             browser_helper_manager.check_process_status();
         })) {
@@ -1638,10 +1636,10 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
         unsafe {
             PROCESS_STATUS_COUNTER += 1;
             if PROCESS_STATUS_COUNTER % 1000 == 0 { // Log every 1000 frames
-                println!("[main] Process status - Main helper: {}, VLC/Dragon Player helper: {} (window ID: {:?}), Browser helper: {} (window ID: {:?})", 
+                println!("[main] Process status - Main helper: {}, Media Player helper: {} (window ID: {:?}), Browser helper: {} (window ID: {:?})", 
                     if helper_manager.is_process_running() { "running" } else { "stopped" },
-                    if vlc_helper_manager.is_process_running() { "running" } else { "stopped" },
-                    current_vlc_window_id,
+                    if media_player_helper_manager.is_process_running() { "running" } else { "stopped" },
+                                          current_media_player_window_id,
                     if browser_helper_manager.is_process_running() { "running" } else { "stopped" },
                     current_browser_window_id
                 );
@@ -1662,11 +1660,11 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                 })) {
                     eprintln!("[main] Error during helper manager cleanup: {:?}", e);
                 }
-                if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    vlc_helper_manager.force_cleanup();
-                })) {
-                    eprintln!("[main] Error during VLC helper manager cleanup: {:?}", e);
-                }
+                                  if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                      media_player_helper_manager.force_cleanup();
+                  })) {
+                      eprintln!("[main] Error during Media Player helper manager cleanup: {:?}", e);
+                  }
                 if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     browser_helper_manager.force_cleanup();
                 })) {

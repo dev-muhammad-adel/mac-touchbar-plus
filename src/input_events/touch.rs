@@ -27,9 +27,9 @@ impl TouchEventHandler {
         uinput: &mut UInputHandle<std::fs::File>,
         current_window_class: &Option<String>,
         app_ui_manager: &mut AppUiManager,
-        vlc_touch_active: &mut bool,
-        vlc_drag_position: &mut Option<f64>,
-        vlc_helper_stream: &mut Option<UnixStream>,
+            media_player_touch_active: &mut bool,
+    media_player_drag_position: &mut Option<f64>,
+    media_player_helper_stream: &mut Option<UnixStream>,
         browser_helper_stream: &mut Option<UnixStream>,
         needs_complete_redraw: &mut bool,
         cfg_enable_pixel_shift: bool,
@@ -44,8 +44,8 @@ impl TouchEventHandler {
                 // For Media layer, delegate to all handlers and let them filter internally
                 ModulesTouchHandler::handle_touch_event(
                     event, width, height, active_layer, layers,
-                    current_window_class, app_ui_manager, vlc_touch_active,
-                    vlc_drag_position, vlc_helper_stream, browser_helper_stream,
+                            current_window_class, app_ui_manager, media_player_touch_active,
+        media_player_drag_position, media_player_helper_stream, browser_helper_stream,
                     needs_complete_redraw, cfg_enable_pixel_shift, uinput
                 )?;
                 
