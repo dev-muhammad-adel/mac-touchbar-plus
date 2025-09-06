@@ -49,7 +49,7 @@ path = "src/helper/focus_window_helper.rs"
 
 [[bin]]
 name = "tiny-dfr-media-helper"
-path = "src/helper/media_helper.rs"
+path = "src/helper/media_main.rs"
 
 [[bin]]
 name = "tiny-dfr-browser-helper"
