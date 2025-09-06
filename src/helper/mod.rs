@@ -18,4 +18,6 @@ pub struct BrowserStatus {
 }
 
 pub mod browser_helper;
-pub mod manager; 
+pub mod manager;
+pub mod media;
+pub mod media_main; 
