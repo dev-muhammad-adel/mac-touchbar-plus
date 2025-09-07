@@ -26,7 +26,7 @@ async fn check_session_state(connection: &Connection, tx: &watch::Sender<Session
         .destination("org.freedesktop.login1")?
         .path("/org/freedesktop/login1")?
         .interface("org.freedesktop.login1.Manager")?
-        .build()
+        .build()]
         .await?;
 
     let reply = manager_proxy

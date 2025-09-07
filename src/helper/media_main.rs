@@ -14,9 +14,20 @@ mod dragon_player {
     include!("media/dragon_player.rs");
 }
 
+
+mod smplayer {
+    include!("media/smplayer.rs");
+}
+
+mod spotify {
+    include!("media/spotify.rs");
+}
+
 // Import specific functions we need
 use vlc::set_current_media_player as set_vlc_media_player;
 use dragon_player::set_current_media_player as set_dragon_media_player;
+use smplayer::set_current_media_player as set_smplayer_media_player;
+use spotify::set_current_media_player as set_spotify_media_player;
 
 fn main() -> std::io::Result<()> {
     let socket_path = "/tmp/touchbar-media.sock";
@@ -40,13 +51,20 @@ fn main() -> std::io::Result<()> {
     }
     
     // Determine which media player to use based on window class
-    let is_vlc = window_class == "vlc";
-    let is_dragon = window_class == "org.kde.dragonplayer" || window_class == "dragonplayer";
+    let window_class_lower = window_class.to_lowercase();
+    let is_vlc = window_class_lower == "vlc";
+    let is_dragon = window_class_lower == "org.kde.dragonplayer" || window_class_lower == "dragonplayer";
+    let is_smplayer = window_class_lower == "smplayer";
+    let is_spotify = window_class_lower == "spotify";
     
     if is_vlc {
         eprintln!("[media-helper] Detected VLC player");
     } else if is_dragon {
         eprintln!("[media-helper] Detected Dragon Player");
+    } else if is_smplayer {
+        eprintln!("[media-helper] Detected SMPlayer");
+    } else if is_spotify {
+        eprintln!("[media-helper] Detected Spotify");
     } else {
         eprintln!("[media-helper] Unknown player, defaulting to VLC");
     }
@@ -56,6 +74,10 @@ fn main() -> std::io::Result<()> {
         set_vlc_media_player(&window_class, window_pid);
     } else if is_dragon {
         set_dragon_media_player(&window_class, window_pid);
+    } else if is_smplayer {
+        set_smplayer_media_player(&window_class, window_pid);
+    } else if is_spotify {
+        set_spotify_media_player(&window_class, window_pid);
     }
     
     // Also read window ID for future use
@@ -101,6 +123,10 @@ fn main() -> std::io::Result<()> {
             vlc::monitor_vlc_events(status_sender_clone);
         } else if is_dragon {
             dragon_player::monitor_dragon_player_events(status_sender_clone);
+        } else if is_smplayer {
+            smplayer::monitor_smplayer_events(status_sender_clone);
+        } else if is_spotify {
+            spotify::monitor_spotify_events(status_sender_clone);
         } else {
             // Default to VLC
             vlc::monitor_vlc_events(status_sender_clone);
@@ -132,6 +158,10 @@ fn main() -> std::io::Result<()> {
                             vlc::handle_vlc_command(command, &status_sender);
                         } else if is_dragon {
                             dragon_player::handle_dragon_player_command(command, &status_sender);
+                        } else if is_smplayer {
+                            smplayer::handle_smplayer_command(command, &status_sender);
+                        } else if is_spotify {
+                            spotify::handle_spotify_command(command, &status_sender);
                         } else {
                             // Default to VLC
                             vlc::handle_vlc_command(command, &status_sender);

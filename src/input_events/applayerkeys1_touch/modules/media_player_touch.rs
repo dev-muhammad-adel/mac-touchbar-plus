@@ -9,6 +9,7 @@ use std::os::unix::net::UnixStream;
 use std::io::Write;
 use crate::view::app_ui_manager::{AppUiManager, AppAction};
 use crate::view::media_player_screen::MediaPlayerAction;
+use crate::view::spotify_screen::SpotifyAction;
 use crate::display::pixel_shift::PIXEL_SHIFT_WIDTH_PX;
 use crate::layers::function_layer::BUTTON_SPACING_PX;
 
@@ -286,8 +287,72 @@ impl MediaPlayerTouchHandler {
                     Self::send_media_player_command(stream, "quit")?;
                 }
             }
+            AppAction::Spotify(SpotifyAction::TogglePlayPause) => {
+                *media_player_touch_active = true;
+                if let Some(stream) = media_player_helper_stream {
+                    Self::send_media_player_command(stream, "play_pause")?;
+                }
+            }
+            AppAction::Spotify(SpotifyAction::Seek(position)) => {
+                *media_player_touch_active = true;
+                if let Some(stream) = media_player_helper_stream {
+                    let seek_command = format!("seek:{}", position);
+                    Self::send_media_player_command(stream, &seek_command)?;
+                }
+            }
+            AppAction::Spotify(SpotifyAction::DragHead(position)) => {
+                *media_player_touch_active = true;
+                *media_player_drag_position = Some(position);
+                *needs_complete_redraw = true;
+                
+                static mut LAST_SEEK_POSITION: f64 = 0.0;
+                unsafe {
+                    if (position - LAST_SEEK_POSITION).abs() > 0.01 {
+                        LAST_SEEK_POSITION = position;
+                        if let Some(stream) = media_player_helper_stream {
+                            let seek_command = format!("seek:{}", position);
+                            Self::send_media_player_command(stream, &seek_command)?;
+                        }
+                    }
+                }
+            }
+            AppAction::Spotify(SpotifyAction::Next) => {
+                println!("[media_player_touch] Executing Spotify Next");
+                *media_player_touch_active = true;
+                if let Some(stream) = media_player_helper_stream {
+                    Self::send_media_player_command(stream, "next")?;
+                }
+            }
+            AppAction::Spotify(SpotifyAction::Previous) => {
+                println!("[media_player_touch] Executing Spotify Previous");
+                *media_player_touch_active = true;
+                if let Some(stream) = media_player_helper_stream {
+                    Self::send_media_player_command(stream, "previous")?;
+                }
+            }
+            AppAction::Spotify(SpotifyAction::Stop) => {
+                println!("[media_player_touch] Executing Spotify Stop");
+                *media_player_touch_active = true;
+                if let Some(stream) = media_player_helper_stream {
+                    Self::send_media_player_command(stream, "stop")?;
+                }
+            }
+            AppAction::Spotify(SpotifyAction::Raise) => {
+                println!("[media_player_touch] Executing Spotify Raise");
+                *media_player_touch_active = true;
+                if let Some(stream) = media_player_helper_stream {
+                    Self::send_media_player_command(stream, "raise")?;
+                }
+            }
+            AppAction::Spotify(SpotifyAction::Quit) => {
+                println!("[media_player_touch] Executing Spotify Quit");
+                *media_player_touch_active = true;
+                if let Some(stream) = media_player_helper_stream {
+                    Self::send_media_player_command(stream, "quit")?;
+                }
+            }
             _ => {
-                println!("[media_player_touch] Ignoring non-Media Player action: {:?}", app_action);
+                println!("[media_player_touch] Ignoring non-Media Player/Spotify action: {:?}", app_action);
             }
         }
         Ok(())
@@ -317,8 +382,24 @@ impl MediaPlayerTouchHandler {
                     Self::send_media_player_command(stream, &seek_command)?;
                 }
             }
+            AppAction::Spotify(SpotifyAction::Seek(position)) => {
+                println!("[media_player_touch] Spotify seek during motion to position: {}", position);
+                if let Some(stream) = media_player_helper_stream {
+                    let seek_command = format!("seek:{}", position);
+                    Self::send_media_player_command(stream, &seek_command)?;
+                }
+            }
+            AppAction::Spotify(SpotifyAction::DragHead(position)) => {
+                println!("[media_player_touch] Spotify drag head during motion to position: {}", position);
+                *media_player_drag_position = Some(position);
+                *needs_complete_redraw = true;
+                if let Some(stream) = media_player_helper_stream {
+                    let seek_command = format!("seek:{}", position);
+                    Self::send_media_player_command(stream, &seek_command)?;
+                }
+            }
             _ => {
-                println!("[media_player_touch] Ignoring non-seek Media Player action during motion: {:?}", app_action);
+                println!("[media_player_touch] Ignoring non-seek Media Player/Spotify action during motion: {:?}", app_action);
             }
         }
         Ok(())

@@ -7,7 +7,7 @@ use std::cmp::min;
 use std::path::Path;
 
 use anyhow::Result;
-use cairo::{Context, FontSlant, FontWeight, Format, ImageSurface, Rectangle, Surface};
+use cairo::{Format, ImageSurface};
 use drm::control::ClipRect;
 use input::{
     event::{
@@ -18,8 +18,8 @@ use input::{
     },
     Device as InputDevice, Libinput, LibinputInterface,
 };
-use input_linux::{uinput::UInputHandle, EventKind, Key, SynchronizeKind};
-use input_linux_sys::{input_event, input_id, timeval, uinput_setup};
+use input_linux::{uinput::UInputHandle, EventKind, Key};
+use input_linux_sys::{input_id, uinput_setup};
 use libc::{c_char, O_ACCMODE, O_RDONLY, O_RDWR, O_WRONLY};
 use nix::{
     sys::eventfd::{eventfd, EfdFlags},
@@ -28,9 +28,8 @@ use nix::{
         signal::{SaFlags, SigAction, SigHandler, SigSet, Signal},
     },
 };
-use rsvg::CairoRenderer;
 use std::io::{BufReader, Read, Write};
-use std::sync::Arc;
+use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
 
 use chrono::{Local, Timelike};
 use crate::services::sessionmanager::{SessionState, monitor_sessions};
@@ -90,7 +89,7 @@ fn safe_epoll_add(epoll: &Epoll, fd: &dyn AsFd, event: EpollEvent) -> MainResult
     epoll.add(fd, event)
         .map_err(|e| MainError::Epoll(e))
         .map_err(|e| {
-            eprintln!("[main] Failed to add fd to epoll: {}", e);
+            log_error("epoll", "add fd", &e.to_string());
             e
         })
 }
@@ -99,7 +98,7 @@ fn safe_epoll_delete(epoll: &Epoll, fd: &dyn AsFd) -> MainResult<()> {
     epoll.delete(fd)
         .map_err(|e| MainError::Epoll(e))
         .map_err(|e| {
-            eprintln!("[main] Failed to remove fd from epoll: {}", e);
+            log_error("epoll", "remove fd", &e.to_string());
             e
         })
 }
@@ -140,6 +139,15 @@ fn safe_epoll_wait(epoll: &Epoll, events: &mut [EpollEvent], timeout: isize) -> 
 fn safe_input_dispatch(input: &mut Libinput) -> MainResult<()> {
     input.dispatch()
         .map_err(|e| MainError::Input(e))
+}
+
+// Helper function for consistent error logging
+fn log_error(component: &str, operation: &str, error: &str) {
+    eprintln!("[main] {} {} failed: {}", component, operation, error);
+}
+
+fn log_warning(component: &str, message: &str) {
+    eprintln!("[main] {} warning: {}", component, message);
 }
 
 // Helper function for safe layer access
@@ -372,142 +380,11 @@ fn perform_redraw(
     
     // Performance monitoring
     let draw_time = start_time.elapsed();
-    if DEBUG_LOGGING && draw_time > std::time::Duration::from_millis(16) {
-        println!("[main] SLOW DRAW: {:.2}ms (target: 16ms for 60fps)", draw_time.as_millis() as f64);
+    if DEBUG_LOGGING && draw_time > std::time::Duration::from_millis(FRAME_TARGET_MS as u64) {
+        println!("[main] SLOW DRAW: {:.2}ms (target: {}ms for 60fps)", draw_time.as_millis() as f64, FRAME_TARGET_MS);
     }
     
     *needs_complete_redraw_ref = false;
-    Ok(())
-}
-
-// Helper function to handle epoll events
-fn handle_epoll_events(
-    events: &[EpollEvent],
-    n: usize,
-    event_fd: &Arc<OwnedFd>,
-    event_rx: &mut mpsc::UnboundedReceiver<SessionState>,
-    current_session: &mut Option<SessionState>,
-    current_user: &mut Option<String>,
-    helper_manager: &mut HelperManager,
-    helper_listener_fd: &mut Option<i32>,
-    helper_stream: &mut Option<UnixStream>,
-    helper_reader: &mut Option<BufReader<UnixStream>>,
-    epoll: &mut Epoll,
-    active_layer: &mut LayerKey,
-    needs_complete_redraw: &mut bool,
-    current_window_class: &mut Option<String>,
-    debug_logging: bool,
-) -> MainResult<()> {
-    for i in 0..n {
-        let event = events[i];
-        match event.data() {
-            0 => { /* Main input events handled in the input processing loop */ },
-            1 => { /* Touch bar input events handled in the input processing loop */ },
-            2 => { /* Config manager events handled by cfg_mgr.update_config() */ },
-            3 => {
-                // eventfd triggered: read and process session event
-                let mut buf = [0u8; 8];
-                let _ = nix::unistd::read(event_fd.as_raw_fd(), &mut buf);
-                if let Ok(new_state) = event_rx.try_recv() {
-                    // Performance optimization: Reduce logging in production
-                    if debug_logging {
-                        println!("[main] Received session event: {:?}", new_state);
-                    }
-                    
-                    let session_changed = match &current_session {
-                        Some(current) => current != &new_state,
-                        None => {
-                            // First session state update - always treat as changed
-                            true
-                        }
-                    };
-                    
-                    if debug_logging {
-                        println!("[main] Session changed: {} (current: {:?}, new: {:?})", session_changed, current_session, new_state);
-                    }
-                    
-                    if session_changed {
-                        if new_state.is_logged_in {
-                            if debug_logging {
-                                println!("[main] User logged in: {}", new_state.user);
-                            }
-                            *current_user = Some(new_state.user.clone());
-                            
-                            // Set login time and start delay
-                            helper_manager.set_login_time();
-                            
-                            // Don't start helper immediately - wait for delay to complete
-                            if debug_logging {
-                                println!("[main] User logged in, starting 1 second delay before helper");
-                            }
-                            
-                            // Media Player helper will be started when Media Player window gains focus
-                            
-                            // Switch to Media layer when user logs in
-                            if *active_layer != LayerKey::Media {
-                                if debug_logging {
-                                    println!("[main] User logged in, switching from {:?} to Media layer", *active_layer);
-                                }
-                                *active_layer = LayerKey::Media;
-                                *needs_complete_redraw = true;
-                            }
-                        } else {
-                            if debug_logging {
-                                println!("[main] User logged out: {:?}", current_session);
-                            }
-                            if let Some(fd) = helper_listener_fd.take() {
-                                if debug_logging {
-                                    println!("[main] Removing helper listener fd: {}", fd);
-                                }
-                                let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
-                                if let Err(e) = safe_epoll_delete(epoll, &listener_fd_obj) {
-                                    eprintln!("[main] Failed to remove helper listener from epoll: {}", e);
-                                }
-                            }
-                            if let Some(stream) = helper_stream.take() {
-                                if debug_logging {
-                                    println!("[main] Removing helper stream from epoll");
-                                }
-                                if let Err(e) = safe_epoll_delete(epoll, &stream) {
-                                    eprintln!("[main] Failed to remove helper stream from epoll: {}", e);
-                                }
-                                *helper_reader = None;
-                            }
-                            // Media Player helper will be stopped when Media Player window loses focus
-                            if debug_logging {
-                                println!("[main] Stopping main helper");
-                            }
-                            helper_manager.stop();
-                            
-                            // Reset session ready state for next login
-                            // Reset login time is handled in stop() method
-                            
-                            // Switch to Custom2 layer when user logs out
-                            if *active_layer != LayerKey::Custom2 {
-                                if debug_logging {
-                                    println!("[main] User logged out, switching from {:?} to Custom2 layer", *active_layer);
-                                }
-                                *active_layer = LayerKey::Custom2;
-                                *needs_complete_redraw = true;
-                            }
-                            
-                            // Clear current window class when user logs out
-                            *current_window_class = None;
-                        }
-                        // No animation needed - just update session state
-                        *current_session = Some(new_state);
-                        *needs_complete_redraw = true;
-                    } else {
-                        if debug_logging {
-                            println!("[main] Session state unchanged, skipping redraw");
-                        }
-                    }
-                }
-            }
-            4 => { /* Helper listener event - handled in main loop */ }
-            _ => {}
-        }
-    }
     Ok(())
 }
 
@@ -544,6 +421,28 @@ fn setup_session_monitoring(event_fd: &Arc<OwnedFd>) -> MainResult<(watch::Sende
 // Add log level control at the top
 // Set to true to enable verbose debug logging, false for production (much less resource usage)
 const DEBUG_LOGGING: bool = false; // Set to false to disable verbose logging
+
+// Epoll event data constants
+const EPOLL_DATA_MAIN_INPUT: u64 = 0;
+const EPOLL_DATA_TOUCHBAR_INPUT: u64 = 1;
+const EPOLL_DATA_CONFIG_MANAGER: u64 = 2;
+const EPOLL_DATA_SESSION_EVENT: u64 = 3;
+const EPOLL_DATA_HELPER_LISTENER: u64 = 4;
+const EPOLL_DATA_HELPER_STREAM: u64 = 5;
+const EPOLL_DATA_MEDIA_PLAYER_LISTENER: u64 = 6;
+const EPOLL_DATA_MEDIA_PLAYER_STREAM: u64 = 7;
+const EPOLL_DATA_BROWSER_LISTENER: u64 = 8;
+const EPOLL_DATA_BROWSER_STREAM: u64 = 9;
+
+// Timeout constants
+const TIMEOUT_MS: i32 = 10 * 1000;
+const FRAME_TARGET_MS: u64 = 16; // 60fps = 16.67ms per frame
+const FORCE_CLEANUP_INTERVAL: u64 = 10000; // Every 10000 frames
+const PROCESS_STATUS_LOG_INTERVAL: u64 = 1000; // Every 1000 frames
+
+// Buffer sizes
+const SOCKET_BUFFER_SIZE: usize = 1024;
+const EVENTFD_BUFFER_SIZE: usize = 8;
 
 // Layer switching behavior:
 // - When user is not logged in: Custom2 layer (AppLayerKeys2) is active
@@ -598,9 +497,6 @@ pub mod services;
 pub mod helper;
 
 use crate::helper::manager::{HelperManager, MediaPlayerHelperManager, BrowserHelperManager};
-
-
-const TIMEOUT_MS: i32 = 10 * 1000;
 
 
 
@@ -715,7 +611,6 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
     // Add focus-based Media Player helper management
     let mut media_player_window_focused = false;
     let mut browser_window_focused = false;
-    let _last_window_class: Option<String> = None;
     let mut current_user: Option<String> = None;
     let mut current_media_player_window_id: Option<u64> = None; // Track current Media Player window ID
     let mut current_browser_window_id: Option<u64> = None; // Track current browser window ID
@@ -801,17 +696,6 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
         // Check for browser screen button changes
         let browser_buttons_changed = app_ui_manager.browser_screen.buttons.iter().any(|b| b.changed);
         let browser_buttons_active = app_ui_manager.browser_screen.buttons.iter().any(|b| b.active);
-        if browser_buttons_changed {
-            println!("[main] Browser buttons changed, triggering redraw");
-            println!("[main] Browser button states: Back(active={}, changed={}), Forward(active={}, changed={}), Refresh(active={}, changed={}), Home(active={}, changed={})", 
-                app_ui_manager.browser_screen.buttons[0].active, app_ui_manager.browser_screen.buttons[0].changed,
-                app_ui_manager.browser_screen.buttons[1].active, app_ui_manager.browser_screen.buttons[1].changed,
-                app_ui_manager.browser_screen.buttons[2].active, app_ui_manager.browser_screen.buttons[2].changed,
-                app_ui_manager.browser_screen.buttons[3].active, app_ui_manager.browser_screen.buttons[3].changed);
-        }
-        if browser_buttons_active {
-            println!("[main] Browser buttons active: {}", browser_buttons_active);
-        }
         
         // Handle different types of redraws
         if needs_complete_redraw || any_changed || browser_buttons_changed {
@@ -851,12 +735,12 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
         for i in 0..n {
             let event = events[i];
             match event.data() {
-                0 => { /* Main input events handled in the input processing loop */ },
-                1 => { /* Touch bar input events handled in the input processing loop */ },
-                2 => { /* Config manager events handled by cfg_mgr.update_config() */ },
-                3 => {
+                EPOLL_DATA_MAIN_INPUT => { /* Main input events handled in the input processing loop */ },
+                EPOLL_DATA_TOUCHBAR_INPUT => { /* Touch bar input events handled in the input processing loop */ },
+                EPOLL_DATA_CONFIG_MANAGER => { /* Config manager events handled by cfg_mgr.update_config() */ },
+                EPOLL_DATA_SESSION_EVENT => {
                     // eventfd triggered: read and process session event
-                    let mut buf = [0u8; 8];
+                    let mut buf = [0u8; EVENTFD_BUFFER_SIZE];
                     let _ = nix::unistd::read(event_fd.as_raw_fd(), &mut buf);
                                     if let Ok(new_state) = event_rx.try_recv() {
                     // Performance optimization: Reduce logging in production
@@ -957,7 +841,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                         }
                     }
                 }
-                4 => { // Helper listener event
+                EPOLL_DATA_HELPER_LISTENER => { // Helper listener event
                     if DEBUG_LOGGING {
                         println!("[main] Helper listener event triggered");
                     }
@@ -965,8 +849,8 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                         if DEBUG_LOGGING {
                             println!("[main] Helper connected to socket successfully");
                         }
-                        if let Err(e) = safe_epoll_add(&epoll, &stream, EpollEvent::new(EpollFlags::EPOLLIN, 5)) {
-                            eprintln!("[main] Failed to add helper stream to epoll: {}", e);
+                        if let Err(e) = safe_epoll_add(&epoll, &stream, EpollEvent::new(EpollFlags::EPOLLIN, EPOLL_DATA_HELPER_STREAM)) {
+                            log_error("helper", "add stream to epoll", &e.to_string());
                             continue;
                         }
                         if let Ok(stream_clone) = safe_stream_try_clone(&stream) {
@@ -976,7 +860,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                 println!("[main] Helper stream added to epoll and stored");
                             }
                         } else {
-                            eprintln!("[main] Failed to clone helper stream");
+                            log_error("helper", "clone stream", "stream clone failed");
                             continue;
                         }
                         
@@ -996,17 +880,13 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                         }
                     }
                 }
-                5 => { // Helper stream event
-                    println!("[main] Helper stream event triggered");
+                EPOLL_DATA_HELPER_STREAM => { // Helper stream event
                     if let Some(reader) = &mut helper_reader {
-                        println!("[main] Reading from helper socket...");
                         loop {
-                           let mut buf = vec![0; 1024];
+                           let mut buf = vec![0; SOCKET_BUFFER_SIZE];
                            match reader.get_mut().read(&mut buf) {
                                Ok(0) => { // EOF
-                                   println!("[main] Helper disconnected (EOF)");
                                    if let Some(stream) = helper_stream.take() {
-                                       println!("[main] Removing helper stream from epoll");
                                        if let Err(e) = safe_epoll_delete(&epoll, &stream) {
                                            eprintln!("[main] Failed to remove helper stream from epoll: {}", e);
                                        }
@@ -1016,9 +896,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                },
                                Ok(n) => {
                                    let data = &buf[..n];
-                                   println!("[main] Received {} bytes from helper: {:?}", n, data);
                                    if let Ok(text) = std::str::from_utf8(data) {
-                                       println!("[main] Helper data as text: {}", text);
                                        for part in text.split('\n') {
                                            let part = part.trim();
                                            if part.is_empty() {
@@ -1068,10 +946,9 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                (part, None, Some(0)) // Default PID to 0
                                            };
                                            
-                                           println!("[main] Parsed window info - class: '{}', id: {:?}, pid: {:?}", class, window_id, pid);
                                            
                                                                                         // Check if Media Player window focus changed
-                                             let new_media_player_focused = is_media_player_window_class(class);
+                                             let new_media_player_focused = is_media_player_window_class(&class.to_lowercase());
                                              let media_player_focus_changed = new_media_player_focused != media_player_window_focused;
                                              let media_player_window_id_changed = if new_media_player_focused && media_player_window_focused {
                                                  // Media Player is still focused, check if window ID changed
@@ -1085,10 +962,6 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                    media_player_window_focused = new_media_player_focused;
                                                }
                                                
-                                               if media_player_window_id_changed {
-                                                   println!("[main] Media Player window ID changed from {:?} to {:?}, restarting Media Player helper", current_media_player_window_id, window_id);
-                                                   println!("[main] Stopping existing Media Player helper and clearing state...");
-                                               }
                                                
                                                if new_media_player_focused {
                                                    // Media Player window gained focus or ID changed - start/restart Media Player helper
@@ -1108,23 +981,11 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                        }
                                                                                if media_player_helper_manager.is_process_running() {
                             media_player_helper_manager.stop();
-                            println!("[main] Media Player helper stopped due to window ID change");
-                                                       } else {
-                                                           println!("[main] Media Player helper was not running, no need to stop");
                                                        }
                                                                                                           // Clear Media Player drag position when switching windows
                                                    media_player_drag_position = None;
                                                    }
                                                    
-                                                   if media_player_window_id_changed {
-                                                       println!("[main] Media Player helper restarted for new window ID: {:?}", window_id);
-                                                   } else {
-                                                       if current_media_player_window_id.is_none() {
-                                                           println!("[main] Media Player window focused for the first time, starting Media Player helper");
-                                                       } else {
-                                                           println!("[main] Media Player window focused, starting Media Player helper");
-                                                       }
-                                                   }
                                                    if let Some(user) = &current_user {
                                                        if let Some(fd) = media_player_helper_manager.start(user, current_session.as_ref().and_then(|s| s.leader).unwrap_or(0), class, window_id.unwrap_or(0), pid.unwrap_or(0)) {
                                                            let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
@@ -1132,21 +993,15 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                                eprintln!("[main] Failed to add Media Player helper listener to epoll: {}", e);
                                                            } else {
                                                                media_player_helper_listener_fd = Some(listener_fd_obj.into_raw_fd());
-                                                               if media_player_window_id_changed {
-                                                                   println!("[main] Media Player helper restarted successfully for window ID: {:?}", window_id);
-                                                               } else {
-                                                                   println!("[main] Media Player helper started successfully for window ID: {:?}", window_id);
-                                                           }
                                                            }
                                                        } else {
-                                                           println!("[main] Failed to start Media Player helper for user: {}", user);
+                                                           eprintln!("[main] Failed to start Media Player helper for user: {}", user);
                                                        }
                                                    } else {
-                                                       println!("[main] No current user available for Media Player helper");
+                                                       eprintln!("[main] No current user available for Media Player helper");
                                                    }
                                                } else {
                                                    // Media Player window lost focus - stop Media Player helper
-                                                   println!("[main] Media Player window lost focus, stopping Media Player helper");
                                                    if let Some(stream) = media_player_helper_stream.take() {
                                                        if let Err(e) = safe_epoll_delete(&epoll, &stream) {
                                                            eprintln!("[main] Failed to remove Media Player stream from epoll: {}", e);
@@ -1161,9 +1016,6 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                    }
                                                    if media_player_helper_manager.is_process_running() {
                                                    media_player_helper_manager.stop();
-                                                       println!("[main] Media Player helper stopped due to losing focus");
-                                                   } else {
-                                                       println!("[main] Media Player helper was not running, no need to stop");
                                                    }
                                                    // Clear Media Player drag position when losing focus
                                                    media_player_drag_position = None;
@@ -1171,20 +1023,14 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                
                                                // Update the current Media Player window ID
                                                if new_media_player_focused {
-                                                   if current_media_player_window_id != window_id {
-                                                       println!("[main] Media Player window ID updated: {:?} -> {:?}", current_media_player_window_id, window_id);
-                                                   }
                                                    current_media_player_window_id = window_id;
                                                } else {
-                                                   if current_media_player_window_id.is_some() {
-                                                       println!("[main] Media Player window ID cleared (lost focus)");
-                                                   }
                                                    current_media_player_window_id = None;
                                                }
                                            }
                                            
                                            // Check if browser window focus changed
-                                           let new_browser_focused = is_browser_window_class(class);
+                                           let new_browser_focused = is_browser_window_class(&class.to_lowercase());
                                            let browser_focus_changed = new_browser_focused != browser_window_focused;
                                            let browser_window_id_changed = if new_browser_focused && browser_window_focused {
                                                // Browser is still focused, check if window ID changed
@@ -1198,9 +1044,6 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                    browser_window_focused = new_browser_focused;
                                                }
                                                
-                                               if browser_window_id_changed {
-                                                   println!("[main] Browser window ID changed from {:?} to {:?}, restarting browser helper", current_browser_window_id, window_id);
-                                               }
                                                
                                                if new_browser_focused {
                                                    // Browser window gained focus or ID changed - start/restart browser helper
@@ -1220,21 +1063,9 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                    }
                                                        if browser_helper_manager.is_process_running() {
                                                    browser_helper_manager.stop();
-                                                           println!("[main] Browser helper stopped due to window ID change");
-                                                       } else {
-                                                           println!("[main] Browser helper was not running, no need to stop");
                                                        }
                                                    }
                                                    
-                                                   if browser_window_id_changed {
-                                                       println!("[main] Browser helper restarted for new window ID: {:?}", window_id);
-                                                   } else {
-                                                       if current_browser_window_id.is_none() {
-                                                           println!("[main] Browser window focused for the first time, starting browser helper");
-                                                       } else {
-                                                           println!("[main] Browser window focused, starting browser helper");
-                                                       }
-                                                   }
                                                    
                                                    if let Some(user) = &current_user {
                                                        if let Some(fd) = browser_helper_manager.start(user, current_session.as_ref().and_then(|s| s.leader).unwrap_or(0), class, window_id.unwrap_or(0), pid.unwrap_or(0)) {
@@ -1243,21 +1074,15 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                                eprintln!("[main] Failed to add browser helper listener to epoll: {}", e);
                                                            } else {
                                                                browser_helper_listener_fd = Some(listener_fd_obj.into_raw_fd());
-                                                               if browser_window_id_changed {
-                                                                   println!("[main] Browser helper restarted successfully for window ID: {:?}", window_id);
-                                                               } else {
-                                                                   println!("[main] Browser helper started successfully for window ID: {:?}", window_id);
-                                                           }
                                                            }
                                                        } else {
-                                                           println!("[main] Failed to start browser helper for user: {}", user);
+                                                           eprintln!("[main] Failed to start browser helper for user: {}", user);
                                                        }
                                                    } else {
-                                                       println!("[main] No current user available for browser helper");
+                                                       eprintln!("[main] No current user available for browser helper");
                                                    }
                                                } else {
                                                    // Browser window lost focus - stop browser helper
-                                                   println!("[main] Browser window lost focus, stopping browser helper");
                                                    if let Some(stream) = browser_helper_stream.take() {
                                                        if let Err(e) = safe_epoll_delete(&epoll, &stream) {
                                                            eprintln!("[main] Failed to remove browser helper stream from epoll: {}", e);
@@ -1272,30 +1097,19 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                    }
                                                    if browser_helper_manager.is_process_running() {
                                                        browser_helper_manager.stop();
-                                                       println!("[main] Browser helper stopped due to losing focus");
-                                                   } else {
-                                                       println!("[main] Browser helper was not running, no need to stop");
                                                    }
                                                }
                                                
                                                // Update the current browser window ID
                                                if new_browser_focused {
-                                                   if current_browser_window_id != window_id {
-                                                       println!("[main] Browser window ID updated: {:?} -> {:?}", current_browser_window_id, window_id);
-                                                   }
                                                    current_browser_window_id = window_id;
                                                } else {
-                                                   if current_browser_window_id.is_some() {
-                                                       println!("[main] Browser window ID cleared (lost focus)");
-                                                   }
                                                    current_browser_window_id = None;
                                                }
                                            } else if new_browser_focused && browser_window_focused {
                                                // Browser focus state is the same, but browser type might have changed
                                                if current_window_class.as_ref() != Some(&class.to_string()) {
                                                    // Browser type changed - stop and restart helper for clean state
-                                                   println!("[main] Browser type changed from '{}' to '{}', restarting browser helper", 
-                                                       current_window_class.as_deref().unwrap_or("unknown"), class);
                                                    
                                                    // Stop existing helper
                                                    if let Some(stream) = browser_helper_stream.take() {
@@ -1323,7 +1137,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                            }
                                                        }
                                                    } else {
-                                                       println!("[main] No current user available for browser helper");
+                                                       eprintln!("[main] No current user available for browser helper");
                                                    }
                                                }
                                            }
@@ -1337,7 +1151,6 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                            needs_complete_redraw = true;
                                        }
                                    } else {
-                                       eprintln!("[main] DEBUG: Received invalid UTF-8 data");
                                    }
                                },
                                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -1356,13 +1169,12 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                         }
                     }
                 }
-                6 => { // Media Player helper listener event
+                EPOLL_DATA_MEDIA_PLAYER_LISTENER => { // Media Player helper listener event
                     if let Some(stream) = media_player_helper_manager.accept_connection() {
                         if let Err(e) = stream.set_nonblocking(true) {
-                                                          eprintln!("[main] Failed to set Media Player stream non-blocking: {}", e);
+                            eprintln!("[main] Failed to set Media Player stream non-blocking: {}", e);
                             continue;
                         }
-                        println!("[main] Media Player helper connected to socket.");
                         if let Err(e) = epoll.add(&stream, EpollEvent::new(EpollFlags::EPOLLIN, 7)) {
                             eprintln!("[main] Failed to add Media Player stream to epoll: {}", e);
                             continue;
@@ -1382,13 +1194,12 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                         }
                     }
                 }
-                7 => { // Media Player helper stream event
+                EPOLL_DATA_MEDIA_PLAYER_STREAM => { // Media Player helper stream event
                     if let Some(reader) = &mut media_player_helper_reader {
                         loop {
-                           let mut buf = vec![0; 1024];
+                           let mut buf = vec![0; SOCKET_BUFFER_SIZE];
                            match reader.get_mut().read(&mut buf) {
                                Ok(0) => { // EOF
-                                   println!("[main] Media Player helper disconnected.");
                                    if let Some(stream) = media_player_helper_stream.take() {
                                        if let Err(e) = safe_epoll_delete(&epoll, &stream) {
                                            eprintln!("[main] Failed to remove Media Player stream from epoll: {}", e);
@@ -1425,11 +1236,11 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                                if (position - drag_pos).abs() < 0.01 {
                                                                    // Media Player has caught up to the drag position, clear it
                                                                    media_player_drag_position = None;
-                                                                   println!("[main] Media Player caught up to drag position, clearing drag");
                                                                }
                                                            }
                                                            
-                                                           app_ui_manager.media_player_screen.last_status = Some(status);
+                                                           app_ui_manager.media_player_screen.last_status = Some(status.clone());
+                                                           app_ui_manager.spotify_screen.last_status = Some(status);
                                                            needs_complete_redraw = true;
                                                        }
                                                    }
@@ -1437,7 +1248,6 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                            }
                                        }
                                    } else {
-                                       eprintln!("[main] DEBUG: Received invalid UTF-8 data from Media Player helper");
                                    }
                                },
                                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -1457,13 +1267,12 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                         }
                     }
                 }
-                8 => { // Browser helper listener event
+                EPOLL_DATA_BROWSER_LISTENER => { // Browser helper listener event
                     if let Some(mut stream) = browser_helper_manager.accept_connection() {
                         if let Err(e) = safe_stream_set_nonblocking(&stream, true) {
                             eprintln!("[main] Failed to set browser stream non-blocking: {}", e);
                             continue;
                         }
-                        println!("[main] Browser helper connected to socket.");
                         
                         // Send browser type to the helper as the first message
                         if let Some(window_class) = &current_window_class {
@@ -1471,8 +1280,6 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                             let browser_type_msg = format!("browser_type:{}\n", window_class);
                             if let Err(e) = stream.write_all(browser_type_msg.as_bytes()) {
                                 eprintln!("[main] Failed to send browser type to helper: {}", e);
-                            } else {
-                                println!("[main] Sent exact browser type '{}' to browser helper", window_class);
                             }
                         }
                         
@@ -1496,13 +1303,12 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                         }
                     }
                 }
-                9 => { // Browser helper stream event
+                EPOLL_DATA_BROWSER_STREAM => { // Browser helper stream event
                     if let Some(reader) = &mut browser_helper_reader {
                         loop {
-                           let mut buf = vec![0; 1024];
+                           let mut buf = vec![0; SOCKET_BUFFER_SIZE];
                            match reader.get_mut().read(&mut buf) {
                                Ok(0) => { // EOF
-                                   println!("[main] Browser helper disconnected.");
                                    if let Some(stream) = browser_helper_stream.take() {
                                        if let Err(e) = safe_epoll_delete(&epoll, &stream) {
                                            eprintln!("[main] Failed to remove browser helper stream from epoll: {}", e);
@@ -1550,7 +1356,6 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                            }
                                        }
                                    } else {
-                                       eprintln!("[main] DEBUG: Received invalid UTF-8 data from browser helper");
                                    }
                                },
                                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -1631,26 +1436,11 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
             eprintln!("[main] Error during browser helper manager status check: {:?}", e);
         }
         
-        // Debug: Log process status periodically
-        static mut PROCESS_STATUS_COUNTER: u64 = 0;
-        unsafe {
-            PROCESS_STATUS_COUNTER += 1;
-            if PROCESS_STATUS_COUNTER % 1000 == 0 { // Log every 1000 frames
-                println!("[main] Process status - Main helper: {}, Media Player helper: {} (window ID: {:?}), Browser helper: {} (window ID: {:?})", 
-                    if helper_manager.is_process_running() { "running" } else { "stopped" },
-                    if media_player_helper_manager.is_process_running() { "running" } else { "stopped" },
-                                          current_media_player_window_id,
-                    if browser_helper_manager.is_process_running() { "running" } else { "stopped" },
-                    current_browser_window_id
-                );
-            }
-        }
         
-        // Force cleanup of any zombie processes every 10000 frames (less frequent to reduce overhead)
-        static mut FORCE_CLEANUP_COUNTER: u64 = 0;
-        unsafe {
-            FORCE_CLEANUP_COUNTER += 1;
-            if FORCE_CLEANUP_COUNTER % 10000 == 0 { // Every 10000 frames (reduced frequency)
+        // Force cleanup of any zombie processes every FORCE_CLEANUP_INTERVAL frames (less frequent to reduce overhead)
+        static FORCE_CLEANUP_COUNTER: AtomicU64 = AtomicU64::new(0);
+        let counter = FORCE_CLEANUP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        if counter % FORCE_CLEANUP_INTERVAL == 0 { // Every FORCE_CLEANUP_INTERVAL frames (reduced frequency)
                 if DEBUG_LOGGING {
                     println!("[main] Performing forced cleanup of zombie processes");
                 }
@@ -1670,7 +1460,6 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                 })) {
                     eprintln!("[main] Error during browser helper manager cleanup: {:?}", e);
                 }
-            }
         }
         
         // Check if we can start the helper now that session might be ready
@@ -1700,7 +1489,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
         
         // Performance optimization: Frame rate limiting to maintain 60fps
         let frame_duration = frame_start.elapsed();
-        let target_frame_time = std::time::Duration::from_millis(16); // 60fps = 16.67ms per frame
+        let target_frame_time = std::time::Duration::from_millis(FRAME_TARGET_MS as u64); // 60fps = 16.67ms per frame
         
         if frame_duration < target_frame_time {
             let sleep_time = target_frame_time - frame_duration;

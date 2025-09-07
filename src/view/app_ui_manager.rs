@@ -1,10 +1,11 @@
 use cairo::Context;
 use crate::view::media_player_screen::{MediaPlayerScreen, MediaPlayerAction};
 use crate::view::browser_screen::{BrowserScreen, BrowserAction};
+use crate::view::spotify_screen::{SpotifyScreen, SpotifyAction};
 use crate::view::module_screen::draw_module_screen;
 
 // Centralized state for media player window classes - easy to edit and maintain
-pub const MEDIA_PLAYER_WINDOW_CLASSES: &[&str] = &["vlc", "org.kde.dragonplayer","dragonplayer"];
+pub const MEDIA_PLAYER_WINDOW_CLASSES: &[&str] = &["vlc", "org.kde.dragonplayer","dragonplayer", "smplayer", "spotify"];
 
 // Helper function to check if a window class is a media player
 pub fn is_media_player_window_class(window_class: &str) -> bool {
@@ -23,6 +24,7 @@ pub fn is_browser_window_class(window_class: &str) -> bool {
 pub struct AppUiManager {
     pub media_player_screen: MediaPlayerScreen,
     pub browser_screen: BrowserScreen,
+    pub spotify_screen: SpotifyScreen,
 }
 
 impl AppUiManager {
@@ -30,6 +32,7 @@ impl AppUiManager {
         AppUiManager {
             media_player_screen: MediaPlayerScreen::new(),
             browser_screen: BrowserScreen::new(),
+            spotify_screen: SpotifyScreen::new(),
         }
     }
 
@@ -51,6 +54,9 @@ impl AppUiManager {
         match window_class {
             Some(class) => {
                 match class.to_lowercase().as_str() {
+            "spotify" => {
+                self.spotify_screen.draw(c, x, y, width, height, radius, anim_progress, drag_position);
+            }
             class if is_media_player_window_class(class) => {
                 self.media_player_screen.draw(c, x, y, width, height, radius, anim_progress, drag_position);
             }
@@ -116,6 +122,13 @@ impl AppUiManager {
     ) -> Option<AppAction> {
         println!("[app_ui_manager] hit_test_app_ui called for window_class={}, touch_x={}, touch_y={}", window_class, touch_x, touch_y);
         match window_class.to_lowercase().as_str() {
+            "spotify" => {
+                if let Some(spotify_action) = self.spotify_screen.hit_test(touch_x, touch_y, x, y, width, height, radius) {
+                    Some(AppAction::Spotify(spotify_action))
+                } else {
+                    None
+                }
+            }
             class if is_media_player_window_class(class) => {
                 if let Some(media_action) = self.media_player_screen.hit_test(touch_x, touch_y, x, y, width, height, radius) {
                     Some(AppAction::MediaPlayer(media_action))
@@ -142,4 +155,5 @@ impl AppUiManager {
 pub enum AppAction {
     MediaPlayer(MediaPlayerAction),
     Browser(BrowserAction),
+    Spotify(SpotifyAction),
 } 
