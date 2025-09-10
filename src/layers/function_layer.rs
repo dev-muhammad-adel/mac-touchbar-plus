@@ -359,8 +359,7 @@ impl FunctionLayer {
                 Self::safe_cairo_fill(&c)?;
             }
             
-            if (button.action != input_linux::Key::Unknown &&
-               button.action != input_linux::Key::Macro1 &&
+            if (button.action != input_linux::Key::Macro1 &&
                button.action != input_linux::Key::Macro2 &&
                button.action != input_linux::Key::Macro3 &&
                button.action != input_linux::Key::Macro4) &&

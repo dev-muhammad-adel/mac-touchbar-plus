@@ -32,8 +32,8 @@ impl std::fmt::Debug for ButtonImage {
 }
 
 // Constants for image loading
-pub const ICON_SIZE: i32 = 48;
-pub const BROWSER_ICON_SIZE: i32 = 48; // Smaller size for browser screen buttons
+pub const ICON_SIZE: i32 = 42;
+pub const BROWSER_ICON_SIZE: i32 = 42; // Smaller size for browser screen buttons
 
 /// Load browser icon directly from disk
 pub fn load_browser_icon(icon_name: &str) -> Result<ButtonImage> {

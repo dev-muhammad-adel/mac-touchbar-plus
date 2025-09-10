@@ -95,6 +95,11 @@
           "Fraction": 0.3
         },
         {
+          "Icon": "bar-chart-2",
+          "Action": "Compose",
+          "Mode": "Media"
+        },
+        {
           "Icon": "audio-volume-down-symbolic",
           "Action": "VolumeDown",
           "Mode": "Media"
@@ -248,3 +253,5 @@
     }
   ]
 }
+
+

@@ -46,7 +46,10 @@ pub fn draw_media_section(
             let w = this_button_width;
             let h = top - bot + radius * 2.0;
             let r = radius.min(h / 2.0);
-            if (button.action != Key::Unknown) && (button.background || button.active) {
+            if (button.background || button.active) {
+                if button.action == input_linux::Key::Compose {
+                    println!("[media_screen] Rendering Custom/Compose button with background: {}, active: {}", button.background, button.active);
+                }
                 c.set_source_rgb(color, color, color);
                 if media_count == 1 {
                     // Single button: all corners rounded

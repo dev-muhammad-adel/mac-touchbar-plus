@@ -2,6 +2,7 @@ use cairo::Context;
 use crate::view::media_player_screen::{MediaPlayerScreen, MediaPlayerAction};
 use crate::view::browser_screen::{BrowserScreen, BrowserAction};
 use crate::view::spotify_screen::{SpotifyScreen, SpotifyAction};
+use crate::view::generic_background_screen::{GenericBackgroundScreen, GenericBackgroundAction};
 use crate::view::module_screen::draw_module_screen;
 
 // Centralized state for media player window classes - easy to edit and maintain
@@ -25,6 +26,8 @@ pub struct AppUiManager {
     pub media_player_screen: MediaPlayerScreen,
     pub browser_screen: BrowserScreen,
     pub spotify_screen: SpotifyScreen,
+    pub generic_background_screen: GenericBackgroundScreen,
+    pub generic_media_enabled: bool,
 }
 
 impl AppUiManager {
@@ -33,7 +36,13 @@ impl AppUiManager {
             media_player_screen: MediaPlayerScreen::new(),
             browser_screen: BrowserScreen::new(),
             spotify_screen: SpotifyScreen::new(),
+            generic_background_screen: GenericBackgroundScreen::new(),
+            generic_media_enabled: false,
         }
+    }
+    
+    pub fn close_generic_media(&mut self) {
+        self.generic_media_enabled = false;
     }
 
 
@@ -51,6 +60,12 @@ impl AppUiManager {
         drag_position: Option<f64>, // Add drag position parameter
         modified_regions: &mut Vec<drm::control::ClipRect>,
     ) {
+        // If generic media is enabled, always show generic media screen regardless of window class
+        if self.generic_media_enabled {
+            self.generic_background_screen.draw(c, x, y, width, height, radius, anim_progress, drag_position);
+            return;
+        }
+        
         match window_class {
             Some(class) => {
                 match class.to_lowercase().as_str() {
@@ -121,32 +136,42 @@ impl AppUiManager {
         window_class: &str,
     ) -> Option<AppAction> {
         println!("[app_ui_manager] hit_test_app_ui called for window_class={}, touch_x={}, touch_y={}", window_class, touch_x, touch_y);
-        match window_class.to_lowercase().as_str() {
-            "spotify" => {
-                if let Some(spotify_action) = self.spotify_screen.hit_test(touch_x, touch_y, x, y, width, height, radius) {
-                    Some(AppAction::Spotify(spotify_action))
-                } else {
-                    None
-                }
+        
+        // If generic media is enabled, always test against generic media screen
+        if self.generic_media_enabled {
+            if let Some(generic_action) = self.generic_background_screen.hit_test(touch_x, touch_y, x, y, width, height, radius) {
+                Some(AppAction::GenericBackground(generic_action))
+            } else {
+                None
             }
-            class if is_media_player_window_class(class) => {
-                if let Some(media_action) = self.media_player_screen.hit_test(touch_x, touch_y, x, y, width, height, radius) {
-                    Some(AppAction::MediaPlayer(media_action))
-                } else {
-                    None
+        } else {
+            match window_class.to_lowercase().as_str() {
+                "spotify" => {
+                    if let Some(spotify_action) = self.spotify_screen.hit_test(touch_x, touch_y, x, y, width, height, radius) {
+                        Some(AppAction::Spotify(spotify_action))
+                    } else {
+                        None
+                    }
                 }
-            }
-            class if is_browser_window_class(class) => {
-                println!("[app_ui_manager] Calling browser_screen.hit_test");
-                if let Some(browser_action) = self.browser_screen.hit_test(touch_x, touch_y, x, y, width, height, radius) {
-                    println!("[app_ui_manager] Browser action detected: {:?}", browser_action);
-                    Some(AppAction::Browser(browser_action))
-                } else {
-                    println!("[app_ui_manager] No browser action detected");
-                    None
+                class if is_media_player_window_class(class) => {
+                    if let Some(media_action) = self.media_player_screen.hit_test(touch_x, touch_y, x, y, width, height, radius) {
+                        Some(AppAction::MediaPlayer(media_action))
+                    } else {
+                        None
+                    }
                 }
+                class if is_browser_window_class(class) => {
+                    println!("[app_ui_manager] Calling browser_screen.hit_test");
+                    if let Some(browser_action) = self.browser_screen.hit_test(touch_x, touch_y, x, y, width, height, radius) {
+                        println!("[app_ui_manager] Browser action detected: {:?}", browser_action);
+                        Some(AppAction::Browser(browser_action))
+                    } else {
+                        println!("[app_ui_manager] No browser action detected");
+                        None
+                    }
+                }
+                _ => None,
             }
-            _ => None,
         }
     }
 }
@@ -156,4 +181,5 @@ pub enum AppAction {
     MediaPlayer(MediaPlayerAction),
     Browser(BrowserAction),
     Spotify(SpotifyAction),
+    GenericBackground(GenericBackgroundAction),
 } 

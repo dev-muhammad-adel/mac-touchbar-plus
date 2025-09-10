@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use crate::LayerKey;
 use crate::layers::FunctionLayer;
 use input_linux::Key;
+use crate::view::app_ui_manager::AppUiManager;
 
 // Static HashMap for media touch slots
 static mut MEDIA_TOUCHES: Option<HashMap<u32, (LayerKey, &'static str, usize)>> = None;
@@ -33,6 +34,7 @@ impl MediaTouchHandler {
         active_layer: &LayerKey,
         layers: &mut HashMap<LayerKey, FunctionLayer>,
         uinput: &mut UInputHandle<std::fs::File>,
+        app_ui_manager: &mut AppUiManager,
     ) -> crate::MainResult<()> {
         let touches = Self::get_touches();
         
@@ -45,7 +47,7 @@ impl MediaTouchHandler {
                     
                     if let Some((group, idx)) = layers.get_mut(active_layer).ok_or(crate::MainError::LayerNotFound(*active_layer))?.hit_test(x, width as i32, Some(active_layer.clone())) {
                         if group == "media" {
-                            Self::handle_touch_down(idx, active_layer, layers, touches, dn.seat_slot(), uinput)?;
+                            Self::handle_touch_down(idx, active_layer, layers, touches, dn.seat_slot(), uinput, app_ui_manager)?;
                         }
                     }
                 },
@@ -99,6 +101,7 @@ impl MediaTouchHandler {
         touches: &mut HashMap<u32, (LayerKey, &'static str, usize)>,
         seat_slot: u32,
         uinput: &mut UInputHandle<std::fs::File>,
+        app_ui_manager: &mut AppUiManager,
     ) -> crate::MainResult<()> {
         // Ensure this is only called for LayerKeys1 (Media layer)
         if *active_layer != LayerKey::Media {
@@ -107,7 +110,17 @@ impl MediaTouchHandler {
 
         if let Some(split) = &mut layers.get_mut(active_layer).ok_or(crate::MainError::LayerNotFound(*active_layer))?.split {
             let button = &mut split.media[idx];
-            if button.action == Key::Unknown {
+            
+            // Check if this is the generic media toggle button (Custom/Compose action)
+            if button.action == Key::Compose {
+                println!("[media_touch] Generic media toggle button {} detected", idx);
+                // Toggle the generic media state
+                app_ui_manager.generic_media_enabled = !app_ui_manager.generic_media_enabled;
+                println!("[media_touch] Generic media enabled: {}", app_ui_manager.generic_media_enabled);
+                // Set the button as active to show visual feedback with background
+                button.set_active(uinput, true);
+                // Store touch slot for proper touch up handling
+                touches.insert(seat_slot, (active_layer.clone(), "media", idx));
                 return Ok(());
             }
             
@@ -141,7 +154,7 @@ impl MediaTouchHandler {
 
         if let Some(split) = &mut layers.get_mut(layer).ok_or(crate::MainError::LayerNotFound(*layer))?.split {
             let button = &mut split.media[idx];
-            if button.action == Key::Unknown {
+            if button.action == Key::Compose {
                 return Ok(());
             }
             
@@ -175,8 +188,9 @@ impl MediaTouchHandler {
 
         if let Some(split) = &mut layers.get_mut(layer).ok_or(crate::MainError::LayerNotFound(*layer))?.split {
             let button = &mut split.media[idx];
-            if button.action == Key::Unknown {
-                println!("[media_touch] Button action is Unknown, skipping");
+            if button.action == Key::Compose {
+                println!("[media_touch] Button action is Compose (generic media toggle), setting to inactive");
+                button.set_active(uinput, false);
                 return Ok(());
             }
             
