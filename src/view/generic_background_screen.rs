@@ -9,6 +9,9 @@ pub const ITEM_WIDTH: f64 = 80.0;
 pub const ITEM_BACKGROUND_R: f64 = 103.0 / 255.0; // #676767 R component
 pub const ITEM_BACKGROUND_G: f64 = 103.0 / 255.0; // #676767 G component  
 pub const ITEM_BACKGROUND_B: f64 = 103.0 / 255.0; // #676767 B component
+pub const ACTIVE_ITEM_BACKGROUND_R: f64 = 70.0 / 255.0; // #4682B4 R component
+pub const ACTIVE_ITEM_BACKGROUND_G: f64 = 130.0 / 255.0; // #4682B4 G component  
+pub const ACTIVE_ITEM_BACKGROUND_B: f64 = 180.0 / 255.0; // #4682B4 B component
 pub const DETAILS_BACKGROUND_R: f64 = 103.0 / 255.0; // #676767 R component
 pub const DETAILS_BACKGROUND_G: f64 = 103.0 / 255.0; // #676767 G component  
 pub const DETAILS_BACKGROUND_B: f64 = 103.0 / 255.0; // #676767 B component
@@ -77,7 +80,7 @@ impl GenericBackgroundScreen {
     pub fn new() -> Self {
         Self {
             last_status: None,
-            expanded_items: [false; 2],
+            expanded_items: [true, false], // First item opened by default
         }
     }
 
@@ -173,10 +176,10 @@ impl GenericBackgroundScreen {
             let radius = 8.0; // Rounded corner radius
             
             if is_expanded {
-                // Expanded state - #8b898e background
-                c.set_source_rgba(ITEM_BACKGROUND_R, ITEM_BACKGROUND_G, ITEM_BACKGROUND_B, 1.0);
+                // Expanded state - darker background for active item
+                c.set_source_rgba(ACTIVE_ITEM_BACKGROUND_R, ACTIVE_ITEM_BACKGROUND_G, ACTIVE_ITEM_BACKGROUND_B, 1.0);
             } else {
-                // Collapsed state - #8b898e background with reduced opacity
+                // Collapsed state - normal background
                 c.set_source_rgba(ITEM_BACKGROUND_R, ITEM_BACKGROUND_G, ITEM_BACKGROUND_B, 0.8);
             }
             
@@ -364,16 +367,10 @@ impl GenericBackgroundScreen {
         c.close_path();
         c.stroke().unwrap();
         
-        // Draw minimal MPRIS info - center vertically
-        c.set_source_rgba(0.3, 0.3, 0.3, 0.8); // Dark gray label
-        c.set_font_size(12.0);
-        let dbus_label_y = y + (height - 12.0) / 2.0 - 6.0;
-        c.move_to(x + padding, dbus_label_y);
-        c.show_text("DBus:").unwrap();
-        
-        c.set_source_rgba(0.1, 0.1, 0.1, 1.0); // Dark text value
-        c.set_font_size(11.0);
-        let dbus_value_y = y + (height - 11.0) / 2.0 + 6.0;
+   
+        c.set_source_rgba(1.0, 1.0, 1.0, 1.0); // Dark text value
+        c.set_font_size(14.0);
+        let dbus_value_y = y + (height - 14.0) / 2.0 + 6.0;
         c.move_to(x + padding, dbus_value_y);
         c.show_text(mpris_name).unwrap();
         
