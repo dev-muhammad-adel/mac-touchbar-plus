@@ -10,7 +10,7 @@ mod spotify {
 }
 
 // Import specific functions we need
-use spotify::set_current_media_pluse spotify::set_current_media_playerayer as set_spotify_media_player;
+use spotify::set_current_media_player as set_spotify_media_player;
 
 fn main() -> std::io::Result<()> {
     let socket_path = "/tmp/touchbar-generic-media.sock";
