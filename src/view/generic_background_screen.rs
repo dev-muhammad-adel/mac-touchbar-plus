@@ -86,13 +86,21 @@ impl GenericBackgroundScreen {
 
     pub fn toggle_mpris_item(&mut self, index: usize) {
         if index < self.expanded_items.len() {
-            // If the clicked item is currently expanded, close it
+            // If the clicked item is currently expanded, close it only if it's not the last item
             if self.expanded_items[index] {
-                self.expanded_items[index] = false;
+                // Count how many items are currently expanded
+                let expanded_count = self.expanded_items.iter().filter(|&&expanded| expanded).count();
+                
+                // Only close if there's more than one item expanded
+                if expanded_count > 1 {
+                    self.expanded_items[index] = false;
+                }
             } else {
                 // Close all other items first (accordion behavior)
                 for i in 0..self.expanded_items.len() {
-                    self.expanded_items[i] = false;
+                    if i != index {
+                        self.expanded_items[i] = false;
+                    }
                 }
                 // Then open the clicked item
                 self.expanded_items[index] = true;
