@@ -1,7 +1,8 @@
-//! Simple generic media screen for basic media controls
+//! Simple generic background service player screen for basic media controls
 use cairo::Context;
 use crate::helper::MediaStatus;
 use rsvg::{CairoRenderer, Loader};
+use crate::view::backgroundservices::*;
 
 // UI Constants
 pub const ICON_SIZE: f64 = 42.0;
@@ -15,6 +16,7 @@ pub const ACTIVE_ITEM_BACKGROUND_B: f64 = 180.0 / 255.0; // #4682B4 B component
 pub const DETAILS_BACKGROUND_R: f64 = 103.0 / 255.0; // #676767 R component
 pub const DETAILS_BACKGROUND_G: f64 = 103.0 / 255.0; // #676767 G component  
 pub const DETAILS_BACKGROUND_B: f64 = 103.0 / 255.0; // #676767 B component
+
 
 fn get_icon_name_for_mpris(mpris_name: &str) -> Option<&str> {
     match mpris_name {
@@ -54,6 +56,7 @@ fn render_svg_icon_from_path(c: &Context, icon_path: &str, x: f64, y: f64, size:
     Ok(())
 }
 
+
 static AVAILABLE_MPRIS_BACKGROUND: [&str; 2] = [
     "org.mpris.MediaPlayer2.chromium.instance3449",
     "org.mpris.MediaPlayer2.spotify",
@@ -64,16 +67,19 @@ pub enum GenericBackgroundAction {
     PlayPause,
     Next,
     Previous,
-    VolumeUp,
-    VolumeDown,
-    Mute,
     ToggleMprisItem(usize),
     CloseGenericMedia,
+    // Background service player actions
+    BackgroundServicePlayerPlayPause,
+    BackgroundServicePlayerNext,
+    BackgroundServicePlayerPrevious,
+    BackgroundServicePlayerSeek(f64), // 0.0 to 1.0
 }
 
 pub struct GenericBackgroundScreen {
     pub last_status: Option<MediaStatus>,
     pub expanded_items: [bool; 2],
+    pub background_service_player: BackgroundServicePlayer,
 }
 
 impl GenericBackgroundScreen {
@@ -81,6 +87,7 @@ impl GenericBackgroundScreen {
         Self {
             last_status: None,
             expanded_items: [true, false], // First item opened by default
+            background_service_player: BackgroundServicePlayer::new(),
         }
     }
 
@@ -109,7 +116,7 @@ impl GenericBackgroundScreen {
     }
 
     pub fn draw(
-        &self,
+        &mut self,
         c: &Context,
         x: f64,
         y: f64,
@@ -146,7 +153,7 @@ impl GenericBackgroundScreen {
         c.restore().unwrap();
     }
     
-    fn draw_mpris_items(&self, c: &Context, x: f64, y: f64, width: f64, height: f64) {
+    fn draw_mpris_items(&mut self, c: &Context, x: f64, y: f64, width: f64, height: f64) {
         // Use full available height for items
         let item_height = height; // Use 100% of available height
         let item_width = ITEM_WIDTH;
@@ -290,7 +297,14 @@ impl GenericBackgroundScreen {
         }
     }
     
-    fn draw_mpris_details(&self, c: &Context, x: f64, y: f64, width: f64, height: f64, mpris_name: &str) {
+    fn draw_mpris_details(&mut self, c: &Context, x: f64, y: f64, width: f64, height: f64, mpris_name: &str) {
+        // Check if this is a background service player and use special UI
+        if mpris_name.contains("spotify") {
+            self.draw_background_service_player_details(c, x, y, width, height, mpris_name);
+            return;
+        }
+        
+        // Default UI for non-background service MPRIS players
         let padding = 15.0;
         let radius = 8.0; // Same radius as items
         
@@ -385,6 +399,14 @@ impl GenericBackgroundScreen {
         c.restore().unwrap();
     }
     
+    fn draw_background_service_player_details(&mut self, c: &Context, x: f64, y: f64, width: f64, height: f64, mpris_name: &str) {
+        // Update the background service player with current status
+        self.background_service_player.last_status = self.last_status.clone();
+        
+        // Use the background service player to draw the details
+        self.background_service_player.draw_details(c, x, y, width, height, mpris_name);
+    }
+    
     fn draw_close_button(&self, c: &Context, x: f64, y: f64, height: f64) {
         let icon_size = 42.0; // Fixed 42px icon size
         let icon_padding = (height - icon_size) / 2.0;
@@ -439,7 +461,7 @@ impl GenericBackgroundScreen {
     }
     
     pub fn hit_test(
-        &self,
+        &mut self,
         touch_x: f64,
         touch_y: f64,
         screen_x: f64,
@@ -515,6 +537,14 @@ impl GenericBackgroundScreen {
                 let actual_detail_width = if remaining_width > detail_width { remaining_width } else { detail_width };
                 if touch_x >= detail_x && touch_x <= detail_x + actual_detail_width &&
                    touch_y >= items_y && touch_y <= items_y + item_height {
+                    // Check if this is a background service player and handle specific controls
+                    if let Some(mpris_name) = AVAILABLE_MPRIS_BACKGROUND.get(index) {
+                        if mpris_name.contains("spotify") {
+                            if let Some(action) = self.hit_test_background_service_player_controls(touch_x, touch_y, detail_x, items_y, actual_detail_width, item_height) {
+                                return Some(action);
+                            }
+                        }
+                    }
                     return Some(GenericBackgroundAction::ToggleMprisItem(index));
                 }
                 // Move current_x to account for the expanded details (no gap)
@@ -527,5 +557,23 @@ impl GenericBackgroundScreen {
         }
         
         None
+    }
+    
+    fn hit_test_background_service_player_controls(&mut self, touch_x: f64, touch_y: f64, x: f64, y: f64, width: f64, height: f64) -> Option<GenericBackgroundAction> {
+        // Update the background service player with current status
+        self.background_service_player.last_status = self.last_status.clone();
+        
+        // Use the background service player to handle hit testing
+        if let Some(action) = self.background_service_player.hit_test_controls(touch_x, touch_y, x, y, width, height) {
+            // Convert BackgroundServicePlayerAction to GenericBackgroundAction
+            match action {
+                BackgroundServicePlayerAction::PlayPause => Some(GenericBackgroundAction::BackgroundServicePlayerPlayPause),
+                BackgroundServicePlayerAction::Next => Some(GenericBackgroundAction::BackgroundServicePlayerNext),
+                BackgroundServicePlayerAction::Previous => Some(GenericBackgroundAction::BackgroundServicePlayerPrevious),
+                BackgroundServicePlayerAction::Seek(ratio) => Some(GenericBackgroundAction::BackgroundServicePlayerSeek(ratio)),
+            }
+        } else {
+            None
+        }
     }
 }

@@ -55,7 +55,4 @@ path = "src/helper/media_main.rs"
 name = "tiny-dfr-browser-helper"
 path = "src/helper/browser_helper.rs"
 
-[[bin]]
-name = "tiny-dfr-generic-media-helper"
-path = "src/helper/generic_media_main.rs"
 

@@ -38,7 +38,7 @@ pub fn draw_media_section(
             if matches!(button.action, Key::Macro1 | Key::Macro2 | Key::Macro3 | Key::Macro4) {
                 button.background = true;
             }
-            let this_button_width = media_button_widths[i];
+            let this_button_width = media_button_widths[i].round();
             let is_first = i == 0;
             let is_last = i == media_count - 1;
             let x = left_edge;
@@ -160,7 +160,7 @@ pub fn media_hit_test(
 ) -> Option<usize> {
     let mut current_left = left_edge;
     for i in 0..media_count {
-        let right = current_left + media_button_widths[i];
+        let right = current_left + media_button_widths[i].round();
         if x >= current_left && x < right {
             return Some(i);
         }

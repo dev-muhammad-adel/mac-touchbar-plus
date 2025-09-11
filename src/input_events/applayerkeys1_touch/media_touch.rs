@@ -35,6 +35,7 @@ impl MediaTouchHandler {
         layers: &mut HashMap<LayerKey, FunctionLayer>,
         uinput: &mut UInputHandle<std::fs::File>,
         app_ui_manager: &mut AppUiManager,
+        needs_complete_redraw: &mut bool,
     ) -> crate::MainResult<()> {
         let touches = Self::get_touches();
         
@@ -47,7 +48,7 @@ impl MediaTouchHandler {
                     
                     if let Some((group, idx)) = layers.get_mut(active_layer).ok_or(crate::MainError::LayerNotFound(*active_layer))?.hit_test(x, width as i32, Some(active_layer.clone())) {
                         if group == "media" {
-                            Self::handle_touch_down(idx, active_layer, layers, touches, dn.seat_slot(), uinput, app_ui_manager)?;
+                            Self::handle_touch_down(idx, active_layer, layers, touches, dn.seat_slot(), uinput, app_ui_manager, needs_complete_redraw)?;
                         }
                     }
                 },
@@ -72,7 +73,7 @@ impl MediaTouchHandler {
                     println!("[media_touch] Touch up - layer: {:?}, group: {}, idx: {}", layer, group, idx);
                     if *group == "media" {
                         println!("[media_touch] Processing media group touch up");
-                        Self::handle_touch_up(*idx, layer, layers, uinput)?;
+                        Self::handle_touch_up(*idx, layer, layers, uinput, app_ui_manager)?;
                         touches.remove(&up.seat_slot());
                         println!("[media_touch] Touch slot {} removed", up.seat_slot());
                     } else {
@@ -102,6 +103,7 @@ impl MediaTouchHandler {
         seat_slot: u32,
         uinput: &mut UInputHandle<std::fs::File>,
         app_ui_manager: &mut AppUiManager,
+        needs_complete_redraw: &mut bool,
     ) -> crate::MainResult<()> {
         // Ensure this is only called for LayerKeys1 (Media layer)
         if *active_layer != LayerKey::Media {
@@ -117,10 +119,12 @@ impl MediaTouchHandler {
                 // Toggle the generic media state
                 app_ui_manager.generic_media_enabled = !app_ui_manager.generic_media_enabled;
                 println!("[media_touch] Generic media enabled: {}", app_ui_manager.generic_media_enabled);
-                // Set the button as active to show visual feedback with background
+                // Set the button active state to match the toggle state
                 button.set_active(uinput, true);
                 // Store touch slot for proper touch up handling
                 touches.insert(seat_slot, (active_layer.clone(), "media", idx));
+                // Trigger a redraw since the UI state changed
+                *needs_complete_redraw = true;
                 return Ok(());
             }
             
@@ -177,6 +181,7 @@ impl MediaTouchHandler {
         layer: &LayerKey,
         layers: &mut HashMap<LayerKey, FunctionLayer>,
         uinput: &mut UInputHandle<std::fs::File>,
+        app_ui_manager: &AppUiManager,
     ) -> crate::MainResult<()> {
         println!("[media_touch] handle_touch_up called for idx: {}, layer: {:?}", idx, layer);
         
@@ -189,7 +194,8 @@ impl MediaTouchHandler {
         if let Some(split) = &mut layers.get_mut(layer).ok_or(crate::MainError::LayerNotFound(*layer))?.split {
             let button = &mut split.media[idx];
             if button.action == Key::Compose {
-                println!("[media_touch] Button action is Compose (generic media toggle), setting to inactive");
+                println!("[media_touch] Button action is Compose (generic media toggle), maintaining toggle state");
+                // For toggle buttons, maintain the current toggle state
                 button.set_active(uinput, false);
                 return Ok(());
             }

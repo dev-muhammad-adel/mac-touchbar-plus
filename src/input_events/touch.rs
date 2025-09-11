@@ -50,7 +50,7 @@ impl TouchEventHandler {
                 )?;
                 
                 MediaTouchHandler::handle_touch_event(
-                    event, width, height, active_layer, layers, uinput, app_ui_manager
+                    event, width, height, active_layer, layers, uinput, app_ui_manager, needs_complete_redraw
                 )?;
             } else {
                 // For other layers, use flat touch handler

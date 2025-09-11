@@ -433,8 +433,6 @@ const EPOLL_DATA_MEDIA_PLAYER_LISTENER: u64 = 6;
 const EPOLL_DATA_MEDIA_PLAYER_STREAM: u64 = 7;
 const EPOLL_DATA_BROWSER_LISTENER: u64 = 8;
 const EPOLL_DATA_BROWSER_STREAM: u64 = 9;
-const EPOLL_DATA_GENERIC_MEDIA_LISTENER: u64 = 10;
-const EPOLL_DATA_GENERIC_MEDIA_STREAM: u64 = 11;
 
 // Timeout constants
 const TIMEOUT_MS: i32 = 10 * 1000;
@@ -498,7 +496,7 @@ pub mod view;
 pub mod services;
 pub mod helper;
 
-use crate::helper::manager::{HelperManager, MediaPlayerHelperManager, BrowserHelperManager, GenericMediaHelperManager};
+use crate::helper::manager::{HelperManager, MediaPlayerHelperManager, BrowserHelperManager};
 
 
 
@@ -606,13 +604,9 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
     let mut helper_manager = HelperManager::new();
     let mut media_player_helper_manager = MediaPlayerHelperManager::new();
     let mut browser_helper_manager = BrowserHelperManager::new();
-    let mut generic_media_helper_manager = GenericMediaHelperManager::new();
     let mut browser_helper_listener_fd: Option<i32> = None;
     let mut browser_helper_stream: Option<UnixStream> = None;
     let mut browser_helper_reader: Option<BufReader<UnixStream>> = None;
-    let mut generic_media_helper_listener_fd: Option<i32> = None;
-    let mut generic_media_helper_stream: Option<UnixStream> = None;
-    let mut generic_media_helper_reader: Option<BufReader<UnixStream>> = None;
     
     // Add focus-based Media Player helper management
     let mut media_player_window_focused = false;
@@ -652,7 +646,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
     let mut app_ui_manager = AppUiManager::new();
     let mut media_player_touch_active = false; // Track if Media Player touch interaction is active
     let mut media_player_drag_position: Option<f64> = None; // Track current drag position for visual feedback
-    let mut previous_generic_media_enabled = false; // Track previous generic media state for helper management
+    let mut previous_generic_media_enabled = false; // Track previous generic media state for redraw detection
 
     // --- main event loop ---
     loop {
@@ -703,6 +697,13 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
         // Check for browser screen button changes
         let browser_buttons_changed = app_ui_manager.browser_screen.buttons.iter().any(|b| b.changed);
         let browser_buttons_active = app_ui_manager.browser_screen.buttons.iter().any(|b| b.active);
+        
+        // Check for generic media state changes (this will be set by touch handlers)
+        let generic_media_changed = app_ui_manager.generic_media_enabled != previous_generic_media_enabled;
+        if generic_media_changed {
+            previous_generic_media_enabled = app_ui_manager.generic_media_enabled;
+            needs_complete_redraw = true;
+        }
         
         // Handle different types of redraws
         if needs_complete_redraw || any_changed || browser_buttons_changed {
@@ -1381,95 +1382,6 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                         }
                     }
                 }
-                EPOLL_DATA_GENERIC_MEDIA_LISTENER => { // Generic Media helper listener event
-                    if let Some(mut stream) = generic_media_helper_manager.accept_connection() {
-                        if let Err(e) = safe_stream_set_nonblocking(&stream, true) {
-                            eprintln!("[main] Failed to set generic media stream non-blocking: {}", e);
-                            continue;
-                        }
-                        
-                        if let Err(e) = safe_epoll_add(&epoll, &stream, EpollEvent::new(EpollFlags::EPOLLIN, 11)) {
-                            eprintln!("[main] Failed to add generic media helper stream to epoll: {}", e);
-                            continue;
-                        }
-                        if let Ok(stream_clone) = safe_stream_try_clone(&stream) {
-                            generic_media_helper_reader = Some(BufReader::new(stream_clone));
-                            generic_media_helper_stream = Some(stream);
-                        } else {
-                            eprintln!("[main] Failed to clone generic media helper stream");
-                            continue;
-                        }
-                        // Stop listening for new connections
-                        if let Some(fd) = generic_media_helper_listener_fd.take() {
-                            let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
-                            if let Err(e) = safe_epoll_delete(&epoll, &listener_fd_obj) {
-                                eprintln!("[main] Failed to remove generic media helper listener from epoll: {}", e);
-                            }
-                        }
-                    }
-                }
-                EPOLL_DATA_GENERIC_MEDIA_STREAM => { // Generic Media helper stream event
-                    if let Some(reader) = &mut generic_media_helper_reader {
-                        loop {
-                           let mut buf = vec![0; SOCKET_BUFFER_SIZE];
-                           match reader.get_mut().read(&mut buf) {
-                               Ok(0) => { // EOF
-                                   if let Some(stream) = generic_media_helper_stream.take() {
-                                       if let Err(e) = safe_epoll_delete(&epoll, &stream) {
-                                           eprintln!("[main] Failed to remove generic media stream from epoll: {}", e);
-                                       }
-                                   }
-                                   generic_media_helper_reader = None;
-                                   break;
-                               },
-                               Ok(n) => {
-                                   let data = &buf[..n];
-                                   if let Ok(text) = std::str::from_utf8(data) {
-                                       for part in text.split('\n') {
-                                           let part = part.trim();
-                                           if part.is_empty() {
-                                               continue;
-                                           }
-                                           
-                                           // Handle generic media status message (plain JSON format)
-                                           if let Ok(generic_media_status) = serde_json::from_str::<serde_json::Value>(part) {
-                                               // Update generic media screen with the status
-                                               if let Some(is_playing) = generic_media_status.get("is_playing").and_then(|v| v.as_bool()) {
-                                                   if let Some(position) = generic_media_status.get("position").and_then(|v| v.as_f64()) {
-                                                       if let Some(duration) = generic_media_status.get("duration").and_then(|v| v.as_i64()) {
-                                                           // Create a MediaStatus struct and update the generic media screen
-                                                           let status = crate::helper::MediaStatus {
-                                                               is_playing,
-                                                               position,
-                                                               duration,
-                                                           };
-                                                           
-                                                           app_ui_manager.generic_background_screen.last_status = Some(status);
-                                                           needs_complete_redraw = true;
-                                                       }
-                                                   }
-                                               }
-                                           }
-                                       }
-                                   } else {
-                                   }
-                               },
-                               Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                                   break; // No more data right now
-                               },
-                               Err(_e) => {
-                                    if let Some(stream) = generic_media_helper_stream.take() {
-                                        if let Err(e) = safe_epoll_delete(&epoll, &stream) {
-                                            eprintln!("[main] Failed to remove generic media stream from epoll: {}", e);
-                                        }
-                                    }
-                                    generic_media_helper_reader = None;
-                                    break;
-                                }
-                           }
-                        }
-                    }
-                }
                 _ => {}
             }
         }
@@ -1511,45 +1423,6 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
             )?;
         }
         
-        // Check for generic media toggle state changes
-        if app_ui_manager.generic_media_enabled != previous_generic_media_enabled {
-            if app_ui_manager.generic_media_enabled {
-                // Generic media was enabled - start the helper if we have a current user
-                if let Some(user) = &current_user {
-                    if let Some(fd) = generic_media_helper_manager.start(user, current_session.as_ref().and_then(|s| s.leader).unwrap_or(0), "spotify", 0, 0) {
-                        let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
-                        if let Err(e) = safe_epoll_add(&epoll, &listener_fd_obj, EpollEvent::new(EpollFlags::EPOLLIN, 10)) {
-                            eprintln!("[main] Failed to add generic media helper listener to epoll: {}", e);
-                        } else {
-                            generic_media_helper_listener_fd = Some(listener_fd_obj.into_raw_fd());
-                        }
-                    } else {
-                        eprintln!("[main] Failed to start generic media helper for user: {}", user);
-                    }
-                } else {
-                    eprintln!("[main] No current user available for generic media helper");
-                }
-            } else {
-                // Generic media was disabled - stop the helper
-                if let Some(stream) = generic_media_helper_stream.take() {
-                    if let Err(e) = safe_epoll_delete(&epoll, &stream) {
-                        eprintln!("[main] Failed to remove generic media stream from epoll: {}", e);
-                    }
-                }
-                generic_media_helper_reader = None;
-                if let Some(fd) = generic_media_helper_listener_fd.take() {
-                    let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
-                    if let Err(e) = safe_epoll_delete(&epoll, &listener_fd_obj) {
-                        eprintln!("[main] Failed to remove generic media listener from epoll: {}", e);
-                    }
-                }
-                if generic_media_helper_manager.is_process_running() {
-                    generic_media_helper_manager.stop();
-                }
-            }
-            previous_generic_media_enabled = app_ui_manager.generic_media_enabled;
-            needs_complete_redraw = true;
-        }
         
          backlight.update_backlight(&cfg);
         
@@ -1570,11 +1443,6 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
             browser_helper_manager.check_process_status();
         })) {
             eprintln!("[main] Error during browser helper manager status check: {:?}", e);
-        }
-        if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            generic_media_helper_manager.check_process_status();
-        })) {
-            eprintln!("[main] Error during generic media helper manager status check: {:?}", e);
         }
         
         
@@ -1600,11 +1468,6 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                     browser_helper_manager.force_cleanup();
                 })) {
                     eprintln!("[main] Error during browser helper manager cleanup: {:?}", e);
-                }
-                if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    generic_media_helper_manager.force_cleanup();
-                })) {
-                    eprintln!("[main] Error during generic media helper manager cleanup: {:?}", e);
                 }
         }
         
