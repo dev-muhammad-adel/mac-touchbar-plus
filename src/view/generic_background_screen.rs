@@ -3,6 +3,7 @@ use cairo::Context;
 use crate::helper::MediaStatus;
 use rsvg::{CairoRenderer, Loader};
 use crate::view::backgroundservices::*;
+use std::io::Write;
 
 // UI Constants
 pub const ICON_SIZE: f64 = 42.0;
@@ -57,10 +58,6 @@ fn render_svg_icon_from_path(c: &Context, icon_path: &str, x: f64, y: f64, size:
 }
 
 
-static AVAILABLE_MPRIS_BACKGROUND: [&str; 2] = [
-    "org.mpris.MediaPlayer2.chromium.instance3449",
-    "org.mpris.MediaPlayer2.spotify",
-];
 
 #[derive(Debug, Clone)]
 pub enum GenericBackgroundAction {
@@ -74,35 +71,73 @@ pub enum GenericBackgroundAction {
     BackgroundServicePlayerNext,
     BackgroundServicePlayerPrevious,
     BackgroundServicePlayerSeek(f64), // 0.0 to 1.0
+    BackgroundServicePlayerDragHead(f64), // 0.0 to 1.0 - for dragging the progress bar head
 }
 
 pub struct GenericBackgroundScreen {
     pub last_status: Option<MediaStatus>,
-    pub expanded_items: [bool; 2],
+    pub expanded_items: Vec<bool>,
     pub background_service_player: BackgroundServicePlayer,
+    pub available_mpris_services: Vec<String>,
+    pub selected_service_index: Option<usize>,
 }
 
 impl GenericBackgroundScreen {
     pub fn new() -> Self {
         Self {
             last_status: None,
-            expanded_items: [true, false], // First item opened by default
+            expanded_items: Vec::new(), // Start empty, populated by background service helper
             background_service_player: BackgroundServicePlayer::new(),
+            available_mpris_services: Vec::new(), // Start empty, populated by background service helper
+            selected_service_index: None, // No service selected initially
+        }
+    }
+    
+    pub fn update_available_services(&mut self, services: Vec<String>) {
+        println!("[generic_background_screen] Received services: {:?}", services);
+        self.available_mpris_services = services;
+        // Reset expanded items to match new service count - first item expanded by default
+        self.expanded_items = vec![true; self.available_mpris_services.len()];
+        if self.expanded_items.len() > 1 {
+            self.expanded_items[1..].fill(false); // Only first item expanded
+        }
+        // Only select first service by default if no service is currently selected
+        if self.selected_service_index.is_none() && !self.available_mpris_services.is_empty() {
+            self.selected_service_index = Some(0);
+            println!("[generic_background_screen] Auto-selected first service (index 0)");
+        } else if self.available_mpris_services.is_empty() {
+            self.selected_service_index = None;
         }
     }
 
     pub fn toggle_mpris_item(&mut self, index: usize) {
+        println!("[generic_background_screen] ===== TOGGLE MPRIS ITEM =====");
+        println!("[generic_background_screen] Toggling item at index: {}", index);
+        println!("[generic_background_screen] Current expanded_items: {:?}", self.expanded_items);
+        println!("[generic_background_screen] Current selected_service_index: {:?}", self.selected_service_index);
+        
+        // Don't do anything if no services are available
+        if self.available_mpris_services.is_empty() {
+            println!("[generic_background_screen] No services available, ignoring toggle");
+            return;
+        }
+        
         if index < self.expanded_items.len() {
             // If the clicked item is currently expanded, close it only if it's not the last item
             if self.expanded_items[index] {
                 // Count how many items are currently expanded
                 let expanded_count = self.expanded_items.iter().filter(|&&expanded| expanded).count();
+                println!("[generic_background_screen] Item is currently expanded, expanded_count: {}", expanded_count);
                 
                 // Only close if there's more than one item expanded
                 if expanded_count > 1 {
                     self.expanded_items[index] = false;
+                    println!("[generic_background_screen] Closed item at index {}", index);
+                } else {
+                    println!("[generic_background_screen] Keeping item open (only one expanded)");
                 }
             } else {
+                println!("[generic_background_screen] Item is currently collapsed, opening it");
                 // Close all other items first (accordion behavior)
                 for i in 0..self.expanded_items.len() {
                     if i != index {
@@ -111,8 +146,52 @@ impl GenericBackgroundScreen {
                 }
                 // Then open the clicked item
                 self.expanded_items[index] = true;
+                println!("[generic_background_screen] Opened item at index {}", index);
             }
+            
+            // Update selected service when toggling
+            self.selected_service_index = Some(index);
+            println!("[generic_background_screen] Updated selected_service_index to: {:?}", self.selected_service_index);
+        } else {
+            println!("[generic_background_screen] Index {} out of bounds (len: {})", index, self.expanded_items.len());
         }
+        println!("[generic_background_screen] ==============================");
+    }
+    
+    // Method to send selection command to background service helper
+    pub fn send_selection_command(&self, background_service_helper_stream: &mut Option<std::os::unix::net::UnixStream>) {
+        println!("[generic_background_screen] ===== SENDING SELECTION COMMAND =====");
+        println!("[generic_background_screen] Selected service index: {:?}", self.selected_service_index);
+        println!("[generic_background_screen] Available services: {:?}", self.available_mpris_services);
+        
+        // Don't send anything if no services are available
+        if self.available_mpris_services.is_empty() {
+            println!("[generic_background_screen] No services available, not sending selection command");
+            return;
+        }
+        
+        if let Some(stream) = background_service_helper_stream {
+            if let Some(selected_index) = self.selected_service_index {
+                if let Some(service_name) = self.available_mpris_services.get(selected_index) {
+                    let command = format!("select_service:{}\n", service_name);
+                    println!("[generic_background_screen] Command to send: '{}'", command.trim());
+                    println!("[generic_background_screen] Command bytes: {:?}", command.as_bytes());
+                    
+                    if let Err(e) = stream.write_all(command.as_bytes()) {
+                        eprintln!("[generic_background_screen] Failed to send selection command: {}", e);
+                    } else {
+                        println!("[generic_background_screen] Successfully sent selection command: {}", command.trim());
+                    }
+                } else {
+                    println!("[generic_background_screen] No service found at index {}", selected_index);
+                }
+            } else {
+                println!("[generic_background_screen] No service selected (selected_index is None)");
+            }
+        } else {
+            println!("[generic_background_screen] No background service helper stream available");
+        }
+        println!("[generic_background_screen] ======================================");
     }
 
     pub fn draw(
@@ -148,12 +227,44 @@ impl GenericBackgroundScreen {
         self.draw_close_button(c, pill_x + 20.0, pill_y, pill_h);
         
         // Draw MPRIS background items using full pill height
-        self.draw_mpris_items(c, pill_x, pill_y, pill_w, pill_h);
+        self.draw_mpris_items(c, pill_x, pill_y, pill_w, pill_h, _drag_position);
         
         c.restore().unwrap();
     }
     
-    fn draw_mpris_items(&mut self, c: &Context, x: f64, y: f64, width: f64, height: f64) {
+    fn draw_no_services_message(&self, c: &Context, x: f64, y: f64, width: f64, height: f64) {
+        // Start from left after the close button to avoid overlap
+        let start_x = x + 100.0; // Start after close button (approximately 100px)
+        let message_width = width - (start_x - x);
+        let message_height = height;
+        
+        c.save().unwrap();
+        
+     
+     
+        
+        // Draw "No services available" text
+        c.set_source_rgba(0.6, 0.6, 0.6, 0.8);
+        c.set_font_size(16.0);
+        let text = "No supported services available";
+        let text_extents = c.text_extents(text).unwrap();
+        let text_width = text_extents.width();
+        let text_height = text_extents.height();
+        let text_x = start_x + (message_width - text_width) / 2.0;
+        let text_y = y + (message_height + text_height) / 2.0;
+        c.move_to(text_x, text_y);
+        c.show_text(text).unwrap();
+        
+        c.restore().unwrap();
+    }
+    
+    fn draw_mpris_items(&mut self, c: &Context, x: f64, y: f64, width: f64, height: f64, drag_position: Option<f64>) {
+        // Show "No services available" message if no services are available
+        if self.available_mpris_services.is_empty() {
+            self.draw_no_services_message(c, x, y, width, height);
+            return;
+        }
+        
         // Use full available height for items
         let item_height = height; // Use 100% of available height
         let item_width = ITEM_WIDTH;
@@ -182,7 +293,10 @@ impl GenericBackgroundScreen {
         // Calculate dynamic positions based on expanded items
         let mut current_x = start_x;
         
-        for (index, mpris_name) in AVAILABLE_MPRIS_BACKGROUND.iter().enumerate() {
+        // Collect mpris names to avoid borrowing issues
+        let mpris_names: Vec<String> = self.available_mpris_services.clone();
+        
+        for (index, mpris_name) in mpris_names.iter().enumerate() {
             let is_expanded = self.expanded_items[index];
             
             // Draw minimal modern collapsed/expanded item background with rounded corners
@@ -286,7 +400,7 @@ impl GenericBackgroundScreen {
             if is_expanded {
                 // Use remaining width for the last expanded item to fill the space
                 let actual_detail_width = if remaining_width > detail_width { remaining_width } else { detail_width };
-                self.draw_mpris_details(c, current_x + item_width, items_y, actual_detail_width, item_height, mpris_name);
+                self.draw_mpris_details(c, current_x + item_width, items_y, actual_detail_width, item_height, mpris_name.as_str(), drag_position);
                 // Move current_x to account for the expanded details (no gap)
                 current_x += item_width + actual_detail_width + item_spacing;
                 remaining_width -= actual_detail_width;
@@ -297,10 +411,10 @@ impl GenericBackgroundScreen {
         }
     }
     
-    fn draw_mpris_details(&mut self, c: &Context, x: f64, y: f64, width: f64, height: f64, mpris_name: &str) {
+    fn draw_mpris_details(&mut self, c: &Context, x: f64, y: f64, width: f64, height: f64, mpris_name: &str, drag_position: Option<f64>) {
         // Check if this is a background service player and use special UI
         if mpris_name.contains("spotify") {
-            self.draw_background_service_player_details(c, x, y, width, height, mpris_name);
+            self.draw_background_service_player_details(c, x, y, width, height, mpris_name, drag_position);
             return;
         }
         
@@ -399,12 +513,12 @@ impl GenericBackgroundScreen {
         c.restore().unwrap();
     }
     
-    fn draw_background_service_player_details(&mut self, c: &Context, x: f64, y: f64, width: f64, height: f64, mpris_name: &str) {
+    fn draw_background_service_player_details(&mut self, c: &Context, x: f64, y: f64, width: f64, height: f64, mpris_name: &str, drag_position: Option<f64>) {
         // Update the background service player with current status
         self.background_service_player.last_status = self.last_status.clone();
         
         // Use the background service player to draw the details
-        self.background_service_player.draw_details(c, x, y, width, height, mpris_name);
+        self.background_service_player.draw_details(c, x, y, width, height, mpris_name, drag_position);
     }
     
     fn draw_close_button(&self, c: &Context, x: f64, y: f64, height: f64) {
@@ -493,6 +607,11 @@ impl GenericBackgroundScreen {
             return Some(GenericBackgroundAction::CloseGenericMedia);
         }
         
+        // Don't test anything if no services are available
+        if self.available_mpris_services.is_empty() {
+            return None;
+        }
+        
         // Use same calculations as draw_mpris_items
         let item_height = pill_h; // Use 100% of available height
         let item_width = ITEM_WIDTH;
@@ -521,7 +640,10 @@ impl GenericBackgroundScreen {
         // Calculate dynamic positions based on expanded items (same as draw function)
         let mut current_x = start_x;
         
-        for (index, _) in AVAILABLE_MPRIS_BACKGROUND.iter().enumerate() {
+        // Collect mpris names to avoid borrowing issues
+        let mpris_names: Vec<String> = self.available_mpris_services.clone();
+        
+        for (index, _) in mpris_names.iter().enumerate() {
             let is_expanded = self.expanded_items[index];
             
             // Check if touch is within this MPRIS item
@@ -538,7 +660,7 @@ impl GenericBackgroundScreen {
                 if touch_x >= detail_x && touch_x <= detail_x + actual_detail_width &&
                    touch_y >= items_y && touch_y <= items_y + item_height {
                     // Check if this is a background service player and handle specific controls
-                    if let Some(mpris_name) = AVAILABLE_MPRIS_BACKGROUND.get(index) {
+                    if let Some(mpris_name) = mpris_names.get(index) {
                         if mpris_name.contains("spotify") {
                             if let Some(action) = self.hit_test_background_service_player_controls(touch_x, touch_y, detail_x, items_y, actual_detail_width, item_height) {
                                 return Some(action);
@@ -571,6 +693,7 @@ impl GenericBackgroundScreen {
                 BackgroundServicePlayerAction::Next => Some(GenericBackgroundAction::BackgroundServicePlayerNext),
                 BackgroundServicePlayerAction::Previous => Some(GenericBackgroundAction::BackgroundServicePlayerPrevious),
                 BackgroundServicePlayerAction::Seek(ratio) => Some(GenericBackgroundAction::BackgroundServicePlayerSeek(ratio)),
+                BackgroundServicePlayerAction::DragHead(ratio) => Some(GenericBackgroundAction::BackgroundServicePlayerDragHead(ratio)),
             }
         } else {
             None

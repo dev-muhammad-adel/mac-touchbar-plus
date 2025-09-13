@@ -4,6 +4,7 @@ use crate::view::browser_screen::{BrowserScreen, BrowserAction};
 use crate::view::spotify_screen::{SpotifyScreen, SpotifyAction};
 use crate::view::generic_background_screen::{GenericBackgroundScreen, GenericBackgroundAction};
 use crate::view::module_screen::draw_module_screen;
+use std::io::Write;
 
 // Centralized state for media player window classes - easy to edit and maintain
 pub const MEDIA_PLAYER_WINDOW_CLASSES: &[&str] = &["vlc", "org.kde.dragonplayer","dragonplayer", "smplayer", "spotify"];
@@ -43,6 +44,72 @@ impl AppUiManager {
     
     pub fn close_generic_media(&mut self) {
         self.generic_media_enabled = false;
+    }
+    
+    pub fn update_available_services_list(&mut self, services: Vec<String>) {
+        self.generic_background_screen.update_available_services(services);
+    }
+    
+    pub fn handle_generic_background_action(&mut self, action: GenericBackgroundAction, background_service_helper_stream: &mut Option<std::os::unix::net::UnixStream>) {
+        match action {
+            GenericBackgroundAction::ToggleMprisItem(index) => {
+                self.generic_background_screen.toggle_mpris_item(index);
+                // Send selection command to background service helper
+                self.generic_background_screen.send_selection_command(background_service_helper_stream);
+            }
+            GenericBackgroundAction::CloseGenericMedia => {
+                self.close_generic_media();
+            }
+            GenericBackgroundAction::BackgroundServicePlayerPlayPause => {
+                self.send_media_action_to_helper("play_pause", background_service_helper_stream);
+            }
+            GenericBackgroundAction::BackgroundServicePlayerNext => {
+                self.send_media_action_to_helper("next", background_service_helper_stream);
+            }
+            GenericBackgroundAction::BackgroundServicePlayerPrevious => {
+                self.send_media_action_to_helper("previous", background_service_helper_stream);
+            }
+            GenericBackgroundAction::BackgroundServicePlayerSeek(ratio) => {
+                self.send_media_action_to_helper(&format!("seek:{}", ratio), background_service_helper_stream);
+            }
+            GenericBackgroundAction::BackgroundServicePlayerDragHead(ratio) => {
+                self.send_media_action_to_helper(&format!("seek:{}", ratio), background_service_helper_stream);
+            }
+            _ => {
+                // Handle other actions if needed
+            }
+        }
+    }
+    
+    // Helper function to send media actions to the background service helper
+    fn send_media_action_to_helper(&self, action: &str, background_service_helper_stream: &mut Option<std::os::unix::net::UnixStream>) {
+        if let Some(stream) = background_service_helper_stream {
+            let command = format!("media_action:{}\n", action);
+            if let Err(e) = stream.write_all(command.as_bytes()) {
+                eprintln!("[app_ui_manager] Failed to send media action to helper: {}", e);
+            } else {
+                println!("[app_ui_manager] Sent media action to helper: {}", action);
+            }
+        } else {
+            println!("[app_ui_manager] No background service helper stream available for action: {}", action);
+        }
+    }
+    
+    pub fn hit_test_generic_background(
+        &mut self,
+        touch_x: f64,
+        touch_y: f64,
+        screen_x: f64,
+        screen_y: f64,
+        screen_width: f64,
+        screen_height: f64,
+        radius: f64,
+    ) -> Option<GenericBackgroundAction> {
+        if self.generic_media_enabled {
+            self.generic_background_screen.hit_test(touch_x, touch_y, screen_x, screen_y, screen_width, screen_height, radius)
+        } else {
+            None
+        }
     }
 
 

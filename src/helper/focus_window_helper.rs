@@ -342,6 +342,9 @@ impl EventRunner {
                         
                         if let Err(e) = self.write_to_socket(stream, &info.to_string()) {
                             eprintln!("[helper] Socket write error: {}", e);
+                            // Exit the event loop when socket write fails (e.g., broken pipe)
+                            eprintln!("[helper] Exiting due to socket write error");
+                            break;
                         }
                         
                         last_info = info;
@@ -1323,15 +1326,7 @@ fn detect_window_manager() -> Result<Box<dyn WindowMonitor>> {
 }
 
 fn main() -> Result<()> {
-    // Debug environment variables
-    eprintln!("[helper] Environment variables:");
-    eprintln!("[helper] DISPLAY={:?}", std::env::var("DISPLAY"));
-    eprintln!("[helper] WAYLAND_DISPLAY={:?}", std::env::var("WAYLAND_DISPLAY"));
-    eprintln!("[helper] SWAYSOCK={:?}", std::env::var("SWAYSOCK"));
-    eprintln!("[helper] HYPRLAND_INSTANCE_SIGNATURE={:?}", std::env::var("HYPRLAND_INSTANCE_SIGNATURE"));
-    eprintln!("[helper] NIRI_SOCKET={:?}", std::env::var("NIRI_SOCKET"));
-    eprintln!("[helper] XDG_CURRENT_DESKTOP={:?}", std::env::var("XDG_CURRENT_DESKTOP"));
-    
+
     // Detect window manager and run
     let monitor = detect_window_manager()?;
     let mut runner = EventRunner::new();

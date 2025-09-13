@@ -31,6 +31,7 @@ pub struct ProcessInfo {
     pub restart_count: u32,
     pub last_health_check: Instant,
     pub consecutive_failures: u32,
+    pub session_ready_message_logged: bool,
 }
 
 impl ProcessInfo {
@@ -41,6 +42,7 @@ impl ProcessInfo {
             restart_count: 0,
             last_health_check: Instant::now(),
             consecutive_failures: 0,
+            session_ready_message_logged: false,
         }
     }
 }
@@ -203,7 +205,7 @@ impl HelperManager {
                 }
             }
             
-            // Wait a bit for graceful shutdown
+            // Wait a bit for graceful shutdown (async like other helpers)
             let _ = std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_millis(500));
                 let _ = child.wait();
@@ -213,9 +215,8 @@ impl HelperManager {
         self.listener.take();
         self.process_info.status = ProcessStatus::Stopped;
         
-        // Reset session state when stopping
-        self.login_time = None;
-        self.delay_start_time = None;
+        // Don't reset session state when stopping - only reset when user logs out
+        // This prevents the delay timer from being reset when generic_media_enabled changes
     }
     
     /// Check if the helper process is still running and clean up zombies
@@ -321,17 +322,26 @@ impl HelperManager {
         if let Some(delay_start) = self.delay_start_time {
             let elapsed = delay_start.elapsed();
             if elapsed >= Duration::from_secs(1) {
-                println!("[HelperManager::check_session_ready] 1 second delay completed, session is ready");
+                // Only print once when session becomes ready
+                if !self.process_info.session_ready_message_logged {
+                    println!("[HelperManager::check_session_ready] 1 second delay completed, session is ready");
+                    self.process_info.session_ready_message_logged = true;
+                }
                 return true;
             } else {
+                // Only print every 0.1 seconds to reduce spam
                 let remaining = Duration::from_secs(1) - elapsed;
-                println!("[HelperManager::check_session_ready] Waiting for session to be ready, {:.1} seconds remaining", remaining.as_secs_f64());
+                if remaining.as_millis() % 100 == 0 {
+                    println!("[HelperManager::check_session_ready] Waiting for session to be ready, {:.1} seconds remaining", remaining.as_secs_f64());
+                }
                 return false;
             }
         }
         
         // If no delay has been set, session is not ready
-        println!("[HelperManager::check_session_ready] No delay timer set, session not ready");
+        if !self.process_info.session_ready_message_logged {
+            println!("[HelperManager::check_session_ready] No delay timer set, session not ready");
+        }
         false
     }
 
@@ -356,6 +366,13 @@ impl HelperManager {
         // Start the delay timer when login time is set
         self.delay_start_time = Some(Instant::now());
         println!("[HelperManager::set_login_time] Started 1 second delay timer");
+    }
+    
+    pub fn reset_session_state(&mut self) {
+        self.login_time = None;
+        self.delay_start_time = None;
+        self.process_info.session_ready_message_logged = false;
+        println!("[HelperManager::reset_session_state] Reset session state");
     }
 
     pub fn is_process_none(&self) -> bool {
@@ -1109,9 +1126,8 @@ fn get_env_from_session(user: &str, leader_pid: u32) -> HashMap<String, String> 
                     env_count += 1;
                 }
             }
-            println!("[get_env_from_session] Process {} (PID {}): found {} env vars", i, pid, env_count);
         } else {
-            println!("[get_env_from_session] Process {} (PID {}): failed to read environ", i, pid);
+           
         }
     }
     
@@ -1253,7 +1269,6 @@ fn get_env_from_session(user: &str, leader_pid: u32) -> HashMap<String, String> 
                         if let Some(name) = file_name.to_str() {
                             if name.starts_with("ipc-socket.") {
                                 let i3_socket_path = format!("{}/{}", i3_socket_dir, name);
-                                println!("[get_env_from_session] Found i3 socket: {}, setting I3SOCK={}", name, i3_socket_path);
                                 env.insert("I3SOCK".to_string(), i3_socket_path);
                                 break;
                             }
@@ -1297,4 +1312,204 @@ fn get_env_from_pid(pid: u32) -> HashMap<String, String> {
     }
     
     env
+}
+
+// ============================================================================
+// Background Service Helper Manager
+// ============================================================================
+
+pub struct BackgroundServiceHelperManager {
+    process: Option<Child>,
+    listener: Option<UnixListener>,
+    process_info: ProcessInfo,
+    auto_restart_enabled: bool,
+    socket_path: String,
+}
+
+impl BackgroundServiceHelperManager {
+    pub fn new() -> Self {
+        BackgroundServiceHelperManager {
+            process: None,
+            listener: None,
+            process_info: ProcessInfo::new(),
+            auto_restart_enabled: true,
+            socket_path: "/tmp/touchbar-background-service.sock".to_string(),
+        }
+    }
+
+    pub fn start(&mut self, user: &str, leader_pid: u32) -> Option<i32> {
+        if self.process.is_some() {
+            return None;
+        }
+
+        self.process_info.status = ProcessStatus::Starting;
+        self.process_info.start_time = Some(Instant::now());
+
+        let socket_path = &self.socket_path;
+        
+        // Clean up old socket file if it exists
+        let _ = fs::remove_file(socket_path);
+
+        let listener = match UnixListener::bind(socket_path) {
+            Ok(listener) => listener,
+            Err(e) => {
+                println!("[BackgroundServiceHelperManager::start] ERROR: Failed to bind socket: {}", e);
+                self.process_info.status = ProcessStatus::Failed;
+                self.process_info.consecutive_failures += 1;
+                return None;
+            }
+        };
+
+        if let Err(e) = listener.set_nonblocking(true) {
+            println!("[BackgroundServiceHelperManager::start] ERROR: Failed to set socket non-blocking: {}", e);
+            self.process_info.status = ProcessStatus::Failed;
+            self.process_info.consecutive_failures += 1;
+            return None;
+        }
+
+        // Get user info for socket ownership and process spawning
+        let userinfo = match User::from_name(user) {
+            Ok(Some(userinfo)) => userinfo,
+            _ => {
+                println!("[BackgroundServiceHelperManager::start] ERROR: Could not find user info for: {}", user);
+                self.process_info.status = ProcessStatus::Failed;
+                self.process_info.consecutive_failures += 1;
+                return None;
+            }
+        };
+
+        // Change ownership of the socket to the logged-in user
+        if let Err(e) = chown(std::path::Path::new(socket_path), Some(userinfo.uid), Some(userinfo.gid)) {
+            println!("[BackgroundServiceHelperManager::start] WARNING: Failed to change background service socket ownership: {}", e);
+            // Continue anyway, this is not critical
+        }
+
+        let fd = listener.as_raw_fd();
+        self.listener = Some(listener);
+
+        // Get environment variables using the bash script approach
+        let env_vars = get_env_from_session(user, leader_pid);
+        
+        let helper_path = "/usr/bin/tiny-dfr-background-service-helper";
+
+        // Check if helper binary exists
+        if !std::path::Path::new(helper_path).exists() {
+            self.process_info.status = ProcessStatus::Failed;
+            self.process_info.consecutive_failures += 1;
+            return None;
+        }
+
+        // Run as root but set the effective control over the process
+        let mut cmd = Command::new(helper_path);
+        
+        // Set the user ID and group ID for the process
+        cmd.uid(userinfo.uid.into());
+        cmd.gid(userinfo.gid.into());
+        
+        // Set the working directory to the user's home
+        if let Some(home) = env_vars.get("HOME") {
+            cmd.current_dir(home);
+        }
+        
+        // Set all the environment variables
+        for (key, value) in &env_vars {
+            cmd.env(key, value);
+        }
+
+        match cmd.spawn() {
+            Ok(child) => {
+                self.process = Some(child);
+                self.process_info.status = ProcessStatus::Running;
+                self.process_info.consecutive_failures = 0;
+                println!("[BackgroundServiceHelperManager::start] Background service helper started successfully for user: {}", user);
+                Some(fd)
+            }
+            Err(e) => {
+                println!("[BackgroundServiceHelperManager::start] ERROR: Failed to start background service helper: {}", e);
+                self.process_info.status = ProcessStatus::Failed;
+                self.process_info.consecutive_failures += 1;
+                None
+            }
+        }
+    }
+
+    pub fn stop(&mut self) {
+        if let Some(mut child) = self.process.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+            self.process_info.status = ProcessStatus::Stopped;
+            println!("[BackgroundServiceHelperManager::stop] Background service helper stopped");
+        }
+        
+        if let Some(listener) = self.listener.take() {
+            drop(listener);
+        }
+        
+        // Clean up socket file
+        let _ = fs::remove_file(&self.socket_path);
+    }
+
+    pub fn is_process_running(&mut self) -> bool {
+        if let Some(ref mut child) = self.process {
+            match child.try_wait() {
+                Ok(Some(_)) => false, // Process has exited
+                Ok(None) => true,     // Process is still running
+                Err(_) => false,      // Error checking process
+            }
+        } else {
+            false
+        }
+    }
+
+    pub fn is_process_none(&self) -> bool {
+        self.process.is_none()
+    }
+
+    pub fn get_process_info(&self) -> &ProcessInfo {
+        &self.process_info
+    }
+
+    pub fn set_auto_restart(&mut self, enabled: bool) {
+        self.auto_restart_enabled = enabled;
+    }
+
+    pub fn restart_if_needed(&mut self, user: &str, leader_pid: u32) -> Option<i32> {
+        if !self.auto_restart_enabled {
+            return None;
+        }
+
+        if self.process.is_some() && !self.is_process_running() {
+            println!("[BackgroundServiceHelperManager::restart_if_needed] Background service helper process died, restarting...");
+            self.stop();
+            return self.start(user, leader_pid);
+        }
+
+        None
+    }
+
+    pub fn force_cleanup(&mut self) {
+        if let Some(mut child) = self.process.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+            self.process_info.status = ProcessStatus::Stopped;
+        }
+        
+        if let Some(listener) = self.listener.take() {
+            drop(listener);
+        }
+        
+        // Clean up socket file
+        let _ = fs::remove_file(&self.socket_path);
+    }
+
+    pub fn accept_connection(&mut self) -> Option<UnixStream> {
+        if let Some(ref listener) = self.listener {
+            match listener.accept() {
+                Ok((stream, _)) => Some(stream),
+                Err(_) => None,
+            }
+        } else {
+            None
+        }
+    }
 }

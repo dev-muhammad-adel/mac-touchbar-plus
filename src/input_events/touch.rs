@@ -31,6 +31,7 @@ impl TouchEventHandler {
     media_player_drag_position: &mut Option<f64>,
     media_player_helper_stream: &mut Option<UnixStream>,
         browser_helper_stream: &mut Option<UnixStream>,
+        background_service_helper_stream: &mut Option<UnixStream>,
         needs_complete_redraw: &mut bool,
         cfg_enable_pixel_shift: bool,
     ) -> crate::MainResult<()> {
@@ -46,7 +47,7 @@ impl TouchEventHandler {
                     event, width, height, active_layer, layers,
                             current_window_class, app_ui_manager, media_player_touch_active,
         media_player_drag_position, media_player_helper_stream, browser_helper_stream,
-                    needs_complete_redraw, cfg_enable_pixel_shift, uinput
+                    background_service_helper_stream, needs_complete_redraw, cfg_enable_pixel_shift, uinput
                 )?;
                 
                 MediaTouchHandler::handle_touch_event(

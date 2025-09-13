@@ -28,7 +28,7 @@ use nix::{
         signal::{SaFlags, SigAction, SigHandler, SigSet, Signal},
     },
 };
-use std::io::{BufReader, Read, Write};
+use std::io::{BufReader, BufRead, Read, Write};
 use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
 
 use chrono::{Local, Timelike};
@@ -335,9 +335,7 @@ fn perform_redraw(
     needs_complete_redraw_ref: &mut bool,
 ) -> MainResult<()> {
     // Performance optimization: Only log redraws in debug mode
-    if DEBUG_LOGGING {
-        println!("[main] REDRAW TRIGGERED: needs_complete_redraw={}, any_changed={}, browser_buttons_changed={}", needs_complete_redraw, any_changed, browser_buttons_changed);
-    }
+ 
     
     let shift = if cfg.enable_pixel_shift {
         pixel_shift.get()
@@ -381,7 +379,6 @@ fn perform_redraw(
     // Performance monitoring
     let draw_time = start_time.elapsed();
     if DEBUG_LOGGING && draw_time > std::time::Duration::from_millis(FRAME_TARGET_MS as u64) {
-        println!("[main] SLOW DRAW: {:.2}ms (target: {}ms for 60fps)", draw_time.as_millis() as f64, FRAME_TARGET_MS);
     }
     
     *needs_complete_redraw_ref = false;
@@ -433,6 +430,8 @@ const EPOLL_DATA_MEDIA_PLAYER_LISTENER: u64 = 6;
 const EPOLL_DATA_MEDIA_PLAYER_STREAM: u64 = 7;
 const EPOLL_DATA_BROWSER_LISTENER: u64 = 8;
 const EPOLL_DATA_BROWSER_STREAM: u64 = 9;
+const EPOLL_DATA_BACKGROUND_SERVICE_LISTENER: u64 = 10;
+const EPOLL_DATA_BACKGROUND_SERVICE_STREAM: u64 = 11;
 
 // Timeout constants
 const TIMEOUT_MS: i32 = 10 * 1000;
@@ -453,7 +452,6 @@ const EVENTFD_BUFFER_SIZE: usize = 8;
 
 // Signal handler for graceful shutdown
 extern "C" fn signal_handler(_signal: i32) {
-    println!("[main] Received shutdown signal, exiting gracefully...");
     std::process::exit(0);
 }
 
@@ -496,7 +494,7 @@ pub mod view;
 pub mod services;
 pub mod helper;
 
-use crate::helper::manager::{HelperManager, MediaPlayerHelperManager, BrowserHelperManager};
+use crate::helper::manager::{HelperManager, MediaPlayerHelperManager, BrowserHelperManager, BackgroundServiceHelperManager};
 
 
 
@@ -604,9 +602,14 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
     let mut helper_manager = HelperManager::new();
     let mut media_player_helper_manager = MediaPlayerHelperManager::new();
     let mut browser_helper_manager = BrowserHelperManager::new();
+    let mut background_service_helper_manager = BackgroundServiceHelperManager::new();
     let mut browser_helper_listener_fd: Option<i32> = None;
     let mut browser_helper_stream: Option<UnixStream> = None;
     let mut browser_helper_reader: Option<BufReader<UnixStream>> = None;
+    let mut background_service_helper_listener_fd: Option<i32> = None;
+    let mut background_service_helper_stream: Option<UnixStream> = None;
+    let mut background_service_helper_reader: Option<BufReader<UnixStream>> = None;
+    let mut available_mpris_services: Vec<String> = Vec::new();
     
     // Add focus-based Media Player helper management
     let mut media_player_window_focused = false;
@@ -646,6 +649,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
     let mut app_ui_manager = AppUiManager::new();
     let mut media_player_touch_active = false; // Track if Media Player touch interaction is active
     let mut media_player_drag_position: Option<f64> = None; // Track current drag position for visual feedback
+    let mut background_service_drag_position: Option<f64> = None; // Track current drag position for background service visual feedback
     let mut previous_generic_media_enabled = false; // Track previous generic media state for redraw detection
 
     // --- main event loop ---
@@ -703,6 +707,91 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
         if generic_media_changed {
             previous_generic_media_enabled = app_ui_manager.generic_media_enabled;
             needs_complete_redraw = true;
+            
+            // Manage focus window helper based on generic media state
+            if app_ui_manager.generic_media_enabled {
+                // Generic media enabled - stop all helpers
+                
+                // Stop focus window helper
+                if helper_manager.is_process_running() {
+                    // Only stop if the helper is actually running
+                    if let Some(fd) = helper_listener_fd.take() {
+                        let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
+                        if let Err(e) = safe_epoll_delete(&epoll, &listener_fd_obj) {
+                            eprintln!("[main] Failed to remove focus window helper listener from epoll: {}", e);
+                        }
+                    }
+                    if let Some(stream) = helper_stream.take() {
+                        if let Err(e) = safe_epoll_delete(&epoll, &stream) {
+                            eprintln!("[main] Failed to remove focus window helper stream from epoll: {}", e);
+                        }
+                        helper_reader = None;
+                    }
+                    helper_manager.stop();
+                    if DEBUG_LOGGING {
+                        println!("[main] Stopped focus window helper - generic media enabled");
+                    }
+                }
+                
+                // Stop browser helper
+                if browser_helper_manager.is_process_running() {
+                    if let Some(stream) = browser_helper_stream.take() {
+                        if let Err(e) = safe_epoll_delete(&epoll, &stream) {
+                            eprintln!("[main] Failed to remove browser helper stream from epoll: {}", e);
+                        }
+                    }
+                    browser_helper_reader = None;
+                    if let Some(fd) = browser_helper_listener_fd.take() {
+                        let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
+                        if let Err(e) = safe_epoll_delete(&epoll, &listener_fd_obj) {
+                            eprintln!("[main] Failed to remove browser helper listener from epoll: {}", e);
+                        }
+                    }
+                    browser_helper_manager.stop();
+                    if DEBUG_LOGGING {
+                        println!("[main] Stopped browser helper - generic media enabled");
+                    }
+                }
+                
+                // Stop main media helper
+                if media_player_helper_manager.is_process_running() {
+                    if let Some(stream) = media_player_helper_stream.take() {
+                        if let Err(e) = safe_epoll_delete(&epoll, &stream) {
+                            eprintln!("[main] Failed to remove Media Player helper stream from epoll: {}", e);
+                        }
+                    }
+                    media_player_helper_reader = None;
+                    if let Some(fd) = media_player_helper_listener_fd.take() {
+                        let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
+                        if let Err(e) = safe_epoll_delete(&epoll, &listener_fd_obj) {
+                            eprintln!("[main] Failed to remove Media Player helper listener from epoll: {}", e);
+                        }
+                    }
+                    media_player_helper_manager.stop();
+                    if DEBUG_LOGGING {
+                        println!("[main] Stopped main media helper - generic media enabled");
+                    }
+                }
+            } else {
+                // Generic media disabled - restart focus window helper if user is logged in
+                if let Some(user) = &current_user {
+                    if helper_manager.is_process_none() {
+                        if let Some(fd) = helper_manager.start(user, current_session.as_ref().and_then(|s| s.leader).unwrap_or(0)) {
+                            let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
+                            if let Err(e) = safe_epoll_add(&epoll, &listener_fd_obj, EpollEvent::new(EpollFlags::EPOLLIN, EPOLL_DATA_HELPER_LISTENER)) {
+                                eprintln!("[main] Failed to add focus window helper listener to epoll: {}", e);
+                            } else {
+                                helper_listener_fd = Some(listener_fd_obj.into_raw_fd());
+                                if DEBUG_LOGGING {
+                                    println!("[main] Restarted focus window helper - generic media disabled");
+                                }
+                            }
+                        } else {
+                            eprintln!("[main] Failed to restart focus window helper for user: {}", user);
+                        }
+                    }
+                }
+            }
         }
         
         // Handle different types of redraws
@@ -752,9 +841,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                     let _ = nix::unistd::read(event_fd.as_raw_fd(), &mut buf);
                                     if let Ok(new_state) = event_rx.try_recv() {
                     // Performance optimization: Reduce logging in production
-                    if DEBUG_LOGGING {
-                        println!("[main] Received session event: {:?}", new_state);
-                    }
+               
                     
                     let session_changed = match &current_session {
                         Some(current) => current != &new_state,
@@ -764,71 +851,52 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                         }
                     };
                     
-                    if DEBUG_LOGGING {
-                        println!("[main] Session changed: {} (current: {:?}, new: {:?})", session_changed, current_session, new_state);
-                    }
+             
                     
                                             if session_changed {
                             if new_state.is_logged_in {
-                                if DEBUG_LOGGING {
-                                    println!("[main] User logged in: {}", new_state.user);
-                                }
+                          
                                 current_user = Some(new_state.user.clone());
                                 
                                 // Set login time and start delay
                                 helper_manager.set_login_time();
                                 
                                 // Don't start helper immediately - wait for delay to complete
-                                if DEBUG_LOGGING {
-                                    println!("[main] User logged in, starting 1 second delay before helper");
-                                }
+                             
                                 
                                 // Media Player helper will be started when Media Player window gains focus
                                 
                                 // Switch to Media layer when user logs in
                                 if active_layer != LayerKey::Media {
-                                    if DEBUG_LOGGING {
-                                        println!("[main] User logged in, switching from {:?} to Media layer", active_layer);
-                                    }
+                            
                                     active_layer = LayerKey::Media;
                                     needs_complete_redraw = true;
                                 }
                              } else {
-                                if DEBUG_LOGGING {
-                                    println!("[main] User logged out: {:?}", current_session);
-                                }
+                         
                                 if let Some(fd) = helper_listener_fd.take() {
-                                    if DEBUG_LOGGING {
-                                        println!("[main] Removing helper listener fd: {}", fd);
-                                    }
+                              
                                     let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
                                     if let Err(e) = safe_epoll_delete(&epoll, &listener_fd_obj) {
                                         eprintln!("[main] Failed to remove helper listener from epoll: {}", e);
                                     }
                                 }
                                 if let Some(stream) = helper_stream.take() {
-                                    if DEBUG_LOGGING {
-                                        println!("[main] Removing helper stream from epoll");
-                                    }
                                     if let Err(e) = safe_epoll_delete(&epoll, &stream) {
                                         eprintln!("[main] Failed to remove helper stream from epoll: {}", e);
                                     }
                                     helper_reader = None;
                                 }
                                 // Media Player helper will be stopped when Media Player window loses focus
-                                if DEBUG_LOGGING {
-                                    println!("[main] Stopping main helper");
-                                }
+                            
                                 helper_manager.stop();
                                 
                                 // Reset session ready state for next login
-                                // Reset login time is handled in stop() method
+                                helper_manager.reset_session_state();
                                 
                                 // Switch to Custom2 layer when user logs out
                                 if active_layer != LayerKey::Custom2 {
-                                    if DEBUG_LOGGING {
-                                        println!("[main] User logged out, switching from {:?} to Custom2 layer", active_layer);
-                                    }
+                               
                                     active_layer = LayerKey::Custom2;
                                     needs_complete_redraw = true;
                                 }
@@ -844,18 +912,15 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                             needs_complete_redraw = true;
                         } else {
                             if DEBUG_LOGGING {
-                                println!("[main] Session state unchanged, skipping redraw");
                             }
                         }
                     }
                 }
                 EPOLL_DATA_HELPER_LISTENER => { // Helper listener event
                     if DEBUG_LOGGING {
-                        println!("[main] Helper listener event triggered");
                     }
                     if let Some(stream) = helper_manager.accept_connection() {
                         if DEBUG_LOGGING {
-                            println!("[main] Helper connected to socket successfully");
                         }
                         if let Err(e) = safe_epoll_add(&epoll, &stream, EpollEvent::new(EpollFlags::EPOLLIN, EPOLL_DATA_HELPER_STREAM)) {
                             log_error("helper", "add stream to epoll", &e.to_string());
@@ -865,7 +930,6 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                             helper_reader = Some(BufReader::new(stream_clone));
                             helper_stream = Some(stream);
                             if DEBUG_LOGGING {
-                                println!("[main] Helper stream added to epoll and stored");
                             }
                         } else {
                             log_error("helper", "clone stream", "stream clone failed");
@@ -875,7 +939,6 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                         // Stop listening for new connections
                         if let Some(fd) = helper_listener_fd.take() {
                             if DEBUG_LOGGING {
-                                println!("[main] Removing helper listener fd: {} from epoll", fd);
                             }
                             let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
                             if let Err(e) = safe_epoll_delete(&epoll, &listener_fd_obj) {
@@ -884,7 +947,6 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                         }
                     } else {
                         if DEBUG_LOGGING {
-                            println!("[main] No helper connection available to accept");
                         }
                     }
                 }
@@ -995,7 +1057,9 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                    }
                                                    
                                                    if let Some(user) = &current_user {
-                                                       if let Some(fd) = media_player_helper_manager.start(user, current_session.as_ref().and_then(|s| s.leader).unwrap_or(0), class, window_id.unwrap_or(0), pid.unwrap_or(0)) {
+                                                       // Don't start the old media helper if generic media is enabled
+                                                       if !app_ui_manager.generic_media_enabled {
+                                                           if let Some(fd) = media_player_helper_manager.start(user, current_session.as_ref().and_then(|s| s.leader).unwrap_or(0), class, window_id.unwrap_or(0), pid.unwrap_or(0)) {
                                                            let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
                                                            if let Err(e) = safe_epoll_add(&epoll, &listener_fd_obj, EpollEvent::new(EpollFlags::EPOLLIN, 6)) {
                                                                eprintln!("[main] Failed to add Media Player helper listener to epoll: {}", e);
@@ -1004,6 +1068,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                            }
                                                        } else {
                                                            eprintln!("[main] Failed to start Media Player helper for user: {}", user);
+                                                       }
                                                        }
                                                    } else {
                                                        eprintln!("[main] No current user available for Media Player helper");
@@ -1382,6 +1447,132 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                         }
                     }
                 }
+                EPOLL_DATA_BACKGROUND_SERVICE_LISTENER => { // Background service helper listener event
+                    if let Some(mut stream) = background_service_helper_manager.accept_connection() {
+                        if let Err(e) = safe_stream_set_nonblocking(&stream, true) {
+                            eprintln!("[main] Failed to set background service helper stream non-blocking: {}", e);
+                            continue;
+                        }
+                        
+                        if DEBUG_LOGGING {
+                        }
+                        if let Err(e) = safe_epoll_add(&epoll, &stream, EpollEvent::new(EpollFlags::EPOLLIN, EPOLL_DATA_BACKGROUND_SERVICE_STREAM)) {
+                            eprintln!("[main] Failed to add background service helper stream to epoll: {}", e);
+                            continue;
+                        }
+                        if let Ok(stream_clone) = safe_stream_try_clone(&stream) {
+                            background_service_helper_reader = Some(BufReader::new(stream_clone));
+                            background_service_helper_stream = Some(stream);
+                        
+                        } else {
+                            eprintln!("[main] Failed to clone background service helper stream");
+                            continue;
+                        }
+                        
+                        // Stop listening for new connections
+                        if let Some(fd) = background_service_helper_listener_fd.take() {
+                        
+                            let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
+                            if let Err(e) = safe_epoll_delete(&epoll, &listener_fd_obj) {
+                                eprintln!("[main] Failed to remove background service helper listener from epoll: {}", e);
+                            }
+                        }
+                    } else {
+                        if DEBUG_LOGGING {
+                        }
+                    }
+                }
+                EPOLL_DATA_BACKGROUND_SERVICE_STREAM => { // Background service helper stream event
+                    if let Some(reader) = &mut background_service_helper_reader {
+                        loop {
+                           let mut line = String::new();
+                           match reader.read_line(&mut line) {
+                               Ok(0) => { // EOF
+                                   if let Some(stream) = background_service_helper_stream.take() {
+                                       if let Err(e) = safe_epoll_delete(&epoll, &stream) {
+                                           eprintln!("[main] Failed to remove background service helper stream from epoll: {}", e);
+                                       }
+                                   }
+                                   background_service_helper_reader = None;
+                                  
+                                   break;
+                               },
+                               Ok(_) => {
+                                   // Process the line (trim newline)
+                                   let data = line.trim();
+                               
+                                   
+                                   // Process available services message
+                                   if data.starts_with("list_services:") {
+                                       let services_str = data.strip_prefix("list_services:").unwrap_or("").trim();
+                                       if services_str.is_empty() {
+                                           available_mpris_services = Vec::new();
+                                           // Disable generic media when no services are available
+                                           app_ui_manager.generic_media_enabled = false;
+                                        
+                                       } else {
+                                           available_mpris_services = services_str.split(',').map(|s| s.to_string()).collect();
+                                       
+                                       }
+                                       app_ui_manager.update_available_services_list(available_mpris_services.clone());
+            needs_complete_redraw = true;
+
+                                   
+                                   }
+                                   // Process selected service message
+                                   else if data.starts_with("selected_service:") {
+                                       let selected_str = data.strip_prefix("selected_service:").unwrap_or("").trim();
+                                       if let Some(selected_index) = available_mpris_services.iter().position(|s| s == selected_str) {
+                                           app_ui_manager.generic_background_screen.selected_service_index = Some(selected_index);
+                                           if DEBUG_LOGGING {
+                                               println!("[main] Set selected service index to: {} for service: {}", selected_index, selected_str);
+                                           }
+                                       }
+                                   }
+                                   // Process media status updates (JSON format)
+                                   else if data.starts_with("{") && data.contains("is_playing") {
+                                       println!("[main] Received JSON status update: {}", data);
+                                       if let Ok(json_data) = serde_json::from_str::<serde_json::Value>(data) {
+                                           println!("[main] Parsed JSON successfully: {:?}", json_data);
+                                           if let (Some(is_playing), Some(position), Some(duration)) = (
+                                               json_data.get("is_playing").and_then(|v| v.as_bool()),
+                                               json_data.get("position").and_then(|v| v.as_f64()),
+                                               json_data.get("duration").and_then(|v| v.as_f64().map(|d| d as i64))
+                                           ) {
+                                               // Create MediaStatus and update generic background screen
+                                               let media_status = crate::helper::MediaStatus {
+                                                   is_playing,
+                                                   position,
+                                                   duration,
+                                               };
+                                               app_ui_manager.generic_background_screen.last_status = Some(media_status);
+                                               needs_complete_redraw = true;
+                                               println!("[main] Updated generic background screen with media status: playing={}, position={:.2}%", is_playing, position * 100.0);
+                                           } else {
+                                               println!("[main] Failed to extract fields from JSON: is_playing={:?}, position={:?}, duration={:?}", 
+                                                   json_data.get("is_playing"), json_data.get("position"), json_data.get("duration"));
+                                           }
+                                       } else {
+                                           println!("[main] Failed to parse JSON: {}", data);
+                                       }
+                                   }
+                               },
+                               Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                   break; // No more data right now
+                               },
+                               Err(_e) => {
+                                    if let Some(stream) = background_service_helper_stream.take() {
+                                        if let Err(e) = safe_epoll_delete(&epoll, &stream) {
+                                            eprintln!("[main] Failed to remove background service helper stream from epoll: {}", e);
+                                        }
+                                    }
+                                    background_service_helper_reader = None;
+                                    break;
+                                }
+                           }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -1418,6 +1609,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
         &mut media_player_drag_position,
         &mut media_player_helper_stream,
                 &mut browser_helper_stream,
+                &mut background_service_helper_stream,
                 &mut needs_complete_redraw,
                 cfg.enable_pixel_shift
             )?;
@@ -1450,9 +1642,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
         static FORCE_CLEANUP_COUNTER: AtomicU64 = AtomicU64::new(0);
         let counter = FORCE_CLEANUP_COUNTER.fetch_add(1, Ordering::Relaxed);
         if counter % FORCE_CLEANUP_INTERVAL == 0 { // Every FORCE_CLEANUP_INTERVAL frames (reduced frequency)
-                if DEBUG_LOGGING {
-                    println!("[main] Performing forced cleanup of zombie processes");
-                }
+            
                 // Wrap cleanup calls in error handling to prevent crashes
                 if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     helper_manager.force_cleanup();
@@ -1469,11 +1659,17 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                 })) {
                     eprintln!("[main] Error during browser helper manager cleanup: {:?}", e);
                 }
+                if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    background_service_helper_manager.force_cleanup();
+                })) {
+                    eprintln!("[main] Error during background service helper manager cleanup: {:?}", e);
+                }
         }
         
         // Check if we can start the helper now that session might be ready
+        // Only start helper if generic media is disabled (when enabled, helper should be stopped)
         if let Some(user) = &current_user {
-                            if helper_manager.is_process_none() && helper_manager.check_session_ready() {
+                            if helper_manager.is_process_none() && helper_manager.check_session_ready() && !app_ui_manager.generic_media_enabled {
                 if DEBUG_LOGGING {
                     println!("[main] Session is now ready, starting main helper for user: {}", user);
                 }
@@ -1492,6 +1688,29 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                     }
                 } else {
                     println!("[main] ERROR: Failed to start main helper for user: {}", user);
+                }
+            }
+            
+            // Start background service helper when user logs in (like focus_window_helper)
+            if background_service_helper_manager.is_process_none() {
+                if DEBUG_LOGGING {
+                    println!("[main] Starting background service helper for user: {}", user);
+                }
+                if let Some(fd) = background_service_helper_manager.start(user, current_session.as_ref().and_then(|s| s.leader).unwrap_or(0)) {
+                    if DEBUG_LOGGING {
+                        println!("[main] Background service helper started successfully, fd: {}", fd);
+                    }
+                    let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
+                    if let Err(e) = safe_epoll_add(&epoll, &listener_fd_obj, EpollEvent::new(EpollFlags::EPOLLIN, EPOLL_DATA_BACKGROUND_SERVICE_LISTENER)) {
+                        eprintln!("[main] Failed to add background service helper listener to epoll: {}", e);
+                    } else {
+                        background_service_helper_listener_fd = Some(listener_fd_obj.into_raw_fd());
+                        if DEBUG_LOGGING {
+                            println!("[main] Added background service helper listener to epoll with fd: {}", fd);
+                        }
+                    }
+                } else {
+                    println!("[main] ERROR: Failed to start background service helper for user: {}", user);
                 }
             }
         }

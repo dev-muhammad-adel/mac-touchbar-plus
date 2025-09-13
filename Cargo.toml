@@ -55,4 +55,7 @@ path = "src/helper/media_main.rs"
 name = "tiny-dfr-browser-helper"
 path = "src/helper/browser_helper.rs"
 
+[[bin]]
+name = "tiny-dfr-background-service-helper"
+path = "src/helper/background_service_helper.rs"
 

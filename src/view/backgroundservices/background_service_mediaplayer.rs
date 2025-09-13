@@ -127,16 +127,19 @@ pub enum BackgroundServicePlayerAction {
     Next,
     Previous,
     Seek(f64), // 0.0 to 1.0
+    DragHead(f64), // 0.0 to 1.0 - for dragging the progress bar head
 }
 
 pub struct BackgroundServicePlayer {
     pub last_status: Option<MediaStatus>,
+    pub is_dragging: bool,
 }
 
 impl BackgroundServicePlayer {
     pub fn new() -> Self {
         Self {
             last_status: None,
+            is_dragging: false,
         }
     }
 
@@ -148,6 +151,7 @@ impl BackgroundServicePlayer {
         width: f64,
         height: f64,
         mpris_name: &str,
+        drag_position: Option<f64>,
     ) {
         let padding = 15.0;
         let radius = 8.0; // Same radius as items
@@ -312,7 +316,8 @@ impl BackgroundServicePlayer {
             let progress_y = y + 6.0;
             let progress_h = height - 12.0;
             
-            draw_background_service_player_progressbar(c, progress_x, progress_y, progress_w, progress_h, status.position, anim_progress);
+            let head_position = drag_position.unwrap_or(status.position);
+            draw_background_service_player_progressbar(c, progress_x, progress_y, progress_w, progress_h, head_position, anim_progress);
             
             // Total time
             let total_time_x = progress_x + progress_w + time_margin;
@@ -344,7 +349,7 @@ impl BackgroundServicePlayer {
         c.restore().unwrap();
     }
 
-    pub fn hit_test_controls(&self, touch_x: f64, touch_y: f64, x: f64, y: f64, width: f64, height: f64) -> Option<BackgroundServicePlayerAction> {
+    pub fn hit_test_controls(&mut self, touch_x: f64, touch_y: f64, x: f64, y: f64, width: f64, height: f64) -> Option<BackgroundServicePlayerAction> {
         // Background service player UI layout: [current_time] [progress_bar] [total_time] [prev] [play/pause] [next]
         
         // 1. Control buttons on the right
@@ -408,10 +413,37 @@ impl BackgroundServicePlayer {
                 
                 // Calculate progress ratio based on touch position
                 let progress_ratio = (touch_x - progress_x) / progress_w;
+                
+                // Check if touch is on the progress bar head (within 15px of current position)
+                let current_position = status.position;
+                let head_x = progress_x + (progress_w * current_position);
+                let head_y = progress_y + progress_h / 2.0;
+                let head_width = 16.0; // Width of the head (8px radius * 2)
+                let head_height = 16.0; // Height of the head (8px radius * 2)
+                let distance_from_position = ((touch_x - head_x).powi(2) + (touch_y - head_y).powi(2)).sqrt();
+                
+                // If touch is on head or within 15px of current position, treat as drag
+                if (touch_x >= head_x && touch_x <= head_x + head_width &&
+                    touch_y >= head_y && touch_y <= head_y + head_height) ||
+                   distance_from_position <= 15.0 {
+                    self.is_dragging = true;
+                    return Some(BackgroundServicePlayerAction::DragHead(progress_ratio));
+                }
+                
+                // If we're already dragging, continue dragging regardless of position
+                if self.is_dragging {
+                    return Some(BackgroundServicePlayerAction::DragHead(progress_ratio));
+                }
+                
+                // For any other touch on progress bar, treat as seek
                 return Some(BackgroundServicePlayerAction::Seek(progress_ratio));
             }
         }
         
         None
+    }
+    
+    pub fn stop_dragging(&mut self) {
+        self.is_dragging = false;
     }
 }
