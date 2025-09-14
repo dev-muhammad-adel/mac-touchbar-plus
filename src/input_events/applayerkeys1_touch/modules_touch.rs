@@ -214,8 +214,14 @@ impl ModulesTouchHandler {
         match action {
             crate::view::generic_background_screen::GenericBackgroundAction::ToggleMprisItem(index) => {
                 app_ui_manager.generic_background_screen.toggle_mpris_item(index);
-                // Send selection command to background service helper
-                Self::send_background_service_command(background_service_helper_stream, &format!("select:{}", index))?;
+                // Send selection command to background service helper using the correct format
+                if let Some(service_name) = app_ui_manager.generic_background_screen.available_mpris_services.get(index) {
+                    let command = format!("select_service:{}\n", service_name);
+                    if let Some(stream) = background_service_helper_stream {
+                        stream.write_all(command.as_bytes())?;
+                        println!("[modules_touch] Sent service selection command: {}", command.trim());
+                    }
+                }
             }
             crate::view::generic_background_screen::GenericBackgroundAction::CloseGenericMedia => {
                 app_ui_manager.close_generic_media();

@@ -1514,7 +1514,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                            available_mpris_services = services_str.split(',').map(|s| s.to_string()).collect();
                                        
                                        }
-                                       app_ui_manager.update_available_services_list(available_mpris_services.clone());
+                                       app_ui_manager.update_available_services_list_with_auto_select(available_mpris_services.clone(), &mut background_service_helper_stream);
             needs_complete_redraw = true;
 
                                    
@@ -1530,6 +1530,34 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                        }
                                    }
                                    // Process media status updates (JSON format)
+                                   else if data.starts_with("status_update:") {
+                                       let json_str = data.strip_prefix("status_update:").unwrap_or("").trim();
+                                       println!("[main] Received status update: {}", json_str);
+                                       if let Ok(json_data) = serde_json::from_str::<serde_json::Value>(json_str) {
+                                           println!("[main] Parsed JSON successfully: {:?}", json_data);
+                                           if let (Some(is_playing), Some(position), Some(duration)) = (
+                                               json_data.get("is_playing").and_then(|v| v.as_bool()),
+                                               json_data.get("position").and_then(|v| v.as_f64()),
+                                               json_data.get("duration").and_then(|v| v.as_f64().map(|d| d as i64))
+                                           ) {
+                                               // Create MediaStatus and update generic background screen
+                                               let media_status = crate::helper::MediaStatus {
+                                                   is_playing,
+                                                   position,
+                                                   duration,
+                                               };
+                                               app_ui_manager.generic_background_screen.last_status = Some(media_status);
+                                               needs_complete_redraw = true;
+                                               println!("[main] Updated generic background screen with media status: playing={}, position={:.2}%", is_playing, position * 100.0);
+                                           } else {
+                                               println!("[main] Failed to extract fields from JSON: is_playing={:?}, position={:?}, duration={:?}", 
+                                                   json_data.get("is_playing"), json_data.get("position"), json_data.get("duration"));
+                                           }
+                                       } else {
+                                           println!("[main] Failed to parse JSON: {}", json_str);
+                                       }
+                                   }
+                                   // Process media status updates (JSON format) - legacy format
                                    else if data.starts_with("{") && data.contains("is_playing") {
                                        println!("[main] Received JSON status update: {}", data);
                                        if let Ok(json_data) = serde_json::from_str::<serde_json::Value>(data) {

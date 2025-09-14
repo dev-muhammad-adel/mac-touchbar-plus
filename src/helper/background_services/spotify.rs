@@ -91,7 +91,7 @@ fn should_ignore_position_update() -> bool {
 
 // Helper function to calculate seek offset
 fn calculate_seek_offset(current_status: &MediaStatus, target_position: f64) -> i64 {
-    let duration_microseconds = current_status.duration * MICROSECONDS_PER_SECOND;
+    let duration_microseconds = (current_status.duration * MICROSECONDS_PER_SECOND as f64) as i64;
     let target_position_microseconds = (target_position * duration_microseconds as f64) as i64;
     let current_position_microseconds = (current_status.position * duration_microseconds as f64) as i64;
     target_position_microseconds - current_position_microseconds
@@ -238,10 +238,43 @@ async fn get_status_from_dest_native(mpris_dest: &str) -> Option<MediaStatus> {
     let is_playing = playback_status == "Playing";
     let position_ratio = if duration_seconds > 0 { position_seconds / duration_seconds as f64 } else { 0.0 };
     
+    // Extract metadata fields
+    let title = metadata.get("xesam:title")
+        .and_then(|v| match v {
+            zbus::zvariant::Value::Str(s) => Some(s.as_str().to_string()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    
+    let artist = metadata.get("xesam:artist")
+        .and_then(|v| match v {
+            zbus::zvariant::Value::Array(arr) => {
+                let artists: Vec<String> = arr.iter()
+                    .filter_map(|item| match item {
+                        zbus::zvariant::Value::Str(s) => Some(s.as_str().to_string()),
+                        _ => None,
+                    })
+                    .collect();
+                Some(artists.join(", "))
+            },
+            _ => None,
+        })
+        .unwrap_or_default();
+    
+    let album = metadata.get("xesam:album")
+        .and_then(|v| match v {
+            zbus::zvariant::Value::Str(s) => Some(s.as_str().to_string()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    
     Some(MediaStatus {
         is_playing,
+        title,
+        artist,
+        album,
+        duration: duration_seconds as f64,
         position: position_ratio,
-        duration: duration_seconds,
     })
 }
 
@@ -312,18 +345,24 @@ async fn try_execute_command_on_destination_native(command: &str, args: &[&str],
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct MediaStatus {
-    is_playing: bool,
-    position: f64,
-    duration: i64,
+pub struct MediaStatus {
+    pub is_playing: bool,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub duration: f64,
+    pub position: f64,
 }
 
 impl MediaStatus {
     fn empty() -> Self {
         Self {
             is_playing: false,
+            title: String::new(),
+            artist: String::new(),
+            album: String::new(),
+            duration: 0.0,
             position: 0.0,
-            duration: 0,
         }
     }
 }
@@ -392,7 +431,7 @@ fn get_current_mpris_destination() -> String {
 
 // MPRIS service functions - no longer need Spotify-specific logic
 
-fn get_spotify_status() -> Option<MediaStatus> {
+pub fn get_spotify_status() -> Option<MediaStatus> {
     let mpris_dest = get_current_mpris_destination();
     log_info(&format!("Getting MPRIS status from: {}", mpris_dest));
     
@@ -409,7 +448,7 @@ fn get_spotify_status() -> Option<MediaStatus> {
 }
 
 // Async variant for use inside async DBus handlers (avoids block_on re-entry)
-async fn get_spotify_status_async() -> Option<MediaStatus> {
+pub async fn get_spotify_status_async() -> Option<MediaStatus> {
     let mpris_dest = get_current_mpris_destination();
     log_info(&format!("Getting MPRIS status from: {} (async)", mpris_dest));
     
@@ -621,7 +660,7 @@ pub fn monitor_spotify_events(status_sender: Arc<Mutex<Option<UnixStream>>>) {
             if is_playing {
                 // Get Spotify position using polling
                 if let Some(status) = get_spotify_status() {
-                    if status.is_playing && status.duration > 0 {
+                    if status.is_playing && status.duration > 0.0 {
                         // Check if we should ignore this position update due to recent seek
                         if !should_ignore_position_update() {
                             send_status_update(&position_sender, &status);
@@ -772,7 +811,7 @@ async fn process_spotify_properties_changed_signal_dbus(
                     
                     // Get current Spotify status and update position immediately
                     if let Some(mut status) = get_spotify_status_async().await {
-                        let duration = status.duration * MICROSECONDS_PER_SECOND; // Convert to microseconds
+                        let duration = (status.duration * MICROSECONDS_PER_SECOND as f64) as i64; // Convert to microseconds
                         status.position = if duration > 0 { position as f64 / duration as f64 } else { 0.0 };
                         
                         // Update shared playback state and send status

@@ -39,6 +39,45 @@ fn format_duration(seconds: i64) -> String {
     }
 }
 
+// Color mapping for different background services
+fn get_service_color(service_name: &str) -> (f64, f64, f64) {
+    let service_lower = service_name.to_lowercase();
+    
+    if service_lower.contains("spotify") {
+        // Spotify green #1DB954
+        (0.11, 0.73, 0.33)
+    } else if service_lower.contains("chromium") {
+        // Chromium blue #4285F4
+        (0.26, 0.52, 0.96)
+    } else if service_lower.contains("firefox") {
+        // Firefox orange #FF9500
+        (1.0, 0.58, 0.0)
+    } else if service_lower.contains("chrome") {
+        // Chrome blue #4285F4
+        (0.26, 0.52, 0.96)
+    } else if service_lower.contains("vlc") {
+        // VLC orange #FF8800
+        (1.0, 0.53, 0.0)
+    } else if service_lower.contains("mpv") {
+        // MPV red #FF0000
+        (1.0, 0.0, 0.0)
+    } else {
+        // Default purple for unknown services
+        (0.5, 0.3, 0.8)
+    }
+}
+
+// Draw a vertical separator line
+fn draw_separator(c: &Context, x: f64, y: f64, height: f64, anim_progress: f64) {
+    c.save().unwrap();
+    c.set_line_width(1.0);
+    c.set_source_rgba(0.0, 0.0, 0.0, anim_progress * 0.6); // Subtle gray separator
+    c.move_to(x, y);
+    c.line_to(x, y + height);
+    c.stroke().unwrap();
+    c.restore().unwrap();
+}
+
 pub fn draw_background_service_player_control_button(c: &Context, x: f64, y: f64, width: f64, height: f64, icon_path: &str, anim_progress: f64) {
     c.save().unwrap();
     
@@ -68,7 +107,7 @@ pub fn draw_background_service_player_control_button(c: &Context, x: f64, y: f64
     c.restore().unwrap();
 }
 
-pub fn draw_background_service_player_progressbar(c: &Context, x: f64, y: f64, width: f64, height: f64, progress: f64, anim_progress: f64) {
+pub fn draw_background_service_player_progressbar(c: &Context, x: f64, y: f64, width: f64, height: f64, progress: f64, anim_progress: f64, service_name: &str) {
     c.save().unwrap();
     
     // Progress bar background (dark gray)
@@ -86,8 +125,11 @@ pub fn draw_background_service_player_progressbar(c: &Context, x: f64, y: f64, w
     if progress > 0.0 {
         let fill_width = width * progress;
         let fill_gradient = cairo::LinearGradient::new(x, y, x + fill_width, y);
-        fill_gradient.add_color_stop_rgba(0.0, 0.11, 0.73, 0.33, anim_progress); // #1DB954 (background service player green)
-        fill_gradient.add_color_stop_rgba(1.0, 0.15, 0.8, 0.4, anim_progress); // Lighter green at end
+        
+        // Get service-specific color
+        let (r, g, b) = get_service_color(service_name);
+        fill_gradient.add_color_stop_rgba(0.0, r, g, b, anim_progress);
+        fill_gradient.add_color_stop_rgba(1.0, r + 0.1, g + 0.1, b + 0.1, anim_progress); // Lighter version at end
         let _ = c.set_source(&fill_gradient);
         
         c.new_sub_path();
@@ -111,8 +153,9 @@ pub fn draw_background_service_player_progressbar(c: &Context, x: f64, y: f64, w
         c.arc(head_x, head_y, head_radius, 0.0, 2.0 * std::f64::consts::PI);
         c.fill().unwrap();
         
-        // Green inner circle
-        c.set_source_rgba(0.11, 0.73, 0.33, anim_progress); // #1DB954 (background service player green)
+        // Service-specific colored inner circle
+        let (r, g, b) = get_service_color(service_name);
+        c.set_source_rgba(r, g, b, anim_progress);
         c.new_sub_path();
         c.arc(head_x, head_y, head_radius - 2.0, 0.0, 2.0 * std::f64::consts::PI);
         c.fill().unwrap();
@@ -242,7 +285,7 @@ impl BackgroundServicePlayer {
         
         // 1. Control buttons on the right
         let button_height = height * 0.9;
-        let button_width = button_height; // Circular
+        let button_width = button_height * 1.6; // Slightly wider than height
         let button_spacing = 20.0;
         
         // Calculate total width of all buttons
@@ -254,12 +297,20 @@ impl BackgroundServicePlayer {
         let prev_y = y + (height - button_height) / 2.0;
         draw_background_service_player_control_button(c, prev_x, prev_y, button_width, button_height, BACKGROUND_SERVICE_PREVIOUS_ICON_PATH, anim_progress);
         
+        // Separator between previous and play/pause buttons
+        let separator1_x = prev_x + button_width + (button_spacing / 2.0);
+        draw_separator(c, separator1_x, y, height, anim_progress);
+        
         // Play/Pause button (main button)
         let main_button_x = prev_x + button_width + button_spacing;
         let main_button_y = prev_y;
         let is_playing = self.last_status.as_ref().map(|s| s.is_playing).unwrap_or(false);
         let play_pause_icon = if is_playing { BACKGROUND_SERVICE_PAUSE_ICON_PATH } else { BACKGROUND_SERVICE_PLAY_ICON_PATH };
         draw_background_service_player_control_button(c, main_button_x, main_button_y, button_width, button_height, play_pause_icon, anim_progress);
+        
+        // Separator between play/pause and next buttons
+        let separator2_x = main_button_x + button_width + (button_spacing / 2.0);
+        draw_separator(c, separator2_x, y, height, anim_progress);
         
         // Next button
         let next_x = main_button_x + button_width + button_spacing;
@@ -299,8 +350,9 @@ impl BackgroundServicePlayer {
             let min_progress_width = 30.0;
             let progress_w = (available_width - estimated_current_time_width - estimated_total_time_width - time_margin * 2.0).max(min_progress_width);
             
-            // Current time
-            let current_time_x = content_start_x;
+            // Current time - centered
+            let current_time_area_width = estimated_current_time_width;
+            let current_time_x = content_start_x + (current_time_area_width - current_time_ext.width()) / 2.0;
             let current_time_y = y + (height + current_time_ext.height()) / 2.0;
             
             c.save().unwrap();
@@ -317,10 +369,11 @@ impl BackgroundServicePlayer {
             let progress_h = height - 12.0;
             
             let head_position = drag_position.unwrap_or(status.position);
-            draw_background_service_player_progressbar(c, progress_x, progress_y, progress_w, progress_h, head_position, anim_progress);
+            draw_background_service_player_progressbar(c, progress_x, progress_y, progress_w, progress_h, head_position, anim_progress, mpris_name);
             
-            // Total time
-            let total_time_x = progress_x + progress_w + time_margin;
+            // Total time - centered
+            let total_time_area_width = estimated_total_time_width;
+            let total_time_x = progress_x + progress_w + time_margin + (total_time_area_width - total_time_ext.width()) / 2.0;
             let total_time_y = y + (height + total_time_ext.height()) / 2.0;
             
             c.save().unwrap();
@@ -330,12 +383,18 @@ impl BackgroundServicePlayer {
             c.move_to(total_time_x, total_time_y);
             c.show_text(&total_time_str).unwrap();
             c.restore().unwrap();
+            
+            // Draw separator line between time display and control buttons
+            let separator_x = progress_x + progress_w + time_margin + estimated_total_time_width + 10.0; // 10px after total time area
+            draw_separator(c, separator_x, y, height, anim_progress);
         } else {
             // Show background service player text when no status available
             c.save().unwrap();
             c.set_font_size(16.0);
             c.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
-            c.set_source_rgba(0.11, 0.73, 0.33, anim_progress); // Background service player green
+            // Use service-specific color
+            let (r, g, b) = get_service_color(mpris_name);
+            c.set_source_rgba(r, g, b, anim_progress);
             
             let ext = c.text_extents("No media playing").unwrap();
             let text_x = content_start_x;
@@ -354,40 +413,34 @@ impl BackgroundServicePlayer {
         
         // 1. Control buttons on the right
         let button_height = height * 0.9;
-        let button_width = button_height; // Circular
+        let button_width = button_height * 1.6; // Slightly wider than height
         let button_spacing = 20.0;
         
         // Calculate total width of all buttons
         let total_buttons_width = (button_width * 3.0) + (button_spacing * 2.0);
         let buttons_start_x = x + width - total_buttons_width - 12.0; // 12px from right edge
         
-        // Previous button
+        // Previous button - rectangular hit test for oval buttons
         let prev_x = buttons_start_x;
         let prev_y = y + (height - button_height) / 2.0;
-        let prev_center_x = prev_x + button_width / 2.0;
-        let prev_center_y = prev_y + button_height / 2.0;
-        let prev_distance = ((touch_x - prev_center_x).powi(2) + (touch_y - prev_center_y).powi(2)).sqrt();
-        if prev_distance <= button_width / 2.0 {
+        if touch_x >= prev_x && touch_x <= prev_x + button_width && 
+           touch_y >= prev_y && touch_y <= prev_y + button_height {
             return Some(BackgroundServicePlayerAction::Previous);
         }
         
-        // Play/Pause button (main button)
+        // Play/Pause button (main button) - rectangular hit test for oval buttons
         let main_button_x = prev_x + button_width + button_spacing;
         let main_button_y = prev_y;
-        let main_center_x = main_button_x + button_width / 2.0;
-        let main_center_y = main_button_y + button_height / 2.0;
-        let main_distance = ((touch_x - main_center_x).powi(2) + (touch_y - main_center_y).powi(2)).sqrt();
-        if main_distance <= button_width / 2.0 {
+        if touch_x >= main_button_x && touch_x <= main_button_x + button_width && 
+           touch_y >= main_button_y && touch_y <= main_button_y + button_height {
             return Some(BackgroundServicePlayerAction::PlayPause);
         }
         
-        // Next button
+        // Next button - rectangular hit test for oval buttons
         let next_x = main_button_x + button_width + button_spacing;
         let next_y = prev_y;
-        let next_center_x = next_x + button_width / 2.0;
-        let next_center_y = next_y + button_height / 2.0;
-        let next_distance = ((touch_x - next_center_x).powi(2) + (touch_y - next_center_y).powi(2)).sqrt();
-        if next_distance <= button_width / 2.0 {
+        if touch_x >= next_x && touch_x <= next_x + button_width && 
+           touch_y >= next_y && touch_y <= next_y + button_height {
             return Some(BackgroundServicePlayerAction::Next);
         }
         

@@ -109,6 +109,17 @@ impl GenericBackgroundScreen {
             self.selected_service_index = None;
         }
     }
+    
+    // Method to update services and auto-select first service with command sending
+    pub fn update_available_services_with_auto_select(&mut self, services: Vec<String>, background_service_helper_stream: &mut Option<std::os::unix::net::UnixStream>) {
+        self.update_available_services(services);
+        
+        // If we auto-selected a service, send the selection command
+        if self.selected_service_index.is_some() && !self.available_mpris_services.is_empty() {
+            println!("[generic_background_screen] Auto-selecting first service and sending command");
+            self.send_selection_command(background_service_helper_stream);
+        }
+    }
 
     pub fn toggle_mpris_item(&mut self, index: usize) {
         println!("[generic_background_screen] ===== TOGGLE MPRIS ITEM =====");
@@ -417,6 +428,12 @@ impl GenericBackgroundScreen {
             self.draw_background_service_player_details(c, x, y, width, height, mpris_name, drag_position);
             return;
         }
+        if mpris_name.contains("chromium") {
+            self.draw_background_service_player_details(c, x, y, width, height, mpris_name, drag_position);
+            return;
+        }
+
+        
         
         // Default UI for non-background service MPRIS players
         let padding = 15.0;
@@ -504,11 +521,11 @@ impl GenericBackgroundScreen {
         c.stroke().unwrap();
         
    
-        c.set_source_rgba(1.0, 1.0, 1.0, 1.0); // Dark text value
-        c.set_font_size(14.0);
-        let dbus_value_y = y + (height - 14.0) / 2.0 + 6.0;
-        c.move_to(x + padding, dbus_value_y);
-        c.show_text(mpris_name).unwrap();
+        // c.set_source_rgba(1.0, 1.0, 1.0, 1.0); // Dark text value
+        // c.set_font_size(14.0);
+        // let dbus_value_y = y + (height - 14.0) / 2.0 + 6.0;
+        // c.move_to(x + padding, dbus_value_y);
+        // c.show_text(mpris_name).unwrap();
         
         c.restore().unwrap();
     }
@@ -661,12 +678,13 @@ impl GenericBackgroundScreen {
                    touch_y >= items_y && touch_y <= items_y + item_height {
                     // Check if this is a background service player and handle specific controls
                     if let Some(mpris_name) = mpris_names.get(index) {
-                        if mpris_name.contains("spotify") {
+                        if mpris_name.contains("spotify") || mpris_name.contains("chromium") {
                             if let Some(action) = self.hit_test_background_service_player_controls(touch_x, touch_y, detail_x, items_y, actual_detail_width, item_height) {
                                 return Some(action);
                             }
                         }
                     }
+                    // If no specific control was hit, toggle the item
                     return Some(GenericBackgroundAction::ToggleMprisItem(index));
                 }
                 // Move current_x to account for the expanded details (no gap)

@@ -8,20 +8,33 @@ use std::thread;
 use std::time::Duration;
 use std::sync::{Arc, Mutex};
 use std::collections::HashSet;
-use zbus::{Connection, Proxy};
+use zbus::Connection;
+use serde_json::json;
+use chrono;
 
 mod spotify {
     include!("background_services/spotify.rs");
 }
 
+mod chromium {
+    include!("background_services/chromium.rs");
+}
+
+mod mpris_manager {
+    include!("background_services/mpris_manager.rs");
+}
+
 // Import specific functions we need
-use spotify::set_current_mpris_service;
+use mpris_manager::MprisManager;
 
 // Dynamic list of available MPRIS background services
 static mut AVAILABLE_MPRIS_BACKGROUND: Vec<String> = Vec::new();
 
 // Dynamic selected MPRIS name for background service
 static mut SELECTED_BACKGROUND_SERVICE_MPRIS_NAME: Option<String> = None;
+
+// MPRIS Manager instance
+static mut MPRIS_MANAGER: Option<MprisManager> = None;
 
 // Function to query D-Bus for MPRIS services (filtered for Spotify and Chromium only)
 async fn query_mpris_services() -> Result<Vec<String>, Box<dyn std::error::Error>> {
@@ -94,16 +107,15 @@ fn set_selected_mpris_service(service: Option<String>) {
 // Function to update selected service with fallback logic
 fn update_selected_service_with_fallback() {
     unsafe {
-        if SELECTED_BACKGROUND_SERVICE_MPRIS_NAME.is_none() && !AVAILABLE_MPRIS_BACKGROUND.is_empty() {
-            // If nothing is selected and we have services, select the first one
-            SELECTED_BACKGROUND_SERVICE_MPRIS_NAME = Some(AVAILABLE_MPRIS_BACKGROUND[0].clone());
-            eprintln!("[background-service-helper] Auto-selected first MPRIS service: {:?}", SELECTED_BACKGROUND_SERVICE_MPRIS_NAME);
+        // Don't auto-select any service - wait for explicit selection
+        if SELECTED_BACKGROUND_SERVICE_MPRIS_NAME.is_none() {
+            eprintln!("[background-service-helper] No MPRIS service selected, waiting for explicit selection");
         }
     }
 }
 
 // Function to handle selection commands from the main app
-fn handle_selection_command(command: &str) {
+fn handle_selection_command(command: &str, status_sender: &Arc<Mutex<Option<UnixStream>>>) {
     println!("[background_service_helper] ===== COMMAND RECEIVED =====");
     println!("[background_service_helper] Raw command: '{}'", command);
     println!("[background_service_helper] Command length: {}", command.len());
@@ -118,12 +130,27 @@ fn handle_selection_command(command: &str) {
             println!("[background_service_helper] Action: Deselecting current service");
             set_selected_mpris_service(None);
         } else {
-            // Select specific service
+            // Select specific service using MPRIS manager
             println!("[background_service_helper] Action: Selecting service '{}'", service_name);
             set_selected_mpris_service(Some(service_name.to_string()));
             
-            // Update the spotify module to use the selected service
-            update_spotify_media_player(service_name);
+            // Use MPRIS manager to select service
+            unsafe {
+                if let Some(ref mut manager) = MPRIS_MANAGER {
+                    if let Err(e) = manager.select_service(service_name) {
+                        eprintln!("[background_service_helper] Failed to select service: {}", e);
+                        return;
+                    }
+                    
+                    // Send status update immediately
+                    manager.send_status_update(status_sender);
+                    
+                    // Send service change notification
+                    send_service_change_notification(status_sender, service_name);
+                } else {
+                    eprintln!("[background_service_helper] MPRIS manager not initialized");
+                }
+            }
         }
     } else {
         println!("[background_service_helper] Unknown command type, ignoring");
@@ -137,24 +164,44 @@ async fn handle_media_control_command(command: &str, status_sender: &Arc<Mutex<O
         let action = command.strip_prefix("media_action:").unwrap_or("").trim();
         println!("[background_service_helper] Received media action: {}", action);
         
-        // Get the currently selected service
-        let selected_service = get_selected_mpris_service();
-        if let Some(service) = selected_service {
-            // Update the spotify module to use the selected MPRIS service
-            update_spotify_media_player(&service);
-            
-            // Use the existing spotify command handler for all MPRIS services
-            spotify::handle_spotify_command(action, status_sender).await;
-        } else {
-            println!("[background_service_helper] No service selected for media action: {}", action);
+        // Use MPRIS manager to execute command
+        unsafe {
+            if let Some(ref mut manager) = MPRIS_MANAGER {
+                let success = manager.execute_command(action);
+                if success {
+                    println!("[background_service_helper] Command executed successfully");
+                    // Send status update after command
+                    manager.send_status_update(status_sender);
+                } else {
+                    println!("[background_service_helper] Command execution failed");
+                }
+            } else {
+                eprintln!("[background_service_helper] MPRIS manager not initialized");
+            }
         }
     }
 }
 
-// Function to update the spotify module with the selected MPRIS service
-fn update_spotify_media_player(service: &str) {
-    // Use the new function to set the MPRIS service directly
-    set_current_mpris_service(service);
+// These functions are now handled by the MPRIS manager
+
+// Function to send service change notification to UI
+fn send_service_change_notification(status_sender: &Arc<Mutex<Option<UnixStream>>>, service_name: &str) {
+    if let Ok(mut sender_guard) = status_sender.lock() {
+        if let Some(ref mut stream) = *sender_guard {
+            let notification = json!({
+                "type": "service_changed",
+                "service": service_name,
+                "timestamp": chrono::Utc::now().timestamp_millis(),
+            });
+            
+            let message = format!("service_change:{}\n", serde_json::to_string(&notification).unwrap_or_default());
+            if let Err(e) = stream.write_all(message.as_bytes()) {
+                eprintln!("[background_service_helper] Failed to send service change notification: {}", e);
+            } else {
+                println!("[background_service_helper] Sent service change notification for: {}", service_name);
+            }
+        }
+    }
 }
 
 // Function to monitor D-Bus for service changes and update MPRIS services
@@ -246,18 +293,20 @@ async fn main() -> std::io::Result<()> {
     
     eprintln!("[background-service-helper] Starting background service monitoring...");
     
+    // Initialize MPRIS manager
+    unsafe {
+        MPRIS_MANAGER = Some(MprisManager::new());
+        eprintln!("[background-service-helper] MPRIS manager initialized");
+    }
+    
     // Initialize MPRIS services by querying D-Bus
     match query_mpris_services().await {
         Ok(services) => {
             eprintln!("[background-service-helper] Found MPRIS services: {:?}", services);
             update_available_mpris_services(services);
             
-            // Auto-select the first MPRIS service if available
-            if let Some(first_service) = get_available_mpris_services().first() {
-                eprintln!("[background-service-helper] Auto-selecting first MPRIS service: {:?}", first_service);
-                set_selected_mpris_service(Some(first_service.clone()));
-                update_spotify_media_player(first_service);
-            }
+            // Don't auto-select any service - wait for explicit selection
+            eprintln!("[background-service-helper] Available MPRIS services found, waiting for explicit selection");
         }
         Err(e) => {
             eprintln!("[background-service-helper] Failed to query initial MPRIS services: {}", e);
@@ -303,13 +352,14 @@ async fn main() -> std::io::Result<()> {
     // Start event monitoring in a separate thread
     let status_sender_clone = status_sender.clone();
     thread::spawn(move || {
-        // Log the selected service before starting monitoring
-        if let Some(selected_service) = get_selected_mpris_service() {
-            println!("[background_service_helper] Starting monitoring with selected service: {}", selected_service);
-        } else {
-            println!("[background_service_helper] Starting monitoring with no selected service");
+        // Use MPRIS manager to start monitoring
+        unsafe {
+            if let Some(ref mut manager) = MPRIS_MANAGER {
+                manager.start_monitoring(status_sender_clone);
+            } else {
+                println!("[background_service_helper] MPRIS manager not initialized, not starting monitoring");
+            }
         }
-        spotify::monitor_spotify_events(status_sender_clone);
     });
     
     let mut last_logged_selection = None;
@@ -336,9 +386,17 @@ async fn main() -> std::io::Result<()> {
                     if !command.is_empty() {
                         eprintln!("[background-service-helper] Received command: {}", command);
                         // Handle selection commands
-                        handle_selection_command(command);
+                        if command.starts_with("select_service:") {
+                            handle_selection_command(command, &status_sender);
+                        }
                         // Handle media control commands
-                        handle_media_control_command(command, &status_sender).await;
+                        else if command.starts_with("media_action:") {
+                            handle_media_control_command(command, &status_sender).await;
+                        }
+                        // Handle other commands
+                        else {
+                            eprintln!("[background-service-helper] Unknown command type: {}", command);
+                        }
                     }
                 }
             }

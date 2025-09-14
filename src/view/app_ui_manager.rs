@@ -50,6 +50,10 @@ impl AppUiManager {
         self.generic_background_screen.update_available_services(services);
     }
     
+    pub fn update_available_services_list_with_auto_select(&mut self, services: Vec<String>, background_service_helper_stream: &mut Option<std::os::unix::net::UnixStream>) {
+        self.generic_background_screen.update_available_services_with_auto_select(services, background_service_helper_stream);
+    }
+    
     pub fn handle_generic_background_action(&mut self, action: GenericBackgroundAction, background_service_helper_stream: &mut Option<std::os::unix::net::UnixStream>) {
         match action {
             GenericBackgroundAction::ToggleMprisItem(index) => {
