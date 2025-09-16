@@ -193,22 +193,48 @@ impl HelperManager {
 
     pub fn stop(&mut self) {
         if let Some(mut child) = self.process.take() {
-            println!("[HelperManager::stop] Stopping helper process with PID: {}", child.id());
+            let pid = child.id() as i32;
+            println!("[HelperManager::stop] Force killing helper process with PID: {}", pid);
             
-            // Kill the entire process group to handle D-Bus connections and child processes
-            let result = unsafe { libc::killpg(child.id() as i32, libc::SIGTERM) };
-            if result != 0 {
+            // Try multiple approaches to kill the process
+            let mut killed = false;
+            
+            // Method 1: Try to kill the process directly
+            let kill_result = unsafe { libc::kill(pid, libc::SIGKILL) };
+            if kill_result == 0 {
+                killed = true;
+                println!("[HelperManager::stop] Sent SIGKILL to process {}", pid);
+            } else {
                 let errno = std::io::Error::last_os_error();
-                // Only log error if it's not "No such process" (process already dead)
+                println!("[HelperManager::stop] Failed to send SIGKILL to process {}: {}", pid, errno);
+            }
+            
+            // Method 2: Try to kill the process group
+            let killpg_result = unsafe { libc::killpg(pid, libc::SIGKILL) };
+            if killpg_result == 0 {
+                killed = true;
+                println!("[HelperManager::stop] Sent SIGKILL to process group {}", pid);
+            } else {
+                let errno = std::io::Error::last_os_error();
                 if errno.raw_os_error() != Some(3) { // ESRCH = 3
-                    println!("[HelperManager::stop] WARNING: Failed to send SIGTERM: {}", errno);
+                    println!("[HelperManager::stop] Failed to send SIGKILL to process group {}: {}", pid, errno);
                 }
             }
             
-            // Wait a bit for graceful shutdown (async like other helpers)
-            let _ = std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(500));
+            // Method 3: Use the Child's kill method as fallback
+            if !killed {
+                if let Err(e) = child.kill() {
+                    println!("[HelperManager::stop] Failed to kill process using Child::kill(): {}", e);
+                } else {
+                    println!("[HelperManager::stop] Killed process using Child::kill()");
+                }
+            }
+            
+            // Spawn a thread to handle the cleanup asynchronously
+            std::thread::spawn(move || {
+                // Wait for the process to actually die
                 let _ = child.wait();
+                println!("[HelperManager::stop] Helper process cleanup completed");
             });
         }
         

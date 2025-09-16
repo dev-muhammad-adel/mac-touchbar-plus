@@ -121,6 +121,17 @@ pub fn draw_background_service_player_progressbar(c: &Context, x: f64, y: f64, w
     c.close_path();
     c.fill().unwrap();
     
+    // Black border around progress bar
+    c.set_source_rgba(0.0, 0.0, 0.0, anim_progress);
+    c.set_line_width(1.0);
+    c.new_sub_path();
+    c.arc(x + width - radius, y + radius, radius, (-90.0f64).to_radians(), (0.0f64).to_radians());
+    c.arc(x + width - radius, y + height - radius, radius, (0.0f64).to_radians(), (90.0f64).to_radians());
+    c.arc(x + radius, y + height - radius, radius, (90.0f64).to_radians(), (180.0f64).to_radians());
+    c.arc(x + radius, y + radius, radius, (180.0f64).to_radians(), (270.0f64).to_radians());
+    c.close_path();
+    c.stroke().unwrap();
+    
     // Progress fill with background service player green gradient
     if progress > 0.0 {
         let fill_width = width * progress;

@@ -3,34 +3,37 @@
 
 use std::sync::{Arc, Mutex};
 use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::io::Write;
 use serde_json::json;
 use chrono;
 
-// Include the actual service implementations
-mod spotify {
-    include!("spotify.rs");
+// Helper functions to check if services are active (delegated to service modules)
+pub fn is_spotify_active() -> bool {
+    spotify::is_spotify_active()
 }
 
-mod chromium {
-    include!("chromium.rs");
+pub fn is_chromium_active() -> bool {
+    chromium::is_chromium_active()
 }
+
+// Use external service modules (they are siblings in the same binary)
+use super::spotify;
+use super::chromium;
 
 // Trait for MPRIS service implementations
 pub trait MprisService {
     fn set_service_name(&mut self, service_name: &str);
     fn get_service_name(&self) -> Option<String>;
     fn get_status(&self) -> Option<MediaStatus>;
-    fn execute_command(&self, command: &str) -> bool;
+    fn execute_command(&self, command: &str, status_sender: Arc<Mutex<Option<UnixStream>>>) -> bool;
     fn start_monitoring(&self, status_sender: Arc<Mutex<Option<UnixStream>>>);
+    fn stop_monitoring(&self);
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MediaStatus {
     pub is_playing: bool,
-    pub title: String,
-    pub artist: String,
-    pub album: String,
     pub duration: f64,
     pub position: f64,
 }
@@ -39,9 +42,6 @@ impl MediaStatus {
     pub fn empty() -> Self {
         Self {
             is_playing: false,
-            title: String::new(),
-            artist: String::new(),
-            album: String::new(),
             duration: 0.0,
             position: 0.0,
         }
@@ -70,10 +70,33 @@ impl MprisManager {
         }
     }
 
-    pub fn select_service(&self, service_name: &str) -> Result<(), String> {
+    pub fn select_service(&self, service_name: &str, status_sender: Arc<Mutex<Option<UnixStream>>>) -> Result<(), String> {
         println!("[mpris_manager] Selecting service: {}", service_name);
         
+        // Stop monitoring for the currently selected service first
+        let current_type = self.current_service_type.lock().unwrap();
+        match current_type.as_ref() {
+            Some(ServiceType::Spotify) => {
+                println!("[mpris_manager] Stopping previous Spotify monitoring");
+                spotify::set_spotify_active(false);
+                spotify::stop_spotify_monitoring();
+            }
+            Some(ServiceType::Chromium) => {
+                println!("[mpris_manager] Stopping previous Chromium monitoring");
+                chromium::set_chromium_active(false);
+                chromium::stop_chromium_monitoring();
+            }
+            None => {
+                println!("[mpris_manager] No previous service to stop");
+            }
+        }
+        drop(current_type);
+        
         if service_name.contains("spotify") {
+            // Set Spotify as active
+            spotify::set_spotify_active(true);
+            chromium::set_chromium_active(false);
+            
             let mut spotify = self.spotify_service.lock().unwrap();
             spotify.set_service_name(service_name);
             drop(spotify);
@@ -83,8 +106,16 @@ impl MprisManager {
             drop(current_type);
             
             println!("[mpris_manager] Selected Spotify service: {}", service_name);
+            
+            // Start monitoring for the newly selected service
+            spotify::start_spotify_monitoring(status_sender);
+            
             Ok(())
         } else if service_name.contains("chromium") {
+            // Set Chromium as active
+            chromium::set_chromium_active(true);
+            spotify::set_spotify_active(false);
+            
             let mut chromium = self.chromium_service.lock().unwrap();
             chromium.set_service_name(service_name);
             drop(chromium);
@@ -94,6 +125,10 @@ impl MprisManager {
             drop(current_type);
             
             println!("[mpris_manager] Selected Chromium service: {}", service_name);
+            
+            // Start monitoring for the newly selected service
+            chromium::start_chromium_monitoring(status_sender);
+            
             Ok(())
         } else {
             Err(format!("Unknown service type: {}", service_name))
@@ -119,19 +154,19 @@ impl MprisManager {
         }
     }
 
-    pub fn execute_command(&self, command: &str) -> bool {
+    pub fn execute_command(&self, command: &str, status_sender: Arc<Mutex<Option<UnixStream>>>) -> bool {
         let current_type = self.current_service_type.lock().unwrap();
         
         match current_type.as_ref() {
             Some(ServiceType::Spotify) => {
                 println!("[mpris_manager] Executing command on Spotify: {}", command);
                 let spotify = self.spotify_service.lock().unwrap();
-                spotify.execute_command(command)
+                spotify.execute_command(command, status_sender)
             }
             Some(ServiceType::Chromium) => {
                 println!("[mpris_manager] Executing command on Chromium: {}", command);
                 let chromium = self.chromium_service.lock().unwrap();
-                chromium.execute_command(command)
+                chromium.execute_command(command, status_sender)
             }
             None => {
                 println!("[mpris_manager] No service selected for command: {}", command);
@@ -160,22 +195,38 @@ impl MprisManager {
         }
     }
 
+    pub fn stop_monitoring(&self) {
+        let current_type = self.current_service_type.lock().unwrap();
+        
+        match current_type.as_ref() {
+            Some(ServiceType::Spotify) => {
+                println!("[mpris_manager] Stopping Spotify monitoring");
+                let spotify = self.spotify_service.lock().unwrap();
+                spotify.stop_monitoring();
+            }
+            Some(ServiceType::Chromium) => {
+                println!("[mpris_manager] Stopping Chromium monitoring");
+                let chromium = self.chromium_service.lock().unwrap();
+                chromium.stop_monitoring();
+            }
+            None => {
+                println!("[mpris_manager] No service selected, not stopping monitoring");
+            }
+        }
+    }
+
     pub fn send_status_update(&self, status_sender: &Arc<Mutex<Option<UnixStream>>>) {
         if let Some(status) = self.get_current_status() {
-            println!("[mpris_manager] Retrieved status: is_playing={}, title='{}', artist='{}'", 
-                status.is_playing, status.title, status.artist);
+            println!("[mpris_manager] Retrieved status: is_playing={}, duration={}, position={}", 
+                status.is_playing, status.duration, status.position);
             
             if let Ok(mut sender_guard) = status_sender.lock() {
                 if let Some(ref mut stream) = *sender_guard {
-                    let status_json = serde_json::to_string(&json!({
+                    let status_json = json!({
                         "is_playing": status.is_playing,
-                        "title": status.title,
-                        "artist": status.artist,
-                        "album": status.album,
                         "duration": status.duration,
                         "position": status.position,
-                        "timestamp": chrono::Utc::now().timestamp_millis(),
-                    })).unwrap_or_default();
+                    });
                     
                     let message = format!("status_update:{}\n", status_json);
                     let _ = stream.write_all(message.as_bytes());
@@ -231,9 +282,6 @@ impl MprisService for SpotifyService {
                 if let Some(spotify_status) = spotify::get_spotify_status_async().await {
                     Some(MediaStatus {
                         is_playing: spotify_status.is_playing,
-                        title: spotify_status.title,
-                        artist: spotify_status.artist,
-                        album: spotify_status.album,
                         duration: spotify_status.duration,
                         position: spotify_status.position,
                     })
@@ -246,7 +294,7 @@ impl MprisService for SpotifyService {
         result.join().unwrap_or(None)
     }
 
-    fn execute_command(&self, command: &str) -> bool {
+    fn execute_command(&self, command: &str, status_sender: Arc<Mutex<Option<UnixStream>>>) -> bool {
         println!("[spotify_service] Executing command: {}", command);
         
         let command = command.to_string();
@@ -254,8 +302,6 @@ impl MprisService for SpotifyService {
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
-                // Create a dummy status sender for command execution
-                let status_sender = Arc::new(Mutex::new(None));
                 spotify::handle_spotify_command(&command, &status_sender).await;
             });
         });
@@ -265,7 +311,12 @@ impl MprisService for SpotifyService {
 
     fn start_monitoring(&self, status_sender: Arc<Mutex<Option<UnixStream>>>) {
         println!("[spotify_service] Starting monitoring");
-        spotify::monitor_spotify_events(status_sender);
+        spotify::start_spotify_monitoring(status_sender);
+    }
+    
+    fn stop_monitoring(&self) {
+        println!("[spotify_service] Stopping monitoring");
+        spotify::stop_spotify_monitoring();
     }
 }
 
@@ -303,9 +354,6 @@ impl MprisService for ChromiumService {
                 if let Some(chromium_status) = chromium::get_chromium_status().await {
                     Some(MediaStatus {
                         is_playing: chromium_status.is_playing,
-                        title: chromium_status.title,
-                        artist: chromium_status.artist,
-                        album: chromium_status.album,
                         duration: chromium_status.duration,
                         position: chromium_status.position,
                     })
@@ -318,7 +366,7 @@ impl MprisService for ChromiumService {
         result.join().unwrap_or(None)
     }
 
-    fn execute_command(&self, command: &str) -> bool {
+    fn execute_command(&self, command: &str, status_sender: Arc<Mutex<Option<UnixStream>>>) -> bool {
         println!("[chromium_service] Executing command: {}", command);
         
         let command = command.to_string();
@@ -326,8 +374,6 @@ impl MprisService for ChromiumService {
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
-                // Create a dummy status sender for command execution
-                let status_sender = Arc::new(Mutex::new(None));
                 chromium::handle_chromium_command(&command, &status_sender).await;
             });
         });
@@ -337,6 +383,11 @@ impl MprisService for ChromiumService {
 
     fn start_monitoring(&self, status_sender: Arc<Mutex<Option<UnixStream>>>) {
         println!("[chromium_service] Starting monitoring");
-        chromium::monitor_chromium_events(status_sender);
+        chromium::start_chromium_monitoring(status_sender);
+    }
+    
+    fn stop_monitoring(&self) {
+        println!("[chromium_service] Stopping monitoring");
+        chromium::stop_chromium_monitoring();
     }
 }

@@ -494,7 +494,7 @@ pub mod view;
 pub mod services;
 pub mod helper;
 
-use crate::helper::manager::{HelperManager, MediaPlayerHelperManager, BrowserHelperManager, BackgroundServiceHelperManager};
+use crate::helper::manager::{HelperManager, MediaPlayerHelperManager, BrowserHelperManager, BackgroundServiceHelperManager, ProcessStatus};
 
 
 
@@ -713,8 +713,8 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                 // Generic media enabled - stop all helpers
                 
                 // Stop focus window helper
-                if helper_manager.is_process_running() {
-                    // Only stop if the helper is actually running
+                if !helper_manager.is_process_none() {
+                    // Stop if the helper process exists (regardless of status)
                     if let Some(fd) = helper_listener_fd.take() {
                         let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
                         if let Err(e) = safe_epoll_delete(&epoll, &listener_fd_obj) {
@@ -772,8 +772,32 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                         println!("[main] Stopped main media helper - generic media enabled");
                     }
                 }
+                
+                // Start MPRIS monitoring in background service helper
+                if let Some(ref mut stream) = background_service_helper_stream {
+                    if let Err(e) = stream.write_all(b"start_mpris_monitoring\n") {
+                        eprintln!("[main] Failed to send start_mpris_monitoring command: {}", e);
+                    } else {
+                        if DEBUG_LOGGING {
+                            println!("[main] Sent start_mpris_monitoring command - generic media enabled");
+                        }
+                    }
+                }
             } else {
-                // Generic media disabled - restart focus window helper if user is logged in
+                // Generic media disabled - stop MPRIS monitoring and restart focus window helper
+                
+                // Stop MPRIS monitoring in background service helper
+                if let Some(ref mut stream) = background_service_helper_stream {
+                    if let Err(e) = stream.write_all(b"stop_mpris_monitoring\n") {
+                        eprintln!("[main] Failed to send stop_mpris_monitoring command: {}", e);
+                    } else {
+                        if DEBUG_LOGGING {
+                            println!("[main] Sent stop_mpris_monitoring command - generic media disabled");
+                        }
+                    }
+                }
+                
+                // Restart focus window helper if user is logged in
                 if let Some(user) = &current_user {
                     if helper_manager.is_process_none() {
                         if let Some(fd) = helper_manager.start(user, current_session.as_ref().and_then(|s| s.leader).unwrap_or(0)) {
@@ -1141,7 +1165,9 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                    
                                                    
                                                    if let Some(user) = &current_user {
-                                                       if let Some(fd) = browser_helper_manager.start(user, current_session.as_ref().and_then(|s| s.leader).unwrap_or(0), class, window_id.unwrap_or(0), pid.unwrap_or(0)) {
+                                                       // Don't start browser helper if generic media is enabled
+                                                       if !app_ui_manager.generic_media_enabled {
+                                                           if let Some(fd) = browser_helper_manager.start(user, current_session.as_ref().and_then(|s| s.leader).unwrap_or(0), class, window_id.unwrap_or(0), pid.unwrap_or(0)) {
                                                            let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
                                                            if let Err(e) = safe_epoll_add(&epoll, &listener_fd_obj, EpollEvent::new(EpollFlags::EPOLLIN, 8)) {
                                                                eprintln!("[main] Failed to add browser helper listener to epoll: {}", e);
@@ -1150,6 +1176,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                            }
                                                        } else {
                                                            eprintln!("[main] Failed to start browser helper for user: {}", user);
+                                                       }
                                                        }
                                                    } else {
                                                        eprintln!("[main] No current user available for browser helper");
@@ -1201,12 +1228,15 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                    
                                                    // Start new helper for the new browser type
                                                    if let Some(user) = &current_user {
-                                                       if let Some(fd) = browser_helper_manager.start(user, current_session.as_ref().and_then(|s| s.leader).unwrap_or(0), class, window_id.unwrap_or(0), pid.unwrap_or(0)) {
+                                                       // Don't start browser helper if generic media is enabled
+                                                       if !app_ui_manager.generic_media_enabled {
+                                                           if let Some(fd) = browser_helper_manager.start(user, current_session.as_ref().and_then(|s| s.leader).unwrap_or(0), class, window_id.unwrap_or(0), pid.unwrap_or(0)) {
                                                            let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
                                                            if let Err(e) = safe_epoll_add(&epoll, &listener_fd_obj, EpollEvent::new(EpollFlags::EPOLLIN, 8)) {
                                                                eprintln!("[main] Failed to add browser helper listener to epoll: {}", e);
                                                            } else {
                                                                browser_helper_listener_fd = Some(listener_fd_obj.into_raw_fd());
+                                                           }
                                                            }
                                                        }
                                                    } else {
@@ -1522,12 +1552,15 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                    // Process selected service message
                                    else if data.starts_with("selected_service:") {
                                        let selected_str = data.strip_prefix("selected_service:").unwrap_or("").trim();
-                                       if let Some(selected_index) = available_mpris_services.iter().position(|s| s == selected_str) {
-                                           app_ui_manager.generic_background_screen.selected_service_index = Some(selected_index);
-                                           if DEBUG_LOGGING {
-                                               println!("[main] Set selected service index to: {} for service: {}", selected_index, selected_str);
-                                           }
-                                       }
+                                       println!("[main] ===== PROCESSING SELECTED SERVICE MESSAGE =====");
+                                       println!("[main] Received selected_service: {}", selected_str);
+                                       println!("[main] Current selected_service_name: {:?}", app_ui_manager.generic_background_screen.selected_service_name);
+                                       
+                                       app_ui_manager.generic_background_screen.selected_service_name = Some(selected_str.to_string());
+                                       
+                                       println!("[main] Set selected service name to: {}", selected_str);
+                                       println!("[main] selected_service_name is now: {:?}", app_ui_manager.generic_background_screen.selected_service_name);
+                                       println!("[main] ===== END PROCESSING SELECTED SERVICE MESSAGE =====");
                                    }
                                    // Process media status updates (JSON format)
                                    else if data.starts_with("status_update:") {

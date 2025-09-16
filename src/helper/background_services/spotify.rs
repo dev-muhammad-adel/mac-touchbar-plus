@@ -23,7 +23,54 @@ use std::thread;
 use std::time::Duration;
 
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use serde_json::json;
+// Global state to track if Spotify is active
+static SPOTIFY_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+// Global state to track monitoring thread
+static mut SPOTIFY_MONITORING_THREAD: Option<std::thread::JoinHandle<()>> = None;
+
+// Helper function to check if Spotify is active
+pub fn is_spotify_active() -> bool {
+    SPOTIFY_ACTIVE.load(Ordering::SeqCst)
+}
+
+// Helper function to set Spotify as active
+pub fn set_spotify_active(active: bool) {
+    SPOTIFY_ACTIVE.store(active, Ordering::SeqCst);
+}
+
+// Helper function to start Spotify monitoring
+pub fn start_spotify_monitoring(status_sender: Arc<Mutex<Option<UnixStream>>>) {
+    // Stop any existing monitoring thread
+    stop_spotify_monitoring();
+    
+    // Set Spotify as active before starting monitoring
+    set_spotify_active(true);
+    
+    // Start new monitoring thread
+    let handle = std::thread::spawn(move || {
+        monitor_spotify_events(status_sender);
+    });
+    
+    unsafe {
+        SPOTIFY_MONITORING_THREAD = Some(handle);
+    }
+}
+
+// Helper function to stop Spotify monitoring
+pub fn stop_spotify_monitoring() {
+    unsafe {
+        if let Some(handle) = SPOTIFY_MONITORING_THREAD.take() {
+            println!("[spotify-helper] Stopping Spotify monitoring thread");
+            // Set the flag to false so the thread knows to exit
+            SPOTIFY_ACTIVE.store(false, Ordering::SeqCst);
+            // Give the thread a moment to exit naturally
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+}
 
 // DBus imports for native MPRIS communication
 use zbus::{Connection, MessageType, MessageStream, MatchRule, Proxy};
@@ -144,6 +191,12 @@ async fn update_and_send_status(
     is_playing: bool,
     status: MediaStatus
 ) {
+    // Check if Spotify is still the active service before sending updates
+    if !is_spotify_active() {
+        println!("[spotify-helper] Spotify is no longer active, not sending status update");
+        return;
+    }
+    
     // Update shared playback state
     if let Ok(mut state) = playback_state.lock() {
         state.0 = is_playing;
@@ -618,6 +671,14 @@ pub async fn handle_spotify_command(command: &str, status_sender: &Arc<Mutex<Opt
 }
 
 pub fn monitor_spotify_events(status_sender: Arc<Mutex<Option<UnixStream>>>) {
+    println!("[spotify-helper] Starting Spotify monitoring thread");
+    
+    // Check if Spotify is still the active service
+    if !is_spotify_active() {
+        println!("[spotify-helper] Spotify is no longer active, stopping monitoring");
+        return;
+    }
+    
     // Spotify-specific event monitoring with position polling
     
     // Check initial Spotify status
@@ -648,6 +709,12 @@ pub fn monitor_spotify_events(status_sender: Arc<Mutex<Option<UnixStream>>>) {
     // Start Spotify position polling thread - Spotify needs polling for smooth updates
     thread::spawn(move || {
         loop {
+            // Check if Spotify is still the active service
+            if !is_spotify_active() {
+                println!("[spotify-helper] Spotify is no longer active, stopping position polling");
+                break;
+            }
+            
             // Check if currently playing from shared state
             let is_playing = {
                 if let Ok(state) = playback_state_clone.lock() {
@@ -685,9 +752,8 @@ pub fn monitor_spotify_events(status_sender: Arc<Mutex<Option<UnixStream>>>) {
         let result = run_spotify_dbus_event_monitor(status_sender_clone.clone(), playback_state_clone.clone());
         
         if let Err(e) = result {
-            log_error("Spotify DBus event monitor", &format!("Failed: {}, restarting...", e));
-            thread::sleep(Duration::from_millis(1000));
-            monitor_spotify_events(status_sender_clone);
+            log_error("Spotify DBus event monitor", &format!("Failed: {}", e));
+            // Don't restart - let the thread exit naturally
         }
     });
 }
@@ -709,6 +775,8 @@ fn run_spotify_dbus_event_monitor(
         let dbus_proxy = DBusProxy::new(&connection).await?;
         
         // Subscribe to MPRIS signals specifically for Spotify
+        let current_mpris_dest = get_current_mpris_destination();
+        let bus_name = zbus::names::BusName::try_from(current_mpris_dest.as_str())?;
         let rules = vec![
             // PropertiesChanged signals for playback status, position, metadata
             MatchRule::builder()
@@ -716,6 +784,7 @@ fn run_spotify_dbus_event_monitor(
                 .interface("org.freedesktop.DBus.Properties")?
                 .path_namespace("/org/mpris/MediaPlayer2")?
                 .member("PropertiesChanged")?
+                .sender(bus_name.as_str())?
                 .build(),
         ];
         
@@ -730,6 +799,12 @@ fn run_spotify_dbus_event_monitor(
         
         // Process incoming DBus messages
         while let Some(msg) = stream.next().await {
+            // Check if Spotify is still the active service
+            if !is_spotify_active() {
+                println!("[spotify-helper] Spotify is no longer active, stopping monitoring");
+                break;
+            }
+            
             let msg = msg?;
             let header = msg.header()?;
             
@@ -778,6 +853,12 @@ async fn process_spotify_properties_changed_signal_dbus(
     status_sender: &Arc<Mutex<Option<UnixStream>>>,
     playback_state: &Arc<Mutex<(bool, MediaStatus)>>
 ) {
+    // Check if Spotify is still the active service before processing
+    if !is_spotify_active() {
+        println!("[spotify-helper] Spotify is no longer active, ignoring properties changed signal");
+        return;
+    }
+    
     // Process changed properties from DBus signal for Spotify
     for (prop_name, prop_value) in changed_props {
         match prop_name.as_str() {
@@ -840,7 +921,7 @@ async fn process_spotify_properties_changed_signal_dbus(
     }
 }
 
-fn send_status_update(status_sender: &Arc<Mutex<Option<UnixStream>>>, status: &MediaStatus) {
+pub fn send_status_update(status_sender: &Arc<Mutex<Option<UnixStream>>>, status: &MediaStatus) {
     if let Ok(mut sender_guard) = status_sender.lock() {
         if let Some(ref mut stream) = *sender_guard {
             let status_json = json!({
@@ -849,7 +930,8 @@ fn send_status_update(status_sender: &Arc<Mutex<Option<UnixStream>>>, status: &M
                 "duration": status.duration
             });
             
-            if let Err(e) = stream.write_all(format!("{}\n", status_json.to_string()).as_bytes()) {
+            let message = format!("status_update:{}\n", status_json.to_string());
+            if let Err(e) = stream.write_all(message.as_bytes()) {
                 log_error("Status update", &e.to_string());
             }
         }

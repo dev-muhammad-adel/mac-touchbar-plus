@@ -22,16 +22,59 @@ use std::io::Write;
 use std::thread;
 
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use serde_json::json;
-use chrono;
+// Global state to track if Chromium is active
+static CHROMIUM_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+// Global state to track monitoring thread
+static mut CHROMIUM_MONITORING_THREAD: Option<std::thread::JoinHandle<()>> = None;
+
+// Helper function to check if Chromium is active
+pub fn is_chromium_active() -> bool {
+    CHROMIUM_ACTIVE.load(Ordering::SeqCst)
+}
+
+// Helper function to set Chromium as active
+pub fn set_chromium_active(active: bool) {
+    CHROMIUM_ACTIVE.store(active, Ordering::SeqCst);
+}
+
+// Helper function to start Chromium monitoring
+pub fn start_chromium_monitoring(status_sender: Arc<Mutex<Option<UnixStream>>>) {
+    // Stop any existing monitoring thread
+    stop_chromium_monitoring();
+    
+    // Set Chromium as active before starting monitoring
+    set_chromium_active(true);
+    
+    // Start new monitoring thread
+    let handle = std::thread::spawn(move || {
+        monitor_chromium_events(status_sender);
+    });
+    
+    unsafe {
+        CHROMIUM_MONITORING_THREAD = Some(handle);
+    }
+}
+
+// Helper function to stop Chromium monitoring
+pub fn stop_chromium_monitoring() {
+    unsafe {
+        if let Some(handle) = CHROMIUM_MONITORING_THREAD.take() {
+            println!("[chromium-helper] Stopping Chromium monitoring thread");
+            // Set the flag to false so the thread knows to exit
+            CHROMIUM_ACTIVE.store(false, Ordering::SeqCst);
+            // Give the thread a moment to exit naturally
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+}
 
 // MediaStatus struct for Chromium
 #[derive(Clone, Debug)]
 pub struct MediaStatus {
     pub is_playing: bool,
-    pub title: String,
-    pub artist: String,
-    pub album: String,
     pub duration: f64,
     pub position: f64,
 }
@@ -73,6 +116,12 @@ lazy_static! {
     static ref CURRENT_MPRIS_SERVICE: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     static ref LAST_KNOWN_POSITION: Arc<Mutex<f64>> = Arc::new(Mutex::new(0.0));
     static ref LAST_POSITION_UPDATE: Arc<Mutex<std::time::Instant>> = Arc::new(Mutex::new(std::time::Instant::now()));
+    // Shared playback state for position polling (is_playing, MediaStatus)
+    static ref PLAYBACK_STATE: Arc<Mutex<(bool, MediaStatus)>> = Arc::new(Mutex::new((false, MediaStatus {
+        is_playing: false,
+        duration: 0.0,
+        position: 0.0,
+    })));
 }
 
 // Function to get or create a DBus connection
@@ -230,35 +279,8 @@ pub async fn get_chromium_status_with_delay(delay_ms: u64) -> Option<MediaStatus
         .await
         .unwrap_or_else(|_| HashMap::new());
     
-    // Extract metadata fields
-    let title = metadata.get("xesam:title")
-        .and_then(|v| match v {
-            zbus::zvariant::Value::Str(s) => Some(s.as_str().to_string()),
-            _ => None,
-        })
-        .unwrap_or_default();
+
     
-    let artist = metadata.get("xesam:artist")
-        .and_then(|v| match v {
-            zbus::zvariant::Value::Array(arr) => {
-                let artists: Vec<String> = arr.iter()
-                    .filter_map(|item| match item {
-                        zbus::zvariant::Value::Str(s) => Some(s.as_str().to_string()),
-                        _ => None,
-                    })
-                    .collect();
-                Some(artists.join(", "))
-            },
-            _ => None,
-        })
-        .unwrap_or_default();
-    
-    let album = metadata.get("xesam:album")
-        .and_then(|v| match v {
-            zbus::zvariant::Value::Str(s) => Some(s.as_str().to_string()),
-            _ => None,
-        })
-        .unwrap_or_default();
     
     let duration = metadata.get("mpris:length")
         .and_then(|v| match v {
@@ -277,70 +299,85 @@ pub async fn get_chromium_status_with_delay(delay_ms: u64) -> Option<MediaStatus
         })
         .unwrap_or(0.0);
     
-    // Chromium's MPRIS Position property is unreliable - it often shows the full duration
-    // even when not at the end. We need to implement our own position tracking.
+    // Chromium's MPRIS Position property has quirks:
+    // 1. SetPosition/Seek don't update position immediately when paused
+    // 2. Position only updates during actual playback
+    // 3. We need to track position ourselves and sync with MPRIS during playback
     let position_ratio = if duration > 0.0 {
         let current_time = std::time::Instant::now();
         let mut last_position = LAST_KNOWN_POSITION.lock().unwrap();
         let mut last_update = LAST_POSITION_UPDATE.lock().unwrap();
         
-        // If the MPRIS position looks reasonable (not equal to duration), use it
-        if position_seconds < duration - 1.0 {
-            // MPRIS position looks valid, use it
-            let ratio = position_seconds / duration;
-            let clamped_ratio = if ratio > 1.0 { 1.0 } else if ratio < 0.0 { 0.0 } else { ratio };
-            *last_position = clamped_ratio;
+        // Always check MPRIS position first, regardless of play state
+        let mpris_ratio = position_seconds / duration;
+        let mpris_valid = mpris_ratio >= 0.0 && mpris_ratio <= 1.0;
+        
+        println!("[chromium-helper] DEBUG: Position calculation - position_seconds={}, duration={}, ratio={}, is_playing={}", 
+            position_seconds, duration, mpris_ratio, is_playing);
+        println!("[chromium-helper] DEBUG: MPRIS valid: {}, last_position: {}", mpris_valid, *last_position);
+        
+        if mpris_valid {
+            // MPRIS position looks valid, use it and update our tracking
+            *last_position = mpris_ratio;
             *last_update = current_time;
-            clamped_ratio
+            println!("[chromium-helper] DEBUG: Using MPRIS position: {}", mpris_ratio);
+            mpris_ratio
+        } else if is_playing {
+            // During playback, MPRIS position is invalid, use our tracking
+            let elapsed = current_time.duration_since(*last_update).as_secs_f64();
+            let new_position = (*last_position + elapsed / duration).min(1.0);
+            *last_position = new_position;
+            *last_update = current_time;
+            println!("[chromium-helper] DEBUG: Using tracked position during playback: {}", new_position);
+            new_position
         } else {
-            // MPRIS position is unreliable, use our tracking
-            if is_playing {
-                // If playing, advance position based on time elapsed
-                let elapsed = current_time.duration_since(*last_update).as_secs_f64();
-                let new_position = (*last_position + elapsed / duration).min(1.0);
-                *last_position = new_position;
-                *last_update = current_time;
-                new_position
-            } else {
-                // If paused, keep the last known position
-                *last_position
-            }
+            // When paused and MPRIS is invalid, use our tracked position
+            println!("[chromium-helper] DEBUG: Using tracked position when paused: {}", *last_position);
+            *last_position
         }
     } else {
         0.0
     };
     
-    println!("[chromium-helper] DEBUG: Position calculation - position_seconds={}, duration={}, ratio={}, is_playing={}", 
-        position_seconds, duration, position_ratio, is_playing);
-    
     Some(MediaStatus {
         is_playing,
-        title,
-        artist,
-        album,
         duration,
         position: position_ratio,
     })
 }
 
 // Function to send status update
-fn send_status_update(status_sender: &Arc<Mutex<Option<UnixStream>>>, status: &MediaStatus) {
+pub fn send_status_update(status_sender: &Arc<Mutex<Option<UnixStream>>>, status: &MediaStatus) {
     if let Ok(mut sender_guard) = status_sender.lock() {
         if let Some(ref mut stream) = *sender_guard {
-            let status_json = serde_json::to_string(&json!({
+            let status_json = json!({
                 "is_playing": status.is_playing,
-                "title": status.title,
-                "artist": status.artist,
-                "album": status.album,
-                "duration": status.duration,
                 "position": status.position,
-                "timestamp": chrono::Utc::now().timestamp_millis(),
-            })).unwrap_or_default();
+                "duration": status.duration
+            });
             
             let message = format!("status_update:{}\n", status_json);
             let _ = stream.write_all(message.as_bytes());
         }
     }
+}
+
+// Helper function to update and send status (similar to Spotify)
+async fn update_and_send_status(
+    status_sender: &Arc<Mutex<Option<UnixStream>>>,
+    playback_state: &Arc<Mutex<(bool, MediaStatus)>>,
+    is_playing: bool,
+    status: MediaStatus,
+) {
+    // Update shared playback state
+    if let Ok(mut state) = playback_state.lock() {
+        state.0 = is_playing;
+        state.1 = status.clone();
+    }
+    
+    // Send status update
+    send_status_update(status_sender, &status);
+    println!("[chromium-helper] Position polling update: {:.2}%", status.position * 100.0);
 }
 
 // Function to handle Chromium commands
@@ -365,36 +402,20 @@ pub async fn handle_chromium_command(action: &str, status_sender: &Arc<Mutex<Opt
         "play_pause" => {
             if let Err(e) = toggle_play_pause(&service_name).await {
                 eprintln!("[chromium-helper] Failed to toggle play/pause: {}", e);
-            } else {
-                // After play/pause, wait a bit for MPRIS properties to update
-                // and then send a status update
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                if let Some(status) = get_chromium_status_with_delay(0).await {
-                    send_status_update(status_sender, &status);
-                }
             }
+            // Status update will be sent automatically by D-Bus monitoring
         }
         "play" => {
             if let Err(e) = play(&service_name).await {
                 eprintln!("[chromium-helper] Failed to play: {}", e);
-            } else {
-                // After play, wait a bit for MPRIS properties to update
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                if let Some(status) = get_chromium_status_with_delay(0).await {
-                    send_status_update(status_sender, &status);
-                }
             }
+            // Status update will be sent automatically by D-Bus monitoring
         }
         "pause" => {
             if let Err(e) = pause(&service_name).await {
                 eprintln!("[chromium-helper] Failed to pause: {}", e);
-            } else {
-                // After pause, wait a bit for MPRIS properties to update
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                if let Some(status) = get_chromium_status_with_delay(0).await {
-                    send_status_update(status_sender, &status);
-                }
             }
+            // Status update will be sent automatically by D-Bus monitoring
         }
         "next" => {
             if let Err(e) = next_track(&service_name).await {
@@ -426,6 +447,14 @@ pub async fn handle_chromium_command(action: &str, status_sender: &Arc<Mutex<Opt
                 if let Ok(position) = position_str.parse::<f64>() {
                     if let Err(e) = seek(&service_name, position).await {
                         eprintln!("[chromium-helper] Failed to seek: {}", e);
+                    } else {
+                        // Send status update immediately after seek completes
+                        // Use the position we just set instead of waiting for MPRIS to update
+                        if let Some(mut status) = get_chromium_status().await {
+                            // Update the position to what we just set
+                            status.position = position;
+                            send_status_update(status_sender, &status);
+                        }
                     }
                 } else {
                     eprintln!("[chromium-helper] Invalid seek position: {}", position_str);
@@ -439,6 +468,14 @@ pub async fn handle_chromium_command(action: &str, status_sender: &Arc<Mutex<Opt
                 if let Ok(position) = position_str.parse::<f64>() {
                     if let Err(e) = set_position(&service_name, position).await {
                         eprintln!("[chromium-helper] Failed to set position: {}", e);
+                    } else {
+                        // Send status update immediately after set_position completes
+                        // Use the position we just set instead of waiting for MPRIS to update
+                        if let Some(mut status) = get_chromium_status().await {
+                            // Update the position to what we just set
+                            status.position = position;
+                            send_status_update(status_sender, &status);
+                        }
                     }
                 } else {
                     eprintln!("[chromium-helper] Invalid position: {}", position_str);
@@ -603,11 +640,19 @@ async fn seek(service_name: &str, position: f64) -> Result<(), Box<dyn std::erro
         return Err("Cannot seek: no duration available".into());
     }
     
+    // Get track ID from metadata (required for SetPosition)
+    let track_id = metadata.get("mpris:trackid")
+        .and_then(|v| match v {
+            zbus::zvariant::Value::ObjectPath(path) => Some(path.clone()),
+            _ => None,
+        })
+        .ok_or("No track ID available for seeking")?;
+    
     // Convert position ratio to microseconds based on duration
     let position_us = (position * duration as f64) as i64;
-    proxy.call_method("Seek", &(position_us,)).await?;
+    proxy.call_method("SetPosition", &(track_id, position_us)).await?;
     
-    // Update our position tracking
+    // Update our position tracking immediately
     {
         let mut last_position = LAST_KNOWN_POSITION.lock().unwrap();
         let mut last_update = LAST_POSITION_UPDATE.lock().unwrap();
@@ -668,59 +713,79 @@ async fn set_position(service_name: &str, position: f64) -> Result<(), Box<dyn s
 
 // Function to monitor Chromium events and send status updates
 pub fn monitor_chromium_events(status_sender: Arc<Mutex<Option<UnixStream>>>) {
+    println!("[chromium-helper] Starting Chromium monitoring thread");
+    
+    // Check if Chromium is still the active service
+    if !is_chromium_active() {
+        println!("[chromium-helper] Chromium is no longer active, stopping monitoring");
+        return;
+    }
+    
     thread::spawn(move || {
         let rt = Runtime::new().unwrap();
         rt.block_on(async {
-            let mut last_service = None;
-            let mut monitoring_task: Option<tokio::task::JoinHandle<()>> = None;
-            
-            loop {
-                // Check if the service has changed
-                let current_service = get_current_mpris_service();
-                if current_service != last_service {
-                    println!("[chromium-helper] Service changed from {:?} to {:?}, restarting event monitoring", 
-                        last_service, current_service);
-                    
-                    // Cancel the old monitoring task if it exists
-                    if let Some(task) = monitoring_task.take() {
-                        task.abort();
-                    }
-                    
-                    // Start new monitoring task for the new service
-                    if current_service.is_some() {
-                        println!("[chromium-helper] Starting event monitoring task for service: {:?}", current_service);
-                        let status_sender_clone = status_sender.clone();
-                        monitoring_task = Some(tokio::spawn(async move {
-                            println!("[chromium-helper] Event monitoring task started");
-                            if let Err(e) = monitor_chromium_events_async(status_sender_clone).await {
-                                eprintln!("[chromium-helper] Error in Chromium event monitoring: {}", e);
-                            }
-                        }));
-                    }
-                    
-                    last_service = current_service.clone();
-                }
-                
-                // Wait a bit before checking again
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            if let Err(e) = monitor_chromium_events_async(status_sender).await {
+                    eprintln!("[chromium-helper] Error in Chromium event monitoring: {}", e);
             }
         });
     });
 }
 
 async fn monitor_chromium_events_async(status_sender: Arc<Mutex<Option<UnixStream>>>) -> Result<(), Box<dyn std::error::Error>> {
+    // Check if Chromium is still the active service
+    if !is_chromium_active() {
+        println!("[chromium-helper] Chromium is no longer active, stopping monitoring");
+        return Ok(());
+    }
+    
     let connection = get_dbus_connection().await?;
     let mut stream = MessageStream::from(&connection);
     let dbus_proxy = DBusProxy::new(&connection).await?;
     
-    // Start a periodic status check as a fallback (every 5 seconds)
+    // Get initial status immediately to avoid "no media" on startup
+    if let Some(initial_status) = get_chromium_status().await {
+        let is_playing = initial_status.is_playing;
+        let position = initial_status.position;
+        let duration = initial_status.duration;
+        
+        update_and_send_status(&status_sender, &PLAYBACK_STATE, is_playing, initial_status).await;
+        println!("[chromium-helper] Initial status sent: playing={}, position={:.2}%, duration={:.1}s", 
+            is_playing, position * 100.0, duration);
+    }
+    
+    // Start smart position polling for Chromium when playing (similar to Spotify)
     let status_sender_clone = status_sender.clone();
+    let playback_state = PLAYBACK_STATE.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
         loop {
-            interval.tick().await;
-            if let Some(status) = get_chromium_status().await {
-                send_status_update(&status_sender_clone, &status);
+            // Check if Chromium is still the active service
+            if !is_chromium_active() {
+                println!("[chromium-helper] Chromium is no longer active, stopping position polling");
+                break;
+            }
+            
+            // Check if currently playing from shared state
+            let is_playing = {
+                if let Ok(state) = playback_state.lock() {
+                    state.0
+                } else {
+                    false
+                }
+            };
+            
+            if is_playing {
+                // Get Chromium position using polling when playing
+                if let Some(status) = get_chromium_status().await {
+                    if status.is_playing && status.duration > 0.0 {
+                        update_and_send_status(&status_sender_clone, &playback_state, status.is_playing, status).await;
+                    }
+                }
+                
+                // Poll every 100ms for smooth progress updates (like Spotify)
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            } else {
+                // Not playing - sleep longer and wait for events
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
             }
         }
     });
@@ -735,6 +800,18 @@ async fn monitor_chromium_events_async(status_sender: Arc<Mutex<Option<UnixStrea
     let service_name = current_service.unwrap();
     println!("[chromium-helper] Monitoring events for service: {}", service_name);
     
+    // Get the D-Bus unique name for the service
+    let bus_name = zbus::names::BusName::try_from(service_name.as_str())?;
+    let unique_name = match dbus_proxy.get_name_owner(bus_name).await {
+        Ok(name) => name,
+        Err(e) => {
+            eprintln!("[chromium-helper] Error getting name owner for {}: {}", service_name, e);
+            return Ok(());
+        }
+    };
+    
+    println!("[chromium-helper] Service {} has unique name: {}", service_name, unique_name);
+    
     let rules = vec![
         // PropertiesChanged signals for playback status, position, metadata
         MatchRule::builder()
@@ -742,36 +819,38 @@ async fn monitor_chromium_events_async(status_sender: Arc<Mutex<Option<UnixStrea
             .interface("org.freedesktop.DBus.Properties")?
             .path_namespace("/org/mpris/MediaPlayer2")?
             .member("PropertiesChanged")?
-            .sender(service_name.as_str())?
-            .build(),
-        // Also listen to all MPRIS signals to see what's available
-        MatchRule::builder()
-            .msg_type(MessageType::Signal)
-            .path_namespace("/org/mpris/MediaPlayer2")?
-            .build(),
-        // Listen to ALL signals from Chromium to see what it sends
-        MatchRule::builder()
-            .msg_type(MessageType::Signal)
-            .sender(service_name.as_str())?
+            .sender(unique_name.as_str())?
             .build(),
     ];
     
     // Add all match rules
-    for rule in rules {
-        if let Err(e) = dbus_proxy.add_match_rule(rule).await {
-            eprintln!("[chromium-helper] Failed to add match rule: {}", e);
+    for (i, rule) in rules.iter().enumerate() {
+        if let Err(e) = dbus_proxy.add_match_rule(rule.clone()).await {
+            eprintln!("[chromium-helper] Failed to add match rule {}: {}", i, e);
+        } else {
+            println!("[chromium-helper] Successfully added match rule {}", i);
         }
     }
     
     println!("[chromium-helper] Started monitoring Chromium MPRIS events");
+    println!("[chromium-helper] Monitoring for sender: {}", unique_name);
     
     while let Some(msg) = stream.next().await {
+        // Check if Chromium is still the active service
+        if !is_chromium_active() {
+            println!("[chromium-helper] Chromium is no longer active, stopping monitoring");
+            break;
+        }
+        
         if let Ok(msg) = msg {
             // Debug: log all messages to see what we're getting
             if let Some(interface) = msg.interface() {
                 if let Some(member) = msg.member() {
                     let interface_str = interface.as_str();
                     let member_str = member.as_str();
+                    
+                    println!("[chromium-helper] Received message: interface={}, member={}", 
+                        interface_str, member_str);
                     
                     // Check if this message is from our target service
                     if let Ok(header) = msg.header() {
@@ -780,9 +859,9 @@ async fn monitor_chromium_events_async(status_sender: Arc<Mutex<Option<UnixStrea
                             println!("[chromium-helper] DEBUG: Received signal {}.{} from sender: {}", 
                                 interface_str, member_str, sender_str);
                             
-                            if sender_str != service_name {
+                            if sender_str != unique_name.as_str() {
                                 println!("[chromium-helper] DEBUG: Skipping signal from different service: {} != {}", 
-                                    sender_str, service_name);
+                                    sender_str, unique_name);
                                 continue; // Skip messages from other services
                             }
                         }
@@ -836,26 +915,15 @@ async fn handle_properties_changed(
     // Instead of processing individual properties, get the full current status
     // This ensures we always have duration when calculating position ratio
     if let Some(full_status) = get_chromium_status().await {
-        let status_json = serde_json::to_string(&json!({
-            "is_playing": full_status.is_playing,
-            "title": full_status.title,
-            "artist": full_status.artist,
-            "album": full_status.album,
-            "duration": full_status.duration,
-            "position": full_status.position,
-            "timestamp": chrono::Utc::now().timestamp_millis(),
-        })).unwrap_or_default();
+        let is_playing = full_status.is_playing;
         
-        // Send status update
-        if let Ok(mut sender_guard) = status_sender.lock() {
-            if let Some(ref mut stream) = *sender_guard {
-                let message = format!("status_update:{}\n", status_json);
-                if let Err(e) = stream.write_all(message.as_bytes()) {
-                    eprintln!("[chromium-helper] Failed to send status update: {}", e);
+        // Update shared playback state and send status
+        update_and_send_status(status_sender, &PLAYBACK_STATE, is_playing, full_status).await;
+        
+        if is_playing {
+            println!("[chromium-helper] Chromium playback started - position polling activated");
                 } else {
-                    println!("[chromium-helper] Sent status update: {}", status_json);
-                }
-            }
+            println!("[chromium-helper] Chromium playback stopped - position polling deactivated");
         }
     }
     
