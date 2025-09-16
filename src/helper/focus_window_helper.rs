@@ -406,10 +406,8 @@ impl X11WindowMonitor {
     }
     
     fn get_window_class(&mut self, window: Window) -> Option<String> {
-        // Check cache first
-        if let Some(class) = self.window_classes.get(window) {
-            return Some(class);
-        }
+        // Always fetch fresh WM_CLASS to avoid stale cache issues
+        // Window IDs can be reused by different applications
         
         // Get WM_CLASS property
         let cookie = self.conn.get_property(
@@ -427,7 +425,7 @@ impl X11WindowMonitor {
                     if let Some(class) = class_name.split('\0').nth(1) {
                         if !class.is_empty() {
                             let class_str = class.to_string();
-                            self.window_classes.insert(window, class_str.clone());
+                            eprintln!("[helper] Fresh window class for window {}: {}", window, class_str);
                             return Some(class_str);
                         }
                     }
