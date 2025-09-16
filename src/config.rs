@@ -82,6 +82,7 @@ pub struct ButtonConfig {
     pub background: Option<bool>,
     pub action: Key,
     pub fraction: Option<f32>, // Optional per-button width fraction
+    pub special_type: Option<String>, // Special button type (e.g., "toggle", "macro", etc.)
 }
 
 fn load_font(name: &str) -> FontFace {

@@ -818,29 +818,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
             }
         }
         
-        // Handle different types of redraws
-        if needs_complete_redraw || any_changed || browser_buttons_changed {
-            perform_redraw(
-                &mut layers,
-                &mut surface,
-                drm,
-                &cfg,
-                &mut pixel_shift,
-                &mut app_layer3_slide_anim,
-                active_layer,
-                last_layer,
-                current_session.as_ref(),
-                current_window_class.as_deref(),
-                &mut app_ui_manager,
-                media_player_drag_position,
-                needs_complete_redraw,
-                any_changed,
-                browser_buttons_changed,
-                width.into(),
-                height.into(),
-                &mut needs_complete_redraw
-            )?;
-        }
+        // UI drawing will happen after window focus detection logic
         
 
         
@@ -1040,6 +1018,9 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                (part, None, Some(0)) // Default PID to 0
                                            };
                                            
+                                           // Update current window class and ID BEFORE detection logic
+                                           current_window_class = Some(class.to_string());
+                                           current_window_id = window_id;
                                            
                                                                                         // Check if Media Player window focus changed
                                              let new_media_player_focused = is_media_player_window_class(&class.to_lowercase());
@@ -1083,7 +1064,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                    if let Some(user) = &current_user {
                                                        // Don't start the old media helper if generic media is enabled
                                                        if !app_ui_manager.generic_media_enabled {
-                                                           if let Some(fd) = media_player_helper_manager.start(user, current_session.as_ref().and_then(|s| s.leader).unwrap_or(0), class, window_id.unwrap_or(0), pid.unwrap_or(0)) {
+                                                       if let Some(fd) = media_player_helper_manager.start(user, current_session.as_ref().and_then(|s| s.leader).unwrap_or(0), class, window_id.unwrap_or(0), pid.unwrap_or(0)) {
                                                            let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
                                                            if let Err(e) = safe_epoll_add(&epoll, &listener_fd_obj, EpollEvent::new(EpollFlags::EPOLLIN, 6)) {
                                                                eprintln!("[main] Failed to add Media Player helper listener to epoll: {}", e);
@@ -1167,7 +1148,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                    if let Some(user) = &current_user {
                                                        // Don't start browser helper if generic media is enabled
                                                        if !app_ui_manager.generic_media_enabled {
-                                                           if let Some(fd) = browser_helper_manager.start(user, current_session.as_ref().and_then(|s| s.leader).unwrap_or(0), class, window_id.unwrap_or(0), pid.unwrap_or(0)) {
+                                                       if let Some(fd) = browser_helper_manager.start(user, current_session.as_ref().and_then(|s| s.leader).unwrap_or(0), class, window_id.unwrap_or(0), pid.unwrap_or(0)) {
                                                            let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
                                                            if let Err(e) = safe_epoll_add(&epoll, &listener_fd_obj, EpollEvent::new(EpollFlags::EPOLLIN, 8)) {
                                                                eprintln!("[main] Failed to add browser helper listener to epoll: {}", e);
@@ -1230,7 +1211,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                    if let Some(user) = &current_user {
                                                        // Don't start browser helper if generic media is enabled
                                                        if !app_ui_manager.generic_media_enabled {
-                                                           if let Some(fd) = browser_helper_manager.start(user, current_session.as_ref().and_then(|s| s.leader).unwrap_or(0), class, window_id.unwrap_or(0), pid.unwrap_or(0)) {
+                                                       if let Some(fd) = browser_helper_manager.start(user, current_session.as_ref().and_then(|s| s.leader).unwrap_or(0), class, window_id.unwrap_or(0), pid.unwrap_or(0)) {
                                                            let listener_fd_obj = unsafe { OwnedFd::from_raw_fd(fd) };
                                                            if let Err(e) = safe_epoll_add(&epoll, &listener_fd_obj, EpollEvent::new(EpollFlags::EPOLLIN, 8)) {
                                                                eprintln!("[main] Failed to add browser helper listener to epoll: {}", e);
@@ -1245,9 +1226,6 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                                                }
                                            }
                                            
-                                           // Update current window class and ID AFTER all the logic
-                                           current_window_class = Some(class.to_string());
-                                           current_window_id = window_id;
                                            
 
                                            
@@ -1786,6 +1764,30 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
         }
         
         // Process session events (event-driven)
+        
+        // Handle different types of redraws AFTER window focus detection logic
+        if needs_complete_redraw || any_changed || browser_buttons_changed {
+            perform_redraw(
+                &mut layers,
+                &mut surface,
+                drm,
+                &cfg,
+                &mut pixel_shift,
+                &mut app_layer3_slide_anim,
+                active_layer,
+                last_layer,
+                current_session.as_ref(),
+                current_window_class.as_deref(),
+                &mut app_ui_manager,
+                media_player_drag_position,
+                needs_complete_redraw,
+                any_changed,
+                browser_buttons_changed,
+                width.into(),
+                height.into(),
+                &mut needs_complete_redraw
+            )?;
+        }
     }
 }
 

@@ -122,14 +122,12 @@ fn should_ignore_position_update() -> bool {
             
             // Ignore position updates for 500ms after a seek to prevent "jump back" effect
             if elapsed.as_millis() < 500 {
-                log_info(&format!("Ignoring position update (recent seek to {:.2}%, {}ms ago)", 
-                         seek_pos * 100.0, elapsed.as_millis()));
+             
                 return true;
             } else {
                 // Clear the seek state after timeout
                 LAST_SEEK_POSITION = None;
                 LAST_SEEK_TIME = None;
-                log_info("Seek state cleared - position updates resumed");
             }
         }
     }
@@ -156,8 +154,7 @@ async fn execute_seek_with_ui_update(
         let current_microseconds = (current_status.position * current_status.duration as f64 * MICROSECONDS_PER_SECOND as f64) as i64;
         let target_microseconds = (position * current_status.duration as f64 * MICROSECONDS_PER_SECOND as f64) as i64;
         
-        log_info(&format!("{} (Spotify): current={}μs, target={}μs, offset={}μs", 
-                 command_name, current_microseconds, target_microseconds, seek_offset));
+    
         
         let success = execute_spotify_command("org.mpris.MediaPlayer2.Player.Seek", &[&format!("int64:{}", seek_offset)]).await;
         
@@ -172,7 +169,6 @@ async fn execute_seek_with_ui_update(
             let mut updated_status = current_status;
             updated_status.position = position;
             send_status_update(status_sender, &updated_status);
-            log_info(&format!("Header updated immediately to position: {:.2}% (seek state tracked)", position * 100.0));
             true
         } else {
             log_error("Seek command", "execution failed");
