@@ -43,7 +43,7 @@ impl FlatTouchHandler {
                     let y = dn.y_transformed(height);
                     println!("[flat_touch] Touch down at ({}, {})", x, y);
                     
-                    if let Some((_group, idx)) = layers.get_mut(active_layer).ok_or(crate::MainError::LayerNotFound(*active_layer))?.hit_test(x, width as i32, Some(active_layer.clone())) {
+                    if let Some((_group, idx)) = layers.get_mut(active_layer).ok_or(crate::MainError::LayerNotFound(*active_layer))?.hit_test(x, width as i32, Some(active_layer.clone()), &[]) {
                         Self::handle_touch_down(idx, active_layer, layers, touches, dn.seat_slot(), uinput)?;
                     }
                 },

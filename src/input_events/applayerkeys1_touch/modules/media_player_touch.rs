@@ -58,7 +58,8 @@ impl MediaPlayerTouchHandler {
                     let y = dn.y_transformed(height);
                     println!("[media_player_touch] Touch down at ({}, {})", x, y);
                     
-                    if let Some((group, idx)) = layers.get_mut(active_layer).ok_or(crate::MainError::LayerNotFound(*active_layer))?.hit_test(x, width as i32, Some(active_layer.clone())) {
+                    let available_mpris_services = &app_ui_manager.generic_background_screen.available_mpris_services;
+                    if let Some((group, idx)) = layers.get_mut(active_layer).ok_or(crate::MainError::LayerNotFound(*active_layer))?.hit_test(x, width as i32, Some(active_layer.clone()), available_mpris_services) {
                         if group == "modules" {
                             touches.insert(dn.seat_slot(), (active_layer.clone(), group, idx));
                             println!("[media_player_touch] Touch stored for modules group, slot: {}", dn.seat_slot());

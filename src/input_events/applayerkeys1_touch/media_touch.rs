@@ -46,7 +46,8 @@ impl MediaTouchHandler {
                     let y = dn.y_transformed(height);
                     println!("[media_touch] Touch down at ({}, {})", x, y);
                     
-                    if let Some((group, idx)) = layers.get_mut(active_layer).ok_or(crate::MainError::LayerNotFound(*active_layer))?.hit_test(x, width as i32, Some(active_layer.clone())) {
+                    let available_mpris_services = &app_ui_manager.generic_background_screen.available_mpris_services;
+                    if let Some((group, idx)) = layers.get_mut(active_layer).ok_or(crate::MainError::LayerNotFound(*active_layer))?.hit_test(x, width as i32, Some(active_layer.clone()), available_mpris_services) {
                         if group == "media" {
                             Self::handle_touch_down(idx, active_layer, layers, touches, dn.seat_slot(), uinput, app_ui_manager, needs_complete_redraw)?;
                         }
@@ -113,8 +114,8 @@ impl MediaTouchHandler {
         if let Some(split) = &mut layers.get_mut(active_layer).ok_or(crate::MainError::LayerNotFound(*active_layer))?.split {
             let button = &mut split.media[idx];
             
-            // Check if this is the generic media toggle button (Custom/Compose action)
-            if button.action == Key::Compose {
+            // Check if this is the generic media toggle button (special_type = "toggle")
+            if button.special_type.as_ref().map_or(false, |t| t == "toggle") {
                 println!("[media_touch] Generic media toggle button {} detected", idx);
                 // Toggle the generic media state
                 app_ui_manager.generic_media_enabled = !app_ui_manager.generic_media_enabled;
@@ -158,7 +159,7 @@ impl MediaTouchHandler {
 
         if let Some(split) = &mut layers.get_mut(layer).ok_or(crate::MainError::LayerNotFound(*layer))?.split {
             let button = &mut split.media[idx];
-            if button.action == Key::Compose {
+            if button.special_type.as_ref().map_or(false, |t| t == "toggle") {
                 return Ok(());
             }
             
@@ -193,8 +194,8 @@ impl MediaTouchHandler {
 
         if let Some(split) = &mut layers.get_mut(layer).ok_or(crate::MainError::LayerNotFound(*layer))?.split {
             let button = &mut split.media[idx];
-            if button.action == Key::Compose {
-                println!("[media_touch] Button action is Compose (generic media toggle), maintaining toggle state");
+            if button.special_type.as_ref().map_or(false, |t| t == "toggle") {
+                println!("[media_touch] Button is generic media toggle, maintaining toggle state");
                 // For toggle buttons, maintain the current toggle state
                 button.set_active(uinput, false);
                 return Ok(());
