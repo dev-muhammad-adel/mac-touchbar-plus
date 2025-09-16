@@ -69,6 +69,7 @@ pub struct Button {
     pub action: Key,
     pub background: bool,
     pub fraction: Option<f32>,
+    pub special_type: Option<String>,
 }
 
 impl Button {
@@ -80,7 +81,9 @@ impl Button {
             } else {
                 background = true;
             }
-            Button::new_text(text, cfg.action, background)
+            let mut btn = Button::new_text(text, cfg.action, background);
+            btn.special_type = cfg.special_type;
+            btn
         } else if let Some(icon) = cfg.icon {
             let path = match cfg.path {
                 Some(p) => p,
@@ -101,6 +104,7 @@ impl Button {
             }
             let mut btn = Button::new_icon(&icon, cfg.action, cfg.mode, &path, background);
             btn.fraction = cfg.fraction;
+            btn.special_type = cfg.special_type;
             btn
         } else if let Some(mode) = cfg.mode {
             if let Some(bg) = cfg.background {
@@ -111,6 +115,7 @@ impl Button {
             if mode.to_lowercase() == "blank" {
                 let mut btn = Button::new_blank(cfg.action, background);
                 btn.fraction = cfg.fraction;
+                btn.special_type = cfg.special_type;
                 btn
             } else {
                 panic!("Invalid config, a button must have either Text, Icon or be Blank")
@@ -128,6 +133,7 @@ impl Button {
             image: button_images::ButtonImage::Text(text),
             background,
             fraction: None,
+            special_type: None,
         }
     }
 
@@ -153,6 +159,7 @@ impl Button {
             changed: false,
             background,
             fraction: None,
+            special_type: None,
         }
     }
 
@@ -164,6 +171,7 @@ impl Button {
             image: button_images::ButtonImage::Blank,
             background,
             fraction: None,
+            special_type: None,
         }
     }
 

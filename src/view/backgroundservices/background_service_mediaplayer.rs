@@ -345,37 +345,60 @@ impl BackgroundServicePlayer {
             let total_time_seconds = status.duration;
             let total_time_str = format_duration(total_time_seconds);
             
-            // Get text extents
+            // Get text extents once and reuse them
             c.save().unwrap();
-            c.set_font_size(14.0);
+            c.set_font_size(16.0); // Match the rendering font size
             c.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
             
             let current_time_ext = c.text_extents(&current_time_str).unwrap();
             let total_time_ext = c.text_extents(&total_time_str).unwrap();
             c.restore().unwrap();
             
-            // Fixed spacing calculations
-            let estimated_current_time_width = 45.0;
-            let estimated_total_time_width = 45.0;
+            println!("[background_service_player] Text extents - current: width={}, height={}, total: width={}, height={}", 
+                current_time_ext.width(), current_time_ext.height(), 
+                total_time_ext.width(), total_time_ext.height());
+            
+            // Use actual measured text widths instead of estimates
+            let current_time_width = current_time_ext.width().max(30.0); // Minimum width for stability
+            let total_time_width = total_time_ext.width().max(30.0); // Minimum width for stability
             let time_margin = 10.0;
             let min_progress_width = 30.0;
-            let progress_w = (available_width - estimated_current_time_width - estimated_total_time_width - time_margin * 2.0).max(min_progress_width);
+            let progress_w = (available_width - current_time_width - total_time_width - time_margin * 2.0).max(min_progress_width);
             
             // Current time - centered
-            let current_time_area_width = estimated_current_time_width;
-            let current_time_x = content_start_x + (current_time_area_width - current_time_ext.width()) / 2.0;
+            let current_time_x = content_start_x + (current_time_width - current_time_ext.width()) / 2.0;
             let current_time_y = y + (height + current_time_ext.height()) / 2.0;
             
+            // Ensure text is within bounds
+            let current_time_x = current_time_x.max(content_start_x);
+            let current_time_y = current_time_y.max(y + current_time_ext.height());
+            
+            println!("[background_service_player] Rendering current time: '{}' at ({}, {})", current_time_str, current_time_x, current_time_y);
+            
+            // Draw current time with a background rectangle for visibility
             c.save().unwrap();
-            c.set_font_size(14.0);
+            c.set_font_size(16.0); // Increased font size for better visibility
             c.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
-            c.set_source_rgba(0.9, 0.9, 0.9, anim_progress); // Light gray
+            
+            // Draw a small background rectangle behind the text for better visibility
+            let bg_padding = 4.0;
+            c.set_source_rgba(0.3, 0.3, 0.3, 0.3); // Bright white for visibility
+            c.rectangle(
+                current_time_x - bg_padding,
+                current_time_y - current_time_ext.height() - bg_padding,
+                current_time_ext.width() + bg_padding * 2.0,
+                current_time_ext.height() + bg_padding * 2.0
+            );
+            c.fill().unwrap();
+            
+            // Draw the text
+            c.set_source_rgba(1.0, 1.0, 1.0, 1.0); // Bright white for visibility
             c.move_to(current_time_x, current_time_y);
             c.show_text(&current_time_str).unwrap();
             c.restore().unwrap();
             
             // Progress bar
-            let progress_x = current_time_x + estimated_current_time_width + time_margin;
+            let progress_x = current_time_x + current_time_width + time_margin;
             let progress_y = y + 6.0;
             let progress_h = height - 12.0;
             
@@ -383,20 +406,39 @@ impl BackgroundServicePlayer {
             draw_background_service_player_progressbar(c, progress_x, progress_y, progress_w, progress_h, head_position, anim_progress, mpris_name);
             
             // Total time - centered
-            let total_time_area_width = estimated_total_time_width;
-            let total_time_x = progress_x + progress_w + time_margin + (total_time_area_width - total_time_ext.width()) / 2.0;
+            let total_time_x = progress_x + progress_w + time_margin + (total_time_width - total_time_ext.width()) / 2.0;
             let total_time_y = y + (height + total_time_ext.height()) / 2.0;
             
+            // Ensure text is within bounds
+            let total_time_x = total_time_x.max(progress_x + progress_w + time_margin);
+            let total_time_y = total_time_y.max(y + total_time_ext.height());
+            
+            println!("[background_service_player] Rendering total time: '{}' at ({}, {})", total_time_str, total_time_x, total_time_y);
+            
+            // Draw total time with a background rectangle for visibility
             c.save().unwrap();
-            c.set_font_size(14.0);
+            c.set_font_size(16.0); // Increased font size for better visibility
             c.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
-            c.set_source_rgba(0.9, 0.9, 0.9, anim_progress); // Light gray
+            
+            // Draw a small background rectangle behind the text for better visibility
+            let bg_padding = 4.0;
+            c.set_source_rgba(0.3, 0.3, 0.3, 0.3); // Bright white for visibility
+            c.rectangle(
+                total_time_x - bg_padding,
+                total_time_y - total_time_ext.height() - bg_padding,
+                total_time_ext.width() + bg_padding * 2.0,
+                total_time_ext.height() + bg_padding * 2.0
+            );
+            c.fill().unwrap();
+            
+            // Draw the text
+            c.set_source_rgba(1.0, 1.0, 1.0, 1.0); // Bright white for visibility
             c.move_to(total_time_x, total_time_y);
             c.show_text(&total_time_str).unwrap();
             c.restore().unwrap();
             
             // Draw separator line between time display and control buttons
-            let separator_x = progress_x + progress_w + time_margin + estimated_total_time_width + 10.0; // 10px after total time area
+            let separator_x = progress_x + progress_w + time_margin + total_time_width + 10.0; // 10px after total time area
             draw_separator(c, separator_x, y, height, anim_progress);
         } else {
             // Show background service player text when no status available

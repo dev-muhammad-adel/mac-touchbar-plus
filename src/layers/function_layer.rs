@@ -66,24 +66,43 @@ struct FunctionLayerKeys1LayoutInfo {
 
 impl FunctionLayerKeys1LayoutInfo {
     /// Creates layout info specifically for FunctionLayerKeys1 split layout
-    fn new(width: i32, layer_index: Option<LayerKey>, split: &SplitLayout, pixel_shift_width: i32) -> Self {
+    fn new(width: i32, layer_index: Option<LayerKey>, split: &SplitLayout, pixel_shift_width: i32, available_mpris_services: &[String]) -> Self {
         let gap = Self::get_gap_for_layer(layer_index);
         let total_width = (width - pixel_shift_width) as f64;
         let modules_width = (split.modules_width as f64 * total_width).round();
         let media_width = total_width - modules_width - gap;
         
         let media_count = split.media.len();
-        let total_spacing = if media_count > 1 { MEDIA_SPACING_PX * (media_count as f64 - 1.0) } else { 0.0 };
+        
+        // Filter out hidden buttons (toggle button when no MPRIS services)
+        let visible_buttons: Vec<(usize, &Button)> = split.media.iter().enumerate()
+            .filter(|(_, button)| {
+                !(button.special_type.as_ref().map_or(false, |t| t == "toggle") && available_mpris_services.is_empty())
+            })
+            .collect();
+        
+        let visible_count = visible_buttons.len();
+        let total_spacing = if visible_count > 1 { MEDIA_SPACING_PX * (visible_count as f64 - 1.0) } else { 0.0 };
         let button_area = media_width - total_spacing;
         
-        let weights: Vec<f32> = split.media.iter().map(|b| b.fraction.unwrap_or(1.0)).collect();
+        let weights: Vec<f32> = visible_buttons.iter().map(|(_, b)| b.fraction.unwrap_or(1.0)).collect();
         let total_weight: f32 = weights.iter().sum();
-        let mut button_widths: Vec<f64> = weights.iter().map(|w| button_area * (*w as f64 / total_weight as f64)).collect();
+        let visible_button_widths: Vec<f64> = weights.iter().map(|w| button_area * (*w as f64 / total_weight as f64)).collect();
         
-        // Last button absorbs rounding error
-        let sum_widths: f64 = button_widths.iter().sum();
-        if let Some(last) = button_widths.last_mut() {
-            *last += button_area - sum_widths;
+        // Create full width array with 0.0 for hidden buttons
+        let mut button_widths: Vec<f64> = vec![0.0; media_count];
+        let mut visible_idx = 0;
+        let last_original_idx = visible_buttons.last().map(|(idx, _)| *idx);
+        
+        for (original_idx, _) in visible_buttons {
+            button_widths[original_idx] = visible_button_widths[visible_idx];
+            visible_idx += 1;
+        }
+        
+        // Last visible button absorbs rounding error
+        if let Some(last_original_idx) = last_original_idx {
+            let sum_widths: f64 = button_widths.iter().sum();
+            button_widths[last_original_idx] += button_area - sum_widths;
         }
         
         Self {
@@ -217,7 +236,8 @@ impl FunctionLayer {
             0 
         };
         
-        let layout_info = FunctionLayerKeys1LayoutInfo::new(width, layer_index, split, pixel_shift_width);
+        let available_mpris_services: Vec<String> = app_ui_manager.as_ref().map_or(Vec::new(), |mgr| mgr.generic_background_screen.available_mpris_services.clone());
+        let layout_info = FunctionLayerKeys1LayoutInfo::new(width, layer_index, split, pixel_shift_width, &available_mpris_services);
         let (bot, top) = Self::calculate_button_dimensions(height);
         let (pixel_shift_x, _) = pixel_shift;
         
@@ -251,6 +271,9 @@ impl FunctionLayer {
         );
         Self::safe_cairo_fill(&c)?;
         
+        // Get MPRIS services before moving app_ui_manager
+        let available_mpris_services: Vec<String> = app_ui_manager.as_ref().map_or(Vec::new(), |mgr| mgr.generic_background_screen.available_mpris_services.clone());
+        
         // Draw modules section (left side of split layout)
         let modules_result = Self::draw_modules_section_static(
             &c, left_edge, bot, layout_info.modules_width, top - bot, BUTTON_RADIUS,
@@ -267,7 +290,7 @@ impl FunctionLayer {
                 &c, &mut split.media, &layout_info.button_widths, layout_info.media_width,
                 media_count, left_edge + layout_info.modules_width + layout_info.gap,
                 bot, top, BUTTON_RADIUS, height, config, complete_redraw, &mut modified_regions,
-                session_state
+                session_state, &available_mpris_services
             );
             if let Err(e) = media_result {
                 return Err(e);
@@ -415,11 +438,11 @@ impl FunctionLayer {
         Ok(())
     }
 
-    fn draw_media_section_static(c: &Context, media: &mut [Button], button_widths: &[f64], media_width: f64, media_count: usize, left_edge: f64, bot: f64, top: f64, radius: f64, height: i32, config: &Config, complete_redraw: bool, modified_regions: &mut Vec<ClipRect>, session_state: Option<&SessionState>) -> FunctionLayerResult<()> {
+    fn draw_media_section_static(c: &Context, media: &mut [Button], button_widths: &[f64], media_width: f64, media_count: usize, left_edge: f64, bot: f64, top: f64, radius: f64, height: i32, config: &Config, complete_redraw: bool, modified_regions: &mut Vec<ClipRect>, session_state: Option<&SessionState>, available_mpris_services: &[String]) -> FunctionLayerResult<()> {
         crate::view::media_screen::draw_media_section(
             c, media, button_widths, media_width, media_count,
             left_edge, bot, top, radius, height, config, complete_redraw,
-            modified_regions, session_state
+            modified_regions, session_state, available_mpris_services
         );
         Ok(())
     }
@@ -472,7 +495,7 @@ impl FunctionLayer {
     }
 
     // Helper for media hit test (FunctionLayerKeys1 split layout only)
-    pub fn hit_test_media(&self, x: f64, width: i32, layer_index: Option<LayerKey>) -> Option<usize> {
+    pub fn hit_test_media(&self, x: f64, width: i32, layer_index: Option<LayerKey>, available_mpris_services: &[String]) -> Option<usize> {
         // Only allow media hit test for LayerKeys1 (Media layer) with split layout
         if let Some(LayerKey::Media) = layer_index {
             if let Some(split) = &self.split {
@@ -482,12 +505,28 @@ impl FunctionLayer {
                 let media_width = total_width - modules_width - gap;
                 let media_count = split.media.len();
                 
-                let total_spacing = if media_count > 1 { MEDIA_SPACING_PX * (media_count as f64 - 1.0) } else { 0.0 };
+                // Filter out hidden buttons (toggle button when no MPRIS services)
+                let visible_buttons: Vec<(usize, &Button)> = split.media.iter().enumerate()
+                    .filter(|(_, button)| {
+                        !(button.special_type.as_ref().map_or(false, |t| t == "toggle") && available_mpris_services.is_empty())
+                    })
+                    .collect();
+                
+                let visible_count = visible_buttons.len();
+                let total_spacing = if visible_count > 1 { MEDIA_SPACING_PX * (visible_count as f64 - 1.0) } else { 0.0 };
                 let button_area = media_width - total_spacing;
                 
-                let weights: Vec<f32> = split.media.iter().map(|b| b.fraction.unwrap_or(1.0)).collect();
+                let weights: Vec<f32> = visible_buttons.iter().map(|(_, b)| b.fraction.unwrap_or(1.0)).collect();
                 let total_weight: f32 = weights.iter().sum();
-                let mut media_button_widths: Vec<f64> = weights.iter().map(|w| button_area * (*w as f64 / total_weight as f64)).collect();
+                let visible_button_widths: Vec<f64> = weights.iter().map(|w| button_area * (*w as f64 / total_weight as f64)).collect();
+                
+                // Create full width array with 0.0 for hidden buttons
+                let mut media_button_widths: Vec<f64> = vec![0.0; media_count];
+                let mut visible_idx = 0;
+                for (original_idx, _) in visible_buttons {
+                    media_button_widths[original_idx] = visible_button_widths[visible_idx];
+                    visible_idx += 1;
+                }
                 
                 let sum_widths: f64 = media_button_widths.iter().sum();
                 if let Some(last) = media_button_widths.last_mut() {
@@ -496,7 +535,12 @@ impl FunctionLayer {
                 
                 // SIMPLIFIED: media section starts after modules_width + gap
                 let mut left_edge = modules_width + gap;
-                for (i, _) in split.media.iter().enumerate() {
+                for (i, button) in split.media.iter().enumerate() {
+                    // Skip hit testing for hidden buttons (width is 0.0)
+                    if media_button_widths[i] == 0.0 {
+                        continue;
+                    }
+                    
                     let right_edge = left_edge + media_button_widths[i];
                     if x >= left_edge && x < right_edge {
                         return Some(i);
@@ -539,7 +583,7 @@ impl FunctionLayer {
     /// Returns (group, index) where group is "modules" or "media" or "flat", and index is the button index in that group
     /// - "modules" and "media": FunctionLayerKeys1 (App Layer 1) with split layout
     /// - "flat": Standard function layers (Fn keys, App Layer 2, App Layer 3)
-    pub fn hit_test(&self, x: f64, width: i32, layer_index: Option<LayerKey>) -> Option<(&'static str, usize)> {
+    pub fn hit_test(&self, x: f64, width: i32, layer_index: Option<LayerKey>, available_mpris_services: &[String]) -> Option<(&'static str, usize)> {
         if let Some(LayerKey::Media) = layer_index {
             // This is FunctionLayerKeys1 (App Layer 1) - check for split layout
             if let Some(_split) = &self.split {
@@ -547,7 +591,7 @@ impl FunctionLayer {
                 if let Some(idx) = self.hit_test_modules(x, width, layer_index) {
                     return Some(("modules", idx));
                 }
-                if let Some(idx) = self.hit_test_media(x, width, layer_index) {
+                if let Some(idx) = self.hit_test_media(x, width, layer_index, available_mpris_services) {
                     return Some(("media", idx));
                 }
             }

@@ -96,8 +96,9 @@
         },
         {
           "Icon": "bar-chart-2",
-          "Action": "Compose",
-          "Mode": "Media"
+          "Action": "Unknown",
+          "Mode": "Media",
+          "SpecialType": "toggle"
         },
         {
           "Icon": "audio-volume-down-symbolic",

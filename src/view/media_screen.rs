@@ -23,9 +23,16 @@ pub fn draw_media_section(
     complete_redraw: bool,
     modified_regions: &mut Vec<ClipRect>,
     _session_state: Option<&SessionState>,
+    available_mpris_services: &[String],
 ) {
     let media_spacing_px = 2.0f64;
     for (i, button) in media_buttons.iter_mut().enumerate() {
+        // Skip rendering buttons with 0 width (hidden buttons)
+        if media_button_widths[i] == 0.0 {
+            println!("[media_screen] Skipping hidden button {} (width: 0.0)", i);
+            continue;
+        }
+        
         if button.changed || complete_redraw {
             let color = if button.active {
                 BUTTON_COLOR_ACTIVE

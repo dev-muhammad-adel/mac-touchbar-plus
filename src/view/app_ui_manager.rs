@@ -11,7 +11,8 @@ pub const MEDIA_PLAYER_WINDOW_CLASSES: &[&str] = &["vlc", "org.kde.dragonplayer"
 
 // Helper function to check if a window class is a media player
 pub fn is_media_player_window_class(window_class: &str) -> bool {
-    MEDIA_PLAYER_WINDOW_CLASSES.contains(&window_class)
+    let window_class_lower = window_class.to_lowercase();
+    MEDIA_PLAYER_WINDOW_CLASSES.iter().any(|&class| class.to_lowercase() == window_class_lower)
 }
 
 // Centralized state for browser window classes - easy to edit and maintain
@@ -19,8 +20,10 @@ pub const BROWSER_WINDOW_CLASSES: &[&str] = &["firefox", "chrome", "chromium", "
 
 // Helper function to check if a window class is a browser
 pub fn is_browser_window_class(window_class: &str) -> bool {
-    BROWSER_WINDOW_CLASSES.contains(&window_class)
+    let window_class_lower = window_class.to_lowercase();
+    BROWSER_WINDOW_CLASSES.iter().any(|&class| class.to_lowercase() == window_class_lower)
 }
+
 
 
 pub struct AppUiManager {
@@ -137,17 +140,22 @@ impl AppUiManager {
             return;
         }
         
+        println!("[app_ui_manager] draw_app_ui called with window_class: {:?}", window_class);
         match window_class {
             Some(class) => {
                 match class.to_lowercase().as_str() {
-            "spotify" => {
-                self.spotify_screen.draw(c, x, y, width, height, radius, anim_progress, drag_position);
-            }
             class if is_media_player_window_class(class) => {
-                self.media_player_screen.draw(c, x, y, width, height, radius, anim_progress, drag_position);
+                // Check if it's Spotify specifically for special UI
+                if class == "spotify" {
+                    println!("[app_ui_manager] Drawing SPOTIFY screen");
+                    self.spotify_screen.draw(c, x, y, width, height, radius, anim_progress, drag_position);
+                } else {
+                    println!("[app_ui_manager] Drawing MEDIA PLAYER screen for: {}", class);
+                    self.media_player_screen.draw(c, x, y, width, height, radius, anim_progress, drag_position);
+                }
             }
             class if is_browser_window_class(class) => {
-                println!("[app_ui_manager] Drawing browser screen with {} active buttons", self.browser_screen.buttons.iter().filter(|b| b.active).count());
+                println!("[app_ui_manager] Drawing BROWSER screen for: {} with {} active buttons", class, self.browser_screen.buttons.iter().filter(|b| b.active).count());
                 // Check if any browser buttons have changed for partial redraw
                 let any_browser_button_changed = self.browser_screen.buttons.iter().any(|b| b.changed);
                 let complete_redraw = !any_browser_button_changed; // Use complete redraw if no buttons changed
@@ -155,12 +163,14 @@ impl AppUiManager {
             }
             _ => {
                 // Fall back to default module screen behavior
-                        self.draw_default_ui(c, x, y, width, height, radius, anim_progress, class);
-                    }
-                }
+                println!("[app_ui_manager] Drawing DEFAULT UI for: {}", class);
+                self.draw_default_ui(c, x, y, width, height, radius, anim_progress, class);
             }
+        }
+    }
             None => {
                 // No window class available (logout state) - show empty module screen
+                println!("[app_ui_manager] Drawing DEFAULT UI for unknown window");
                 self.draw_default_ui(c, x, y, width, height, radius, anim_progress, "");
             }
         }
