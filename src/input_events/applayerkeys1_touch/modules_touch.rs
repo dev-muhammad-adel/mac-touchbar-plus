@@ -70,12 +70,10 @@ impl ModulesTouchHandler {
                         },
                         _ => {
                             // Unknown window class, skip processing
-                            println!("[modules_touch] Unknown window class: {}, skipping touch event", window_class);
                         }
                     }
                 } else {
                     // No current window class, skip processing
-                    println!("[modules_touch] No current window class, skipping touch event");
                 }
             }
         }
@@ -255,10 +253,8 @@ impl ModulesTouchHandler {
         if let Some(stream) = stream {
             let command_with_newline = format!("media_action:{}\n", command);
             stream.write_all(command_with_newline.as_bytes())?;
-            println!("[modules_touch] Sent background service command: {}", command);
             Ok(())
         } else {
-            println!("[modules_touch] No background service helper stream available for command: {}", command);
             Err(std::io::Error::new(std::io::ErrorKind::NotConnected, "No background service helper stream available"))
         }
     }

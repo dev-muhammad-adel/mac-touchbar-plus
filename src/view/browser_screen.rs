@@ -82,12 +82,6 @@ impl BrowserScreen {
         complete_redraw: bool,
         modified_regions: &mut Vec<ClipRect>,
     ) {
-        println!("[browser_screen] Drawing with {} active buttons, complete_redraw={}", self.buttons.iter().filter(|b| b.active).count(), complete_redraw);
-        println!("[browser_screen] Button states: Back(active={}, changed={}), Forward(active={}, changed={}), Refresh(active={}, changed={}), Home(active={}, changed={})", 
-            self.buttons[0].active, self.buttons[0].changed,
-            self.buttons[1].active, self.buttons[1].changed,
-            self.buttons[2].active, self.buttons[2].changed,
-            self.buttons[3].active, self.buttons[3].changed);
         // Calculate layout dimensions
         let pill_x = x;
         let pill_y = y - radius;
@@ -171,8 +165,6 @@ impl BrowserScreen {
             let icon_x = button_x + (this_button_width - icon_size) / 2.0;
             let icon_y = button_y + (button_height - icon_size) / 2.0;
             
-            // Debug which button we're processing
-            println!("[browser_screen] Processing button {}: '{}' with icon path: {}", i, button.text, icon_path);
             
             // Try to load icon using the browser-specific function first
             let icon_result = crate::utils::button_images::load_browser_icon(icon_name);
@@ -181,7 +173,6 @@ impl BrowserScreen {
                 // Use cached icon
                 match icon_image {
                     crate::utils::button_images::ButtonImage::Svg(handle) => {
-                        println!("[browser_screen] Successfully loaded cached icon: {}", button.text);
                         let renderer = rsvg::CairoRenderer::new(&handle);
                         if is_address_bar {
                             // Calculate total width of icon + text + spacing
@@ -213,7 +204,6 @@ impl BrowserScreen {
                     _ => {
                         // Fallback to direct loading if not SVG
                         if let Ok(handle) = rsvg::Loader::new().read_path(&icon_path) {
-                            println!("[browser_screen] Fallback: directly loaded icon: {}", icon_path);
                             let renderer = rsvg::CairoRenderer::new(&handle);
                             if is_address_bar {
                                 // Calculate total width of icon + text + spacing
@@ -242,7 +232,6 @@ impl BrowserScreen {
                                 renderer.render_document(c, &cairo::Rectangle::new(icon_x, icon_y, icon_size, icon_size)).unwrap();
                             }
                         } else {
-                            println!("[browser_screen] Failed to load icon: {} (button {}: {})", icon_path, i, button.text);
                             // fallback: draw icon name as text
                             c.set_font_size(14.0);
                             c.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
@@ -258,7 +247,6 @@ impl BrowserScreen {
             } else {
                 // Fallback to direct loading if caching system fails
                 if let Ok(handle) = rsvg::Loader::new().read_path(&icon_path) {
-                    println!("[browser_screen] Fallback: directly loaded icon: {}", icon_path);
                     let renderer = rsvg::CairoRenderer::new(&handle);
                     if is_address_bar {
                         // Calculate total width of icon + text + spacing
@@ -287,7 +275,6 @@ impl BrowserScreen {
                         renderer.render_document(c, &cairo::Rectangle::new(icon_x, icon_y, icon_size, icon_size)).unwrap();
                     }
                 } else {
-                    println!("[browser_screen] Failed to load icon: {} (button {}: {})", icon_path, i, button.text);
                     // fallback: draw icon name as text
                     c.set_font_size(14.0);
                     c.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
@@ -335,7 +322,6 @@ impl BrowserScreen {
         height: f64,
         radius: f64,
     ) -> Option<BrowserAction> {
-        println!("[browser_screen] hit_test called with touch_x={}, touch_y={}, x={}, y={}, width={}, height={}", touch_x, touch_y, x, y, width, height);
         
         // Calculate layout dimensions (same as draw function)
         let pill_x = x;
@@ -345,10 +331,8 @@ impl BrowserScreen {
 
         // Check if touch is within the pill area
         if touch_x < pill_x || touch_x > pill_x + pill_w || touch_y < pill_y || touch_y > pill_y + pill_h {
-            println!("[browser_screen] Touch outside pill area: pill_x={}, pill_y={}, pill_w={}, pill_h={}", pill_x, pill_y, pill_w, pill_h);
             return None;
         }
-        println!("[browser_screen] Touch inside pill area, checking buttons");
 
         // Calculate button layout (same as draw function) - FULL HEIGHT
         let button_count = self.buttons.len();
@@ -368,10 +352,8 @@ impl BrowserScreen {
         // Check each button
         let mut button_x = pill_x;
         for (i, _button) in self.buttons.iter().enumerate() {
-            println!("[browser_screen] Checking button {}: x={}, y={}, w={}, h={}", i, button_x, button_y, button_widths[i], button_height);
             if touch_x >= button_x && touch_x <= button_x + button_widths[i] &&
                touch_y >= button_y && touch_y <= button_y + button_height {
-                println!("[browser_screen] Button {} hit!", i);
                 return match i {
                     0 => Some(BrowserAction::Back),
                     1 => Some(BrowserAction::Forward),
@@ -383,7 +365,6 @@ impl BrowserScreen {
             }
             button_x += button_widths[i] + button_spacing;
         }
-        println!("[browser_screen] No button hit");
 
         None
     }

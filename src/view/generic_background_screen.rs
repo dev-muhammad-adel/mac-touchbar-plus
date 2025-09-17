@@ -94,9 +94,6 @@ impl GenericBackgroundScreen {
     }
     
     pub fn update_available_services(&mut self, services: Vec<String>) {
-        println!("[generic_background_screen] ===== UPDATE AVAILABLE SERVICES =====");
-        println!("[generic_background_screen] Received services: {:?}", services);
-        println!("[generic_background_screen] Current selected_service_name: {:?}", self.selected_service_name);
         
         // Check if currently selected service is still available
         let currently_selected = self.selected_service_name.clone();
@@ -105,23 +102,15 @@ impl GenericBackgroundScreen {
                 // Previously selected service is no longer available, clear selection
                 // Don't auto-select - wait for helper to send selected_service: message
                 self.selected_service_name = None;
-                println!("[generic_background_screen] Previously selected service '{}' no longer available, cleared selection", selected_name);
-                println!("[generic_background_screen] selected_service_name is now: {:?}", self.selected_service_name);
             } else {
-                println!("[generic_background_screen] Previously selected service '{}' still available", selected_name);
-                println!("[generic_background_screen] selected_service_name remains: {:?}", self.selected_service_name);
             }
         } else {
             // No service was selected, don't auto-select - wait for helper to send selected_service: message
-            println!("[generic_background_screen] No service selected, waiting for helper to send selected_service: message");
-            println!("[generic_background_screen] selected_service_name remains: {:?}", self.selected_service_name);
         }
         
         if services.is_empty() {
             // No services available, clear selection
             self.selected_service_name = None;
-            println!("[generic_background_screen] No services available, cleared selection");
-            println!("[generic_background_screen] selected_service_name is now: {:?}", self.selected_service_name);
         }
         
         self.available_mpris_services = services;
@@ -133,20 +122,14 @@ impl GenericBackgroundScreen {
         if let Some(selected_name) = &self.selected_service_name {
             if let Some(selected_index) = self.available_mpris_services.iter().position(|s| s == selected_name) {
                 self.expanded_items[selected_index] = true;
-                println!("[generic_background_screen] Expanded selected service '{}' at index {}", selected_name, selected_index);
-            } else {
-                println!("[generic_background_screen] Selected service '{}' not found in available services", selected_name);
             }
         } else {
             // No service selected, expand first item as fallback
             if !self.expanded_items.is_empty() {
                 self.expanded_items[0] = true;
-                println!("[generic_background_screen] No service selected, expanded first item as fallback");
             }
         }
         
-        println!("[generic_background_screen] Final selected_service_name: {:?}", self.selected_service_name);
-        println!("[generic_background_screen] ===== END UPDATE AVAILABLE SERVICES =====");
     }
     
     // Method to update services (no auto-selection - purely reactive to helper)
@@ -156,10 +139,6 @@ impl GenericBackgroundScreen {
     }
 
     pub fn toggle_mpris_item(&mut self, index: usize) {
-        println!("[generic_background_screen] ===== TOGGLE MPRIS ITEM =====");
-        println!("[generic_background_screen] Toggling item at index: {}", index);
-        println!("[generic_background_screen] Current expanded_items: {:?}", self.expanded_items);
-        println!("[generic_background_screen] Current selected_service_name: {:?}", self.selected_service_name);
         
         // Don't do anything if no services are available
         if self.available_mpris_services.is_empty() {
@@ -172,17 +151,12 @@ impl GenericBackgroundScreen {
             if self.expanded_items[index] {
                 // Count how many items are currently expanded
                 let expanded_count = self.expanded_items.iter().filter(|&&expanded| expanded).count();
-                println!("[generic_background_screen] Item is currently expanded, expanded_count: {}", expanded_count);
                 
                 // Only close if there's more than one item expanded
                 if expanded_count > 1 {
                     self.expanded_items[index] = false;
-                    println!("[generic_background_screen] Closed item at index {}", index);
-                } else {
-                    println!("[generic_background_screen] Keeping item open (only one expanded)");
                 }
             } else {
-                println!("[generic_background_screen] Item is currently collapsed, opening it");
                 // Close all other items first (accordion behavior)
                 for i in 0..self.expanded_items.len() {
                     if i != index {
@@ -191,7 +165,6 @@ impl GenericBackgroundScreen {
                 }
                 // Then open the clicked item
                 self.expanded_items[index] = true;
-                println!("[generic_background_screen] Opened item at index {}", index);
             }
             
             // Update selected service when toggling - use service name instead of index
@@ -204,14 +177,10 @@ impl GenericBackgroundScreen {
         } else {
             println!("[generic_background_screen] Index {} out of bounds (len: {})", index, self.expanded_items.len());
         }
-        println!("[generic_background_screen] ==============================");
     }
     
     // Method to send selection command to background service helper
     pub fn send_selection_command(&self, background_service_helper_stream: &mut Option<std::os::unix::net::UnixStream>) {
-        println!("[generic_background_screen] ===== SENDING SELECTION COMMAND =====");
-        println!("[generic_background_screen] Selected service name: {:?}", self.selected_service_name);
-        println!("[generic_background_screen] Available services: {:?}", self.available_mpris_services);
         
         // Don't send anything if no services are available
         if self.available_mpris_services.is_empty() {
@@ -222,8 +191,6 @@ impl GenericBackgroundScreen {
         if let Some(stream) = background_service_helper_stream {
             if let Some(selected_service_name) = &self.selected_service_name {
                 let command = format!("select_service:{}\n", selected_service_name);
-                println!("[generic_background_screen] Command to send: '{}'", command.trim());
-                println!("[generic_background_screen] Command bytes: {:?}", command.as_bytes());
                     
                     if let Err(e) = stream.write_all(command.as_bytes()) {
                         eprintln!("[generic_background_screen] Failed to send selection command: {}", e);
@@ -236,7 +203,6 @@ impl GenericBackgroundScreen {
         } else {
             println!("[generic_background_screen] No background service helper stream available");
         }
-        println!("[generic_background_screen] ======================================");
     }
 
     pub fn draw(

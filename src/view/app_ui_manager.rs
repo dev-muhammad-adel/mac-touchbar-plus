@@ -147,15 +147,12 @@ impl AppUiManager {
             class if is_media_player_window_class(class) => {
                 // Check if it's Spotify specifically for special UI
                 if class == "spotify" {
-                    println!("[app_ui_manager] Drawing SPOTIFY screen");
                     self.spotify_screen.draw(c, x, y, width, height, radius, anim_progress, drag_position);
                 } else {
-                    println!("[app_ui_manager] Drawing MEDIA PLAYER screen for: {}", class);
                     self.media_player_screen.draw(c, x, y, width, height, radius, anim_progress, drag_position);
                 }
             }
             class if is_browser_window_class(class) => {
-                println!("[app_ui_manager] Drawing BROWSER screen for: {} with {} active buttons", class, self.browser_screen.buttons.iter().filter(|b| b.active).count());
                 // Check if any browser buttons have changed for partial redraw
                 let any_browser_button_changed = self.browser_screen.buttons.iter().any(|b| b.changed);
                 let complete_redraw = !any_browser_button_changed; // Use complete redraw if no buttons changed
@@ -163,14 +160,12 @@ impl AppUiManager {
             }
             _ => {
                 // Fall back to default module screen behavior
-                println!("[app_ui_manager] Drawing DEFAULT UI for: {}", class);
                 self.draw_default_ui(c, x, y, width, height, radius, anim_progress, class);
             }
         }
     }
             None => {
                 // No window class available (logout state) - show empty module screen
-                println!("[app_ui_manager] Drawing DEFAULT UI for unknown window");
                 self.draw_default_ui(c, x, y, width, height, radius, anim_progress, "");
             }
         }

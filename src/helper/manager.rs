@@ -534,11 +534,6 @@ impl MediaPlayerHelperManager {
         // Get environment variables using the bash script approach
         let env_vars = get_env_from_session(user, leader_pid);
         
-        // Debug: print all environment variables being passed
-        println!("[main] Environment variables for Media Player helper:");
-        for (key, value) in &env_vars {
-            println!("[main]   {}={}", key, value);
-        }
 
         let helper_path = "/usr/bin/tiny-dfr-media-helper";
 

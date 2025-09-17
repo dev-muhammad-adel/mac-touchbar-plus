@@ -29,7 +29,6 @@ pub fn draw_media_section(
     for (i, button) in media_buttons.iter_mut().enumerate() {
         // Skip rendering buttons with 0 width (hidden buttons)
         if media_button_widths[i] == 0.0 {
-            println!("[media_screen] Skipping hidden button {} (width: 0.0)", i);
             continue;
         }
         
@@ -54,9 +53,6 @@ pub fn draw_media_section(
             let h = top - bot + radius * 2.0;
             let r = radius.min(h / 2.0);
             if (button.background || button.active) {
-                if button.action == input_linux::Key::Compose {
-                    println!("[media_screen] Rendering Custom/Compose button with background: {}, active: {}", button.background, button.active);
-                }
                 c.set_source_rgb(color, color, color);
                 if media_count == 1 {
                     // Single button: all corners rounded

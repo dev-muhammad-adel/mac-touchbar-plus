@@ -44,7 +44,6 @@ impl MediaTouchHandler {
                 TouchEvent::Down(dn) => {
                     let x = dn.x_transformed(width);
                     let y = dn.y_transformed(height);
-                    println!("[media_touch] Touch down at ({}, {})", x, y);
                     
                     let available_mpris_services = &app_ui_manager.generic_background_screen.available_mpris_services;
                     if let Some((group, idx)) = layers.get_mut(active_layer).ok_or(crate::MainError::LayerNotFound(*active_layer))?.hit_test(x, width as i32, Some(active_layer.clone()), available_mpris_services) {
@@ -64,21 +63,15 @@ impl MediaTouchHandler {
                     }
                 },
                 TouchEvent::Up(up) => {
-                    println!("[media_touch] Touch up event for slot: {}", up.seat_slot());
                     if !touches.contains_key(&up.seat_slot()) {
-                        println!("[media_touch] Touch slot {} not found in touches, skipping", up.seat_slot());
                         return Ok(());
                     }
                     
                     let (layer, group, idx) = Self::get_touch_slot(touches, up.seat_slot())?;
-                    println!("[media_touch] Touch up - layer: {:?}, group: {}, idx: {}", layer, group, idx);
                     if *group == "media" {
-                        println!("[media_touch] Processing media group touch up");
                         Self::handle_touch_up(*idx, layer, layers, uinput, app_ui_manager)?;
                         touches.remove(&up.seat_slot());
-                        println!("[media_touch] Touch slot {} removed", up.seat_slot());
                     } else {
-                        println!("[media_touch] Group is not 'media', skipping touch up processing");
                     }
                 },
                 _ => {}
@@ -139,7 +132,6 @@ impl MediaTouchHandler {
             
             touches.insert(seat_slot, (active_layer.clone(), "media", idx));
             button.set_active(uinput, true);
-            println!("[media_touch] Touch down for media button {} at slot {}", idx, seat_slot);
         }
         
         Ok(())
@@ -170,7 +162,6 @@ impl MediaTouchHandler {
             }
             
             button.set_active(uinput, true);
-            println!("[media_touch] Touch motion for media button {}", idx);
         }
         
         Ok(())
@@ -207,11 +198,8 @@ impl MediaTouchHandler {
                 return Ok(());
             }
             
-            println!("[media_touch] Setting button {} to inactive", idx);
             button.set_active(uinput, false);
-            println!("[media_touch] Touch up for media button {} completed", idx);
         } else {
-            println!("[media_touch] No split found for layer");
         }
         
         Ok(())

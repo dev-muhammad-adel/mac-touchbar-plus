@@ -53,16 +53,13 @@ impl BrowserTouchHandler {
         if let Event::Touch(te) = event {
             match te {
                 TouchEvent::Down(dn) => {
-                    println!("[browser_touch] Touch down event in browser handler");
                     let x = dn.x_transformed(width);
                     let y = dn.y_transformed(height);
-                    println!("[browser_touch] Touch down at ({}, {})", x, y);
                     
                     let available_mpris_services = &app_ui_manager.generic_background_screen.available_mpris_services;
                     if let Some((group, idx)) = layers.get_mut(active_layer).ok_or(crate::MainError::LayerNotFound(*active_layer))?.hit_test(x, width as i32, Some(active_layer.clone()), available_mpris_services) {
                         if group == "modules" {
                             touches.insert(dn.seat_slot(), (active_layer.clone(), group, idx));
-                            println!("[browser_touch] Touch stored for modules group, slot: {}", dn.seat_slot());
                             
                             // Delegate to browser touch handler
                             Self::handle_touch_down(
@@ -73,7 +70,6 @@ impl BrowserTouchHandler {
                     }
                 },
                 TouchEvent::Motion(mtn) => {
-                    println!("[browser_touch] Touch motion event in browser handler");
                     if !touches.contains_key(&mtn.seat_slot()) {
                         return Ok(());
                     }
@@ -91,16 +87,12 @@ impl BrowserTouchHandler {
                     }
                 },
                 TouchEvent::Up(up) => {
-                    println!("[browser_touch] Touch up event in browser handler for slot: {}", up.seat_slot());
                     if !touches.contains_key(&up.seat_slot()) {
-                        println!("[browser_touch] Touch slot {} not found in touches, skipping", up.seat_slot());
                         return Ok(());
                     }
                     
                     let (_layer, group, _idx) = Self::get_touch_slot(touches, up.seat_slot())?;
                     if *group == "modules" {
-                        println!("[browser_touch] Touch up - layer: {:?}, group: {}, idx: {}", _layer, group, _idx);
-                        println!("[browser_touch] Processing modules group touch up in browser handler");
              
                         // Delegate to browser touch handler
                         Self::handle_touch_up(
@@ -109,7 +101,6 @@ impl BrowserTouchHandler {
                         
                         // Remove touch slot - Browser handler manages its own slots
                         touches.remove(&up.seat_slot());
-                        println!("[browser_touch] Touch slot {} removed by browser handler", up.seat_slot());
                     }
                 },
                 _ => {}

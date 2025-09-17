@@ -500,7 +500,6 @@ impl X11WindowMonitor {
                         reply.value[3],
                     ]);
                     
-                    eprintln!("[helper] Active window ID: {}", window_id);
                     return Some(window_id);
                 }
             }
@@ -761,7 +760,6 @@ impl HyprlandWindowMonitor {
         for line in reader.lines() {
             match line {
                 Ok(line) => {
-                    eprintln!("[helper] Event received: '{}'", line);
                     
                     if line.starts_with("activewindowv2>>") {
                         // Extract window ID from activewindowv2 event

@@ -225,11 +225,9 @@ pub async fn get_chromium_status_with_delay(delay_ms: u64) -> Option<MediaStatus
     
     // Get playback status
     let playback_status: String = proxy.get_property("PlaybackStatus").await.ok()?;
-    println!("[chromium-helper] DEBUG: PlaybackStatus = '{}'", playback_status);
     
     // Try to get Rate property to see if it's playing
     let rate: f64 = proxy.get_property("Rate").await.unwrap_or(1.0);
-    println!("[chromium-helper] DEBUG: Rate = {}", rate);
     
     // Get additional properties that might help detect pause state
     let can_play: bool = proxy.get_property("CanPlay").await.unwrap_or(false);
@@ -238,21 +236,17 @@ pub async fn get_chromium_status_with_delay(delay_ms: u64) -> Option<MediaStatus
     let _can_go_next: bool = proxy.get_property("CanGoNext").await.unwrap_or(false);
     let _can_go_previous: bool = proxy.get_property("CanGoPrevious").await.unwrap_or(false);
     
-    println!("[chromium-helper] DEBUG: CanPlay = {}, CanPause = {}", can_play, can_pause);
     
     // Chromium's MPRIS implementation is inconsistent - we need to trust PlaybackStatus
     // and ignore Rate as it's often wrong (always 1 even when paused)
     let is_playing = match playback_status.as_str() {
         "Playing" => {
-            println!("[chromium-helper] DEBUG: PlaybackStatus='Playing' -> is_playing=true");
             true
         },
         "Paused" => {
-            println!("[chromium-helper] DEBUG: PlaybackStatus='Paused' -> is_playing=false");
             false
         },
         "Stopped" => {
-            println!("[chromium-helper] DEBUG: PlaybackStatus='Stopped' -> is_playing=false");
             false
         },
         _ => {
@@ -264,7 +258,6 @@ pub async fn get_chromium_status_with_delay(delay_ms: u64) -> Option<MediaStatus
     
     // Get position - try different approaches for Chromium
     let position: i64 = proxy.get_property("Position").await.unwrap_or(0);
-    println!("[chromium-helper] DEBUG: Raw position from MPRIS: {}μs", position);
     
     // Try to get Shuffle property
     let _shuffle: bool = proxy.get_property("Shuffle").await.unwrap_or(false);
@@ -320,7 +313,6 @@ pub async fn get_chromium_status_with_delay(delay_ms: u64) -> Option<MediaStatus
             // MPRIS position looks valid, use it and update our tracking
             *last_position = mpris_ratio;
             *last_update = current_time;
-            println!("[chromium-helper] DEBUG: Using MPRIS position: {}", mpris_ratio);
             mpris_ratio
         } else if is_playing {
             // During playback, MPRIS position is invalid, use our tracking
@@ -328,11 +320,9 @@ pub async fn get_chromium_status_with_delay(delay_ms: u64) -> Option<MediaStatus
             let new_position = (*last_position + elapsed / duration).min(1.0);
             *last_position = new_position;
             *last_update = current_time;
-            println!("[chromium-helper] DEBUG: Using tracked position during playback: {}", new_position);
             new_position
         } else {
             // When paused and MPRIS is invalid, use our tracked position
-            println!("[chromium-helper] DEBUG: Using tracked position when paused: {}", *last_position);
             *last_position
         }
     } else {
@@ -856,12 +846,8 @@ async fn monitor_chromium_events_async(status_sender: Arc<Mutex<Option<UnixStrea
                     if let Ok(header) = msg.header() {
                         if let Ok(Some(sender)) = header.sender() {
                             let sender_str = sender.as_str();
-                            println!("[chromium-helper] DEBUG: Received signal {}.{} from sender: {}", 
-                                interface_str, member_str, sender_str);
                             
                             if sender_str != unique_name.as_str() {
-                                println!("[chromium-helper] DEBUG: Skipping signal from different service: {} != {}", 
-                                    sender_str, unique_name);
                                 continue; // Skip messages from other services
                             }
                         }

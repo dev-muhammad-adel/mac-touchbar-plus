@@ -373,7 +373,6 @@ impl BackgroundServicePlayer {
             let current_time_x = current_time_x.max(content_start_x);
             let current_time_y = current_time_y.max(y + current_time_ext.height());
             
-            println!("[background_service_player] Rendering current time: '{}' at ({}, {})", current_time_str, current_time_x, current_time_y);
             
             // Draw current time with a background rectangle for visibility
             c.save().unwrap();
@@ -413,7 +412,6 @@ impl BackgroundServicePlayer {
             let total_time_x = total_time_x.max(progress_x + progress_w + time_margin);
             let total_time_y = total_time_y.max(y + total_time_ext.height());
             
-            println!("[background_service_player] Rendering total time: '{}' at ({}, {})", total_time_str, total_time_x, total_time_y);
             
             // Draw total time with a background rectangle for visibility
             c.save().unwrap();
