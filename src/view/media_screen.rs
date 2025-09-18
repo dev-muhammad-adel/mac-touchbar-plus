@@ -5,8 +5,8 @@ use crate::services::sessionmanager::SessionState;
 use crate::config::Config;
 use input_linux::Key;
 
-const BUTTON_COLOR_INACTIVE: f64 = 0.172;
-const BUTTON_COLOR_ACTIVE: f64 = 0.350;
+const BUTTON_COLOR_INACTIVE: f64 = 0.250;
+const BUTTON_COLOR_ACTIVE: f64 = 0.400;
 
 pub fn draw_media_section(
     c: &Context,
@@ -47,7 +47,7 @@ pub fn draw_media_section(
             let this_button_width = media_button_widths[i].round();
             let is_first = i == 0;
             let is_last = i == media_count - 1;
-            let x = left_edge;
+            let x = left_edge.round();
             let y = bot - radius;
             let w = this_button_width;
             let h = top - bot + radius * 2.0;
@@ -137,6 +137,7 @@ pub fn draw_media_section(
             }
             c.set_source_rgb(1.0, 1.0, 1.0);
             button.render(c, height, left_edge, this_button_width.ceil() as u64, 0.0);
+            
             button.changed = false;
             if !complete_redraw {
                 modified_regions.push(ClipRect::new(
@@ -147,8 +148,8 @@ pub fn draw_media_section(
                 ));
             }
         }
-        // Always update left_edge
-        left_edge += media_button_widths[i];
+        // Always update left_edge for positioning (use rounded width to avoid gaps)
+        left_edge += media_button_widths[i].round();
         if i != media_count - 1 {
             left_edge += media_spacing_px;
         }
@@ -163,13 +164,14 @@ pub fn media_hit_test(
 ) -> Option<usize> {
     let mut current_left = left_edge;
     for i in 0..media_count {
-        let right = current_left + media_button_widths[i].round();
+        let button_width = media_button_widths[i].round();
+        let right = current_left + button_width;
         if x >= current_left && x < right {
             return Some(i);
         }
         current_left = right;
         if i != media_count - 1 {
-            current_left += 2.0; // media_spacing_px
+            current_left += 1.0; // media_spacing_px
         }
     }
     None
