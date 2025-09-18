@@ -303,6 +303,10 @@ impl MediaPlayerScreen {
 
         
         if in_bounds {
+            // If progress bar is being dragged, ignore play/pause button touches
+            if self.is_dragging {
+                return None;
+            }
             
             // Then check if touch is within the rounded rectangle
             let adjusted_x = touch_x - icon_x;
@@ -344,12 +348,20 @@ impl MediaPlayerScreen {
         let min_progress_width = 50.0; // Same minimum as drawing function
         let progress_w = (pill_w - (progress_x - pill_x) - (estimated_total_time_width + total_time_margin + 16.0)).max(min_progress_width); // Use full available width minus margins, with minimum width
         
-        // Check if touch is on the progress bar area
-        if touch_x >= progress_x && touch_x <= progress_x + progress_w &&
-           touch_y >= progress_y && touch_y <= progress_y + progress_h {
+        // Check if touch is on the progress bar area - use conditional margins like spotify_screen
+        let hit_test_x_min = if self.is_dragging { progress_x - 100.0 } else { progress_x };
+        let hit_test_x_max = if self.is_dragging { progress_x + progress_w + 100.0 } else { progress_x + progress_w };
+        let hit_test_y_min = if self.is_dragging { progress_y - 20.0 } else { progress_y };
+        let hit_test_y_max = if self.is_dragging { progress_y + progress_h + 20.0 } else { progress_y + progress_h };
+        
+        if touch_x >= hit_test_x_min && touch_x <= hit_test_x_max &&
+           touch_y >= hit_test_y_min && touch_y <= hit_test_y_max {
             
             // Calculate progress ratio based on touch position
-            let progress_ratio = (touch_x - progress_x) / progress_w;
+            // Clamp touch_x to the visual progress bar area for ratio calculation
+            let clamped_touch_x = touch_x.clamp(progress_x, progress_x + progress_w);
+            let raw_ratio = (clamped_touch_x - progress_x) / progress_w;
+            let progress_ratio = raw_ratio.clamp(0.0, 1.0);
             
             // Check if we have a status to determine head position
             if let Some(status) = &self.last_status {

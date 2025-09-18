@@ -3,10 +3,8 @@
 
 use std::sync::{Arc, Mutex};
 use std::os::unix::net::UnixStream;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::io::Write;
 use serde_json::json;
-use chrono;
 
 // Helper functions to check if services are active (delegated to service modules)
 pub fn is_spotify_active() -> bool {

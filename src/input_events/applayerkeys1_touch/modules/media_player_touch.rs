@@ -205,6 +205,8 @@ impl MediaPlayerTouchHandler {
             println!("[media_player_touch] Media Player touch interaction ended");
             *media_player_touch_active = false;
             app_ui_manager.media_player_screen.reset_drag_state();
+            app_ui_manager.spotify_screen.reset_drag_state();
+            app_ui_manager.spotify_screen.clear_pressed_button();
             *needs_complete_redraw = true;
             println!("[media_player_touch] Media Player touch interaction ended, keeping drag position for smooth transition");
         }
@@ -287,6 +289,8 @@ impl MediaPlayerTouchHandler {
             }
             AppAction::Spotify(SpotifyAction::TogglePlayPause) => {
                 *media_player_touch_active = true;
+                *needs_complete_redraw = true; // Trigger redraw for visual feedback
+
                 if let Some(stream) = media_player_helper_stream {
                     Self::send_media_player_command(stream, "play_pause")?;
                 }
@@ -317,6 +321,7 @@ impl MediaPlayerTouchHandler {
             AppAction::Spotify(SpotifyAction::Next) => {
                 println!("[media_player_touch] Executing Spotify Next");
                 *media_player_touch_active = true;
+                *needs_complete_redraw = true; // Trigger redraw for visual feedback
                 if let Some(stream) = media_player_helper_stream {
                     Self::send_media_player_command(stream, "next")?;
                 }
@@ -324,6 +329,7 @@ impl MediaPlayerTouchHandler {
             AppAction::Spotify(SpotifyAction::Previous) => {
                 println!("[media_player_touch] Executing Spotify Previous");
                 *media_player_touch_active = true;
+                *needs_complete_redraw = true; // Trigger redraw for visual feedback
                 if let Some(stream) = media_player_helper_stream {
                     Self::send_media_player_command(stream, "previous")?;
                 }
@@ -331,6 +337,7 @@ impl MediaPlayerTouchHandler {
             AppAction::Spotify(SpotifyAction::Stop) => {
                 println!("[media_player_touch] Executing Spotify Stop");
                 *media_player_touch_active = true;
+                
                 if let Some(stream) = media_player_helper_stream {
                     Self::send_media_player_command(stream, "stop")?;
                 }

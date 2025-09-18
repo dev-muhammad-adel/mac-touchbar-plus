@@ -1,14 +1,9 @@
 
 use std::os::unix::net::UnixStream;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::thread;
 use std::time::Duration;
 
-fn execute_browser_command_cross_platform(command: &str, browser_type: &str) -> bool {
-    // Placeholder for future MPRIS browser media control
-    eprintln!("[browser-helper] MPRIS browser control not yet implemented for '{}' on browser type: '{}'", command, browser_type);
-    false
-}
 
 
 // Placeholder for future MPRIS browser media control implementation
@@ -17,17 +12,10 @@ fn execute_mpris_browser_control(command: &str, browser_type: &str) -> bool {
     false
 }
 
-// Placeholder for future MPRIS browser media control commands
-fn get_mpris_browser_commands(browser_type: &str) -> Vec<String> {
-    eprintln!("[browser-helper] MPRIS browser commands not yet implemented for browser type: '{}'", browser_type);
-    vec![]
-}
 
 
 
 fn execute_command(command_name: &str, command: &str, browser_type: &str) {
-    eprintln!("[browser-helper] Executing {} command for {}: '{}'", command_name, browser_type, command);
-    
     // Placeholder for future MPRIS browser media control
     let success = execute_mpris_browser_control(command, browser_type);
     
@@ -53,19 +41,6 @@ fn handle_command_with_browser_type(command: &str, browser_type: &str) {
     }
 }
 
-// Placeholder for future MPRIS browser media control support
-fn get_mpris_browser_support(browser_type: &str) -> bool {
-    match browser_type.to_lowercase().as_str() {
-        "firefox" | "chrome" | "chromium" | "google-chrome" | "brave" | "brave-browser" | "edge" | "opera" => {
-            eprintln!("[browser-helper] MPRIS support not yet implemented for browser: {}", browser_type);
-            false
-        }
-        _ => {
-            eprintln!("[browser-helper] Unknown browser type for MPRIS: {}", browser_type);
-            false
-        }
-    }
-}
 
 
 

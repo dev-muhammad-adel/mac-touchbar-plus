@@ -26,14 +26,15 @@ type FunctionLayerResult<T> = Result<T, FunctionLayerError>;
 pub const BUTTON_SPACING_PX: i32 = 16;
 pub const APP_LAYER_KEYS2_GAP_PX: f64 = 4.0; // Custom gap for AppLayerKeys2 (Custom2)
 pub const APP_LAYER_KEYS3_GAP_PX: f64 = 4.0; // Custom gap for AppLayerKeys3
-pub const BUTTON_COLOR_INACTIVE: f64 = 0.172;
-pub const BUTTON_COLOR_ACTIVE: f64 = 0.350;
+pub const BUTTON_COLOR_INACTIVE: f64 = 0.250;
+pub const BUTTON_COLOR_ACTIVE: f64 = 0.400;
 
 // Layout constants
-const MEDIA_SPACING_PX: f64 = 2.0;
-const BUTTON_RADIUS: f64 = 8.0;
-const BOTTOM_MARGIN_RATIO: f64 = 0.15;
-const TOP_MARGIN_RATIO: f64 = 0.85;
+const MEDIA_SPACING_PX: f64 = 0.0;
+const BUTTON_RADIUS: f64 = 13.0;
+const BOTTOM_MARGIN_RATIO: f64 = 0.0;
+const TOP_MARGIN_RATIO: f64 = 1.0;
+
 const FONT_SIZE: f64 = 32.0;
 
 #[derive(Default)]
@@ -82,7 +83,7 @@ impl FunctionLayerKeys1LayoutInfo {
             .collect();
         
         let visible_count = visible_buttons.len();
-        let total_spacing = if visible_count > 1 { MEDIA_SPACING_PX * (visible_count as f64 - 1.0) } else { 0.0 };
+        let total_spacing = 0.0; // No spacing between buttons
         let button_area = media_width - total_spacing;
         
         let weights: Vec<f32> = visible_buttons.iter().map(|(_, b)| b.fraction.unwrap_or(1.0)).collect();
@@ -186,8 +187,12 @@ impl FunctionLayer {
 
     // Helper function to calculate button dimensions
     fn calculate_button_dimensions(height: i32) -> (f64, f64) {
-        let bot = (height as f64) * BOTTOM_MARGIN_RATIO;
-        let top = (height as f64) * TOP_MARGIN_RATIO;
+        let height_f64 = height as f64;
+        let radius_pixels = BUTTON_RADIUS;
+        
+        // Adjust margins to account for button radius
+        let bot = (height_f64 * BOTTOM_MARGIN_RATIO) + radius_pixels;
+        let top = (height_f64 * TOP_MARGIN_RATIO) - radius_pixels;
         (bot, top)
     }
 
@@ -513,7 +518,7 @@ impl FunctionLayer {
                     .collect();
                 
                 let visible_count = visible_buttons.len();
-                let total_spacing = if visible_count > 1 { MEDIA_SPACING_PX * (visible_count as f64 - 1.0) } else { 0.0 };
+                let total_spacing = 0.0; // No spacing between buttons
                 let button_area = media_width - total_spacing;
                 
                 let weights: Vec<f32> = visible_buttons.iter().map(|(_, b)| b.fraction.unwrap_or(1.0)).collect();
@@ -547,7 +552,7 @@ impl FunctionLayer {
                     }
                     left_edge = right_edge;
                     if i != media_count - 1 {
-                        left_edge += MEDIA_SPACING_PX;
+                        // No spacing between buttons anymore
                     }
                 }
             }
@@ -583,6 +588,7 @@ impl FunctionLayer {
     /// Returns (group, index) where group is "modules" or "media" or "flat", and index is the button index in that group
     /// - "modules" and "media": FunctionLayerKeys1 (App Layer 1) with split layout
     /// - "flat": Standard function layers (Fn keys, App Layer 2, App Layer 3)
+    /// - "gap": Gap/separator area between modules and media (returns None to ignore touches)
     pub fn hit_test(&self, x: f64, width: i32, layer_index: Option<LayerKey>, available_mpris_services: &[String]) -> Option<(&'static str, usize)> {
         if let Some(LayerKey::Media) = layer_index {
             // This is FunctionLayerKeys1 (App Layer 1) - check for split layout
@@ -593,6 +599,14 @@ impl FunctionLayer {
                 }
                 if let Some(idx) = self.hit_test_media(x, width, layer_index, available_mpris_services) {
                     return Some(("media", idx));
+                }
+                // Check if touch is in the gap/separator area - return None to ignore
+                let gap = FunctionLayerKeys1LayoutInfo::get_gap_for_layer(layer_index);
+                let total_width = (width - gap as i32) as f64;
+                let modules_width = (_split.modules_width as f64 * total_width).round();
+                if x >= modules_width && x < modules_width + gap {
+                    // Touch is in gap/separator area - ignore it
+                    return None;
                 }
             }
             // LayerKeys1 without split layout - no hit possible

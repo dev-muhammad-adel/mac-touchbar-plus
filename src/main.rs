@@ -10,21 +10,16 @@ use anyhow::Result;
 use cairo::{Format, ImageSurface};
 use drm::control::ClipRect;
 use input::{
-    event::{
-        device::DeviceEvent,
-        keyboard::{KeyState, KeyboardEvent, KeyboardEventTrait},
-        touch::{TouchEvent, TouchEventPosition, TouchEventSlot},
-        Event, EventTrait,
-    },
     Device as InputDevice, Libinput, LibinputInterface,
+    event::EventTrait,
 };
 use input_linux::{uinput::UInputHandle, EventKind, Key};
 use input_linux_sys::{input_id, uinput_setup};
 use libc::{c_char, O_ACCMODE, O_RDONLY, O_RDWR, O_WRONLY};
 use nix::{
-    sys::eventfd::{eventfd, EfdFlags},
     sys::{
         epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags},
+        eventfd::EfdFlags,
         signal::{SaFlags, SigAction, SigHandler, SigSet, Signal},
     },
 };
@@ -494,7 +489,7 @@ pub mod view;
 pub mod services;
 pub mod helper;
 
-use crate::helper::manager::{HelperManager, MediaPlayerHelperManager, BrowserHelperManager, BackgroundServiceHelperManager, ProcessStatus};
+use crate::helper::manager::{HelperManager, MediaPlayerHelperManager, BrowserHelperManager, BackgroundServiceHelperManager};
 
 
 
@@ -664,6 +659,17 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
             needs_complete_redraw = true;
         }
         let mut next_timeout_ms = TIMEOUT_MS;
+        
+        // Use shorter timeout when waiting for session ready to start focus helper
+        if let Some(user) = &current_user {
+            if helper_manager.is_process_none() && !helper_manager.check_session_ready() && !app_ui_manager.generic_media_enabled {
+                next_timeout_ms = 100; // 100ms timeout when waiting for session ready
+                if DEBUG_LOGGING {
+                    println!("[main] Using fast timeout (100ms) while waiting for session ready");
+                }
+            }
+        }
+        
         if cfg.enable_pixel_shift {
             let (pixel_shift_needs_redraw, pixel_shift_next_timeout_ms) = pixel_shift.update();
             if pixel_shift_needs_redraw {

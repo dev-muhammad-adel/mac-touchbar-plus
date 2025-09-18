@@ -55,7 +55,7 @@ pub fn draw_module_screen(
     let display_text = match window_class {
         "" => "",
         "Install WindowMonitorPro" => "Install WindowMonitorPro Extension",
-        other => other,
+        other => "",   // to show class name other => other,
     };
     
     let ext = c.text_extents(display_text).unwrap();

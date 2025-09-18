@@ -132,9 +132,9 @@ impl BrowserScreen {
   
             // Draw button background
             let color = if button.active {
-                0.350 // BUTTON_COLOR_ACTIVE
+                0.400 // BUTTON_COLOR_ACTIVE
             } else {
-                0.172 // BUTTON_COLOR_INACTIVE
+                0.280 // BUTTON_COLOR_INACTIVE
             };
             
             c.save().unwrap();

@@ -621,6 +621,10 @@ impl GenericBackgroundScreen {
         
         if touch_x >= icon_x && touch_x <= icon_x + icon_size &&
            touch_y >= icon_y && touch_y <= icon_y + icon_size {
+            // If progress bar is being dragged, ignore close button
+            if self.background_service_player.is_dragging {
+                return None;
+            }
             return Some(GenericBackgroundAction::CloseGenericMedia);
         }
         
@@ -666,6 +670,10 @@ impl GenericBackgroundScreen {
             // Check if touch is within this MPRIS item
             if touch_x >= current_x && touch_x <= current_x + item_width &&
                touch_y >= items_y && touch_y <= items_y + item_height {
+                // If progress bar is being dragged, ignore service selection
+                if self.background_service_player.is_dragging {
+                    return None;
+                }
                 return Some(GenericBackgroundAction::ToggleMprisItem(index));
             }
             
@@ -683,6 +691,10 @@ impl GenericBackgroundScreen {
                                 return Some(action);
                             }
                         }
+                    }
+                    // If progress bar is being dragged, ignore service selection
+                    if self.background_service_player.is_dragging {
+                        return None;
                     }
                     // If no specific control was hit, toggle the item
                     return Some(GenericBackgroundAction::ToggleMprisItem(index));
@@ -704,17 +716,40 @@ impl GenericBackgroundScreen {
         self.background_service_player.last_status = self.last_status.clone();
         
         // Use the background service player to handle hit testing
-        if let Some(action) = self.background_service_player.hit_test_controls(touch_x, touch_y, x, y, width, height) {
+        if let Some(action) = self.background_service_player.hit_test_controls(touch_x, touch_y, x, y, width, height, true) {
             // Convert BackgroundServicePlayerAction to GenericBackgroundAction
             match action {
-                BackgroundServicePlayerAction::PlayPause => Some(GenericBackgroundAction::BackgroundServicePlayerPlayPause),
-                BackgroundServicePlayerAction::Next => Some(GenericBackgroundAction::BackgroundServicePlayerNext),
-                BackgroundServicePlayerAction::Previous => Some(GenericBackgroundAction::BackgroundServicePlayerPrevious),
+                BackgroundServicePlayerAction::PlayPause => {
+                    // If progress bar is being dragged, ignore play/pause
+                    if self.background_service_player.is_dragging {
+                        return None;
+                    }
+                    Some(GenericBackgroundAction::BackgroundServicePlayerPlayPause)
+                },
+                BackgroundServicePlayerAction::Next => {
+                    // If progress bar is being dragged, ignore next
+                    if self.background_service_player.is_dragging {
+                        return None;
+                    }
+                    Some(GenericBackgroundAction::BackgroundServicePlayerNext)
+                },
+                BackgroundServicePlayerAction::Previous => {
+                    // If progress bar is being dragged, ignore previous
+                    if self.background_service_player.is_dragging {
+                        return None;
+                    }
+                    Some(GenericBackgroundAction::BackgroundServicePlayerPrevious)
+                },
                 BackgroundServicePlayerAction::Seek(ratio) => Some(GenericBackgroundAction::BackgroundServicePlayerSeek(ratio)),
                 BackgroundServicePlayerAction::DragHead(ratio) => Some(GenericBackgroundAction::BackgroundServicePlayerDragHead(ratio)),
             }
         } else {
             None
         }
+    }
+    
+    pub fn handle_touch_up(&mut self) {
+        // Clear pressed button state when touch is released
+        self.background_service_player.clear_pressed_button();
     }
 }

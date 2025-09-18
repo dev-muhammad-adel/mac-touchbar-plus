@@ -112,7 +112,12 @@ impl ModulesTouchHandler {
                             Self::handle_generic_background_touch_down(
                                 x, y, width, height, current_window_class, app_ui_manager, background_service_helper_stream, needs_complete_redraw, cfg_enable_pixel_shift
                             )?;
+                        } else if group == "media" {
+                            println!("[modules_touch] Touch detected in media section at ({}, {}) - ignoring for generic background", x, y);
                         }
+                    } else {
+                        // Touch is in gap/separator area or outside valid areas - ignore
+                        println!("[modules_touch] Touch detected in gap/separator area at ({}, {}) - ignoring", x, y);
                     }
                 },
                 input::event::touch::TouchEvent::Motion(mtn) => {
@@ -235,6 +240,7 @@ impl ModulesTouchHandler {
                 Self::send_background_service_command(background_service_helper_stream, "previous")?;
             }
             crate::view::generic_background_screen::GenericBackgroundAction::BackgroundServicePlayerSeek(ratio) => {
+                // Send seek command for direct seek (tap on progress bar)
                 Self::send_background_service_command(background_service_helper_stream, &format!("seek:{}", ratio))?;
             }
             crate::view::generic_background_screen::GenericBackgroundAction::BackgroundServicePlayerDragHead(ratio) => {
@@ -317,8 +323,12 @@ impl ModulesTouchHandler {
     ) -> crate::MainResult<()> {
         // Reset any dragging state in the background service player
         app_ui_manager.generic_background_screen.background_service_player.stop_dragging();
+        
+        // Clear pressed button state for visual feedback
+        app_ui_manager.generic_background_screen.handle_touch_up();
+        
         *needs_complete_redraw = true;
-        println!("[modules_touch] Generic background touch up - dragging stopped");
+        println!("[modules_touch] Generic background touch up - dragging stopped and button state cleared");
         Ok(())
     }
 

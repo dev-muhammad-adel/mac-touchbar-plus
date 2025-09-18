@@ -604,6 +604,9 @@ pub async fn handle_spotify_command(command: &str, status_sender: &Arc<Mutex<Opt
                         // Store this seek for later execution
                         unsafe {
                             PENDING_SEEK = Some(position);
+                            // Set seek tracking to prevent status updates from overriding visual feedback
+                            LAST_SEEK_POSITION = Some(position);
+                            LAST_SEEK_TIME = Some(now);
                         }
                         log_info(&format!("Seek throttled: position {} (too soon after last seek, will execute later)", position));
                         
@@ -654,6 +657,7 @@ pub async fn handle_spotify_command(command: &str, status_sender: &Arc<Mutex<Opt
                     if execute_seek_with_ui_update(pending_position, status_sender, "Executing pending seek").await {
                         log_info(&format!("Pending seek executed successfully to position: {:.2}%", pending_position * 100.0));
                         unsafe {
+                            LAST_SEEK_POSITION = Some(pending_position);
                             LAST_SEEK_TIME = Some(now);
                             PENDING_SEEK = None;
                         }
