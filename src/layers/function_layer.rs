@@ -30,7 +30,7 @@ pub const BUTTON_COLOR_INACTIVE: f64 = 0.250;
 pub const BUTTON_COLOR_ACTIVE: f64 = 0.400;
 
 // Layout constants
-const MEDIA_SPACING_PX: f64 = 0.0;
+const MEDIA_SPACING_PX: f64 = 1.0;
 const BUTTON_RADIUS: f64 = 13.0;
 const BOTTOM_MARGIN_RATIO: f64 = 0.0;
 const TOP_MARGIN_RATIO: f64 = 1.0;
@@ -83,7 +83,7 @@ impl FunctionLayerKeys1LayoutInfo {
             .collect();
         
         let visible_count = visible_buttons.len();
-        let total_spacing = 0.0; // No spacing between buttons
+        let total_spacing = if visible_count > 1 { MEDIA_SPACING_PX * (visible_count as f64 - 1.0) } else { 0.0 };
         let button_area = media_width - total_spacing;
         
         let weights: Vec<f32> = visible_buttons.iter().map(|(_, b)| b.fraction.unwrap_or(1.0)).collect();
@@ -518,7 +518,7 @@ impl FunctionLayer {
                     .collect();
                 
                 let visible_count = visible_buttons.len();
-                let total_spacing = 0.0; // No spacing between buttons
+                let total_spacing = if visible_count > 1 { MEDIA_SPACING_PX * (visible_count as f64 - 1.0) } else { 0.0 };
                 let button_area = media_width - total_spacing;
                 
                 let weights: Vec<f32> = visible_buttons.iter().map(|(_, b)| b.fraction.unwrap_or(1.0)).collect();
@@ -552,7 +552,7 @@ impl FunctionLayer {
                     }
                     left_edge = right_edge;
                     if i != media_count - 1 {
-                        // No spacing between buttons anymore
+                        left_edge += MEDIA_SPACING_PX;
                     }
                 }
             }
