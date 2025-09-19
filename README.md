@@ -1,46 +1,72 @@
 # tiny-dfr
-The most basic dynamic function row daemon possible
+
+A dynamic function row daemon for Linux systems with touchbar support, providing intelligent context-aware controls and media management.
 
 ## Features
 
-### Image Caching System
-tiny-dfr now includes a sophisticated image caching system that significantly improves performance:
+### 🎛️ Multi-Layer System
 
-- **LRU Cache**: Least Recently Used caching algorithm for optimal memory management
-- **Configurable Limits**: Adjustable cache size and memory limits
-- **Performance Metrics**: Real-time cache hit rate and memory usage monitoring
-- **Automatic Cleanup**: Intelligent cache cleanup to prevent memory bloat
-- **Debug Tools**: Built-in cache debugging and management commands
+tiny-dfr features a sophisticated multi-layer system that adapts to your current application and context:
 
-#### Cache Configuration
-- **Max Entries**: 128 cached images (configurable)
-- **Memory Limit**: 50MB (configurable)
-- **Cleanup Interval**: 5 minutes (configurable)
-- **Debug Keys**: Enable/disable cache management shortcuts
+#### **Main Layer (Media Layer)**
+- **Split Layout Design**: Combines app modules (left 69%) with media controls (right 31%)
+- **Smart Media Shortcuts**: Context-aware media controls that adapt to your current application
+- **Volume & Brightness Controls**: Quick access to system volume and display brightness
+- **Media Playback**: Play, pause, next, previous, and seek controls
+- **Microphone Controls**: Quick mute/unmute functionality
 
-#### Cache Management Commands
-When debug keys are enabled, you can use these keyboard shortcuts:
-- **C Key**: Display current cache state
-- **X Key**: Force cache cleanup
-- **V Key**: Show detailed cache information
+#### **Function Key Layer (Fn Layer)**
+- **F1-F12 Keys**: Full function key support for system shortcuts
+- **Customizable Actions**: Each F-key can be mapped to specific system functions
+- **System Integration**: Seamless integration with desktop environments
 
-#### Performance Benefits
-- **Reduced Disk I/O**: Icons are loaded once and cached in memory
-- **Faster Rendering**: No repeated image loading during redraws
-- **Lower Latency**: Instant icon display for cached items
-- **Memory Efficient**: Automatic cleanup prevents memory leaks
+#### **App Module Layer 2**
+- **System Controls**: Brightness, keyboard backlight, volume controls
+- **Blank Spaces**: Configurable spacing for custom layouts
+- **Modular Design**: Easy to customize and extend
 
-## Dependencies
-cairo, libinput, freetype, fontconfig, uinput enabled in kernel config
+#### **App Module Layer 3**
+- **Advanced Controls**: Close, search, microphone, and application grid
+- **Media Integration**: Full media playback controls
+- **System Management**: Comprehensive system control options
 
-## License
+### 🎵 Advanced Media Management
 
-tiny-dfr is licensed under the MIT license, as included in the [LICENSE](LICENSE) file.
+#### **App Modules with Dual Modes**
 
-* Copyright The Asahi Linux Contributors
+**Focus Window Mode**
+- **Window Detection**: Automatically detects focused applications
+- **Context-Aware Controls**: Media controls adapt to the active window
+- **Real-time Updates**: Instant response to window focus changes
+- **Multi-Window Support**: Handles multiple instances of the same application
 
-Please see the Git history for authorship information.
+**Background Service Mode**
+- **MPRIS Integration**: Full MPRIS (Media Player Remote Interfacing Specification) support
+- **Service Discovery**: Automatically detects available media services
+- **Background Control**: Control media without focusing the application
+- **Service Selection**: Choose from available MPRIS services
 
-tiny-dfr embeds Google's [material-design-icons](https://github.com/google/material-design-icons)
-which are licensed under [Apache License Version 2.0](LICENSE.material)
-Some icons are derivatives of material-icons, with edits made by kekrby.
+#### **Supported Media Players**
+- **Spotify**: Full integration with native MPRIS support
+- **VLC**: Complete media control and status monitoring
+- **Dragon Player**: KDE's media player support
+- **SMPlayer**: Advanced media player integration
+- **Generic MPRIS**: Support for any MPRIS-compatible application
+
+#### **Browser Integration**
+- **Multi-Browser Support**: Firefox, Chrome, Chromium, Brave, Edge, Safari, Opera
+- **Media Control**: Control web-based media playback
+- **Navigation**: Back, forward, and refresh controls
+- **Tab Management**: Quick access to browser functions
+
+### 🖥️ Window Manager Support
+
+tiny-dfr supports multiple window managers and desktop environments:
+
+- **X11**: Full X11 window manager support
+- **Wayland Compositors**:
+  - **Sway**: Complete Sway integration
+  - **Hyprland**: Native Hyprland support
+  - **GNOME**: GNOME Wayland with WindowMonitorPro extension
+  - **Niri**: Niri compositor support
+
