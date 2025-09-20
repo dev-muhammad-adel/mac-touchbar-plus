@@ -19,7 +19,7 @@ const COLOR_WHITE: (f64, f64, f64, f64) = (1.0, 1.0, 1.0, 1.0);
 const COLOR_SEPARATOR: (f64, f64, f64, f64) = (0.0, 0.0, 0.0, 0.6);
 const COLOR_DETAILS_BACKGROUND: (f64, f64, f64, f64) = (0.280, 0.280, 0.280, 1.0);
 const COLOR_DETAILS_BORDER: (f64, f64, f64, f64) = (0.2, 0.2, 0.2, 0.2);
-const COLOR_TEXT_BACKGROUND: (f64, f64, f64, f64) = (0.3, 0.3, 0.3, 0.3);
+const COLOR_TEXT_BACKGROUND: (f64, f64, f64, f64) = (0.3, 0.3, 0.3, 1.0);
 const COLOR_TEXT: (f64, f64, f64, f64) = (1.0, 1.0, 1.0, 1.0);
 
 // Service-specific colors
