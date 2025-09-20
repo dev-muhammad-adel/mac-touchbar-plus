@@ -11,6 +11,7 @@ pkg/
 # Rust/Cargo
 Cargo.lock
 **/Cargo.lock
+*.tar.gz
 
 # Misc
 v$pkgver.tar.gz
