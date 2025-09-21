@@ -1,11 +1,11 @@
 install=mac-touchbar-plus.install
 pkgname=mac-touchbar-plus
-pkgver=0.1.2
+pkgver=0.1.3
 pkgrel=1
 pkgdesc="mac-touchbar-plus: A small Rust app with helpers"
 arch=('x86_64')
 url="https://github.com/dev-muhammad-adel/mac-touchbar-plus"
-license=('MIT')
+license=('MIT AND Apache-2.0')
 depends=()
 makedepends=('rust' 'cargo')
 source=("$url/archive/refs/tags/v$pkgver.tar.gz")
@@ -13,7 +13,7 @@ source=("$url/archive/refs/tags/v$pkgver.tar.gz")
 
 build() {
   cd "$srcdir/$pkgname-$pkgver"
-  cargo build --release 
+  cargo build --release --locked
 }
 
 
