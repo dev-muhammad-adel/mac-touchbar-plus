@@ -1,7 +1,6 @@
 [package]
 name = "tiny-dfr"
-version = "0.1.3"
-edition = "2021"
+version = "0.1.4"
 license = "MIT AND Apache-2.0"
 description = "mac-touchbar-plus: A small Rust app with helpers"
 homepage = "https://github.com/dev-muhammad-adel/mac-touchbar-plus"
