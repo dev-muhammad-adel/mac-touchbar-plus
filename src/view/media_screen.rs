@@ -26,6 +26,13 @@ pub fn draw_media_section(
     available_mpris_services: &[String],
 ) {
     let media_spacing_px = 2.0f64;
+    
+    // Find visible buttons to determine first/last positions
+    let visible_buttons: Vec<usize> = media_buttons.iter().enumerate()
+        .filter(|(i, _)| media_button_widths[*i] > 0.0)
+        .map(|(i, _)| i)
+        .collect();
+    
     for (i, button) in media_buttons.iter_mut().enumerate() {
         // Skip rendering buttons with 0 width (hidden buttons)
         if media_button_widths[i] == 0.0 {
@@ -45,8 +52,8 @@ pub fn draw_media_section(
                 button.background = true;
             }
             let this_button_width = media_button_widths[i].round();
-            let is_first = i == 0;
-            let is_last = i == media_count - 1;
+            let is_first = visible_buttons.first() == Some(&i);
+            let is_last = visible_buttons.last() == Some(&i);
             let x = left_edge.round();
             let y = bot - radius;
             let w = this_button_width;
@@ -162,6 +169,7 @@ pub fn media_hit_test(
     media_button_widths: &[f64],
     media_count: usize,
 ) -> Option<usize> {
+    let media_spacing_px = 2.0f64; // Match the rendering spacing
     let mut current_left = left_edge;
     for i in 0..media_count {
         let button_width = media_button_widths[i].round();
@@ -171,7 +179,7 @@ pub fn media_hit_test(
         }
         current_left = right;
         if i != media_count - 1 {
-            current_left += 1.0; // media_spacing_px
+            current_left += media_spacing_px;
         }
     }
     None

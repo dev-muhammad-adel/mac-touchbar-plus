@@ -30,7 +30,7 @@ pub const BUTTON_COLOR_INACTIVE: f64 = 0.250;
 pub const BUTTON_COLOR_ACTIVE: f64 = 0.400;
 
 // Layout constants
-const MEDIA_SPACING_PX: f64 = 1.0;
+const MEDIA_SPACING_PX: f64 = 2.0;
 const BUTTON_RADIUS: f64 = 13.0;
 const BOTTOM_MARGIN_RATIO: f64 = 0.0;
 const TOP_MARGIN_RATIO: f64 = 1.0;
@@ -90,7 +90,7 @@ impl FunctionLayerKeys1LayoutInfo {
         let total_weight: f32 = weights.iter().sum();
         let visible_button_widths: Vec<f64> = weights.iter().map(|w| button_area * (*w as f64 / total_weight as f64)).collect();
         
-        // Create full width array with 0.0 for hidden buttons
+        // Create width array only for visible buttons, not including hidden ones
         let mut button_widths: Vec<f64> = vec![0.0; media_count];
         let mut visible_idx = 0;
         let last_original_idx = visible_buttons.last().map(|(idx, _)| *idx);
@@ -525,7 +525,7 @@ impl FunctionLayer {
                 let total_weight: f32 = weights.iter().sum();
                 let visible_button_widths: Vec<f64> = weights.iter().map(|w| button_area * (*w as f64 / total_weight as f64)).collect();
                 
-                // Create full width array with 0.0 for hidden buttons
+                // Create width array only for visible buttons
                 let mut media_button_widths: Vec<f64> = vec![0.0; media_count];
                 let mut visible_idx = 0;
                 for (original_idx, _) in visible_buttons {
