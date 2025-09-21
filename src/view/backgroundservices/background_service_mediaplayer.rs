@@ -365,6 +365,10 @@ impl BackgroundServicePlayer {
         let content_start_x = x + 8.0; // Reduced left margin to give more space
         let available_width = buttons_start_x - content_start_x - 8.0; // Reduced right margin to give more space
         
+        // Clear the timer area to prevent text overlap
+        c.set_source_rgba(COLOR_DETAILS_BACKGROUND.0, COLOR_DETAILS_BACKGROUND.1, COLOR_DETAILS_BACKGROUND.2, anim_progress);
+        c.rectangle(content_start_x, y, available_width, height);
+        c.fill().unwrap();
         
         if let Some(status) = &self.last_status {
             // Current time
@@ -379,19 +383,6 @@ impl BackgroundServicePlayer {
             let total_time_seconds = status.duration;
             let total_time_str = format_duration(total_time_seconds);
             
-            // Get text extents once and reuse them
-            c.save().unwrap();
-            c.set_font_size(16.0); // Match the rendering font size
-            c.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
-            
-            let current_time_ext = c.text_extents(&current_time_str).unwrap();
-            let total_time_ext = c.text_extents(&total_time_str).unwrap();
-            c.restore().unwrap();
-            
-            println!("[background_service_player] Text extents - current: width={}, height={}, total: width={}, height={}", 
-                current_time_ext.width(), current_time_ext.height(), 
-                total_time_ext.width(), total_time_ext.height());
-            
             // Fixed width allocation for timer elements
             let current_time_width = 50.0; // Fixed width for current time
             let total_time_width = 50.0; // Fixed width for total time
@@ -401,6 +392,14 @@ impl BackgroundServicePlayer {
             let total_timer_width = current_time_width + total_time_width + time_margin * 2.0; // 116px total
             let progress_w = available_width - total_timer_width; // Remaining space for progress bar
             
+            // Set font properties once for consistent text measurement and rendering
+            c.save().unwrap();
+            c.set_font_size(16.0);
+            c.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
+            
+            // Get text extents with the same font settings used for rendering
+            let current_time_ext = c.text_extents(&current_time_str).unwrap();
+            let total_time_ext = c.text_extents(&total_time_str).unwrap();
             
             // Current time - centered in fixed width area
             let current_time_x = content_start_x + (current_time_width - current_time_ext.width()) / 2.0;
@@ -412,10 +411,6 @@ impl BackgroundServicePlayer {
             
             
             // Draw current time with a background rectangle for visibility
-            c.save().unwrap();
-            c.set_font_size(16.0); // Increased font size for better visibility
-            c.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
-            
             // Draw a small background rectangle behind the text for better visibility
             let bg_padding = 4.0;
             c.set_source_rgba(COLOR_TEXT_BACKGROUND.0, COLOR_TEXT_BACKGROUND.1, COLOR_TEXT_BACKGROUND.2, COLOR_TEXT_BACKGROUND.3);
@@ -431,7 +426,6 @@ impl BackgroundServicePlayer {
             c.set_source_rgba(COLOR_TEXT.0, COLOR_TEXT.1, COLOR_TEXT.2, COLOR_TEXT.3);
             c.move_to(current_time_x, current_time_y);
             c.show_text(&current_time_str).unwrap();
-            c.restore().unwrap();
             
             // Progress bar - FIXED START POSITION (independent of text positioning)
             let progress_x = content_start_x + current_time_width + time_margin;
@@ -451,10 +445,6 @@ impl BackgroundServicePlayer {
             
             
             // Draw total time with a background rectangle for visibility
-            c.save().unwrap();
-            c.set_font_size(16.0); // Increased font size for better visibility
-            c.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
-            
             // Draw a small background rectangle behind the text for better visibility
             let bg_padding = 4.0;
             c.set_source_rgba(COLOR_TEXT_BACKGROUND.0, COLOR_TEXT_BACKGROUND.1, COLOR_TEXT_BACKGROUND.2, COLOR_TEXT_BACKGROUND.3);
@@ -470,6 +460,8 @@ impl BackgroundServicePlayer {
             c.set_source_rgba(COLOR_TEXT.0, COLOR_TEXT.1, COLOR_TEXT.2, COLOR_TEXT.3);
             c.move_to(total_time_x, total_time_y);
             c.show_text(&total_time_str).unwrap();
+            
+            // Restore the font context
             c.restore().unwrap();
             
             // Draw separator line between time display and control buttons

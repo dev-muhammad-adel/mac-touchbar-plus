@@ -8,6 +8,7 @@ use cairo::{ImageSurface, Format, Antialias, Context};
 use rsvg::{SvgHandle, Loader};
 use anyhow::Result;
 use icon_loader::{IconLoader, IconFileType};
+use std::io::{Read, Cursor};
 use std::path::PathBuf;
 use std::fs::File;
 
@@ -104,7 +105,10 @@ pub fn load_image(icon_name: &str, _mode: Option<String>, path: &str, theme: &st
         }
         IconFileType::PNG => {
             let mut file = std::fs::File::open(icon.path())?;
-            let surf = ImageSurface::create_from_png(&mut file)?;
+            let mut png_data = Vec::new();
+            file.read_to_end(&mut png_data)?;
+            let mut cursor = Cursor::new(png_data);
+            let surf = ImageSurface::create_from_png(&mut cursor)?;
             if surf.height() == ICON_SIZE && surf.width() == ICON_SIZE {
                 Ok(ButtonImage::Bitmap(surf))
             } else {
@@ -140,7 +144,10 @@ pub fn try_load_png_path(icon_name: &str, path: &str) -> Result<ButtonImage> {
         File::open(format!("/usr/share/pixmaps/{}.png", icon_name))
     })?;
     
-    let surf = ImageSurface::create_from_png(&mut file)?;
+    let mut png_data = Vec::new();
+    file.read_to_end(&mut png_data)?;
+    let mut cursor = Cursor::new(png_data);
+    let surf = ImageSurface::create_from_png(&mut cursor)?;
     let result = if surf.height() == ICON_SIZE && surf.width() == ICON_SIZE {
         Ok(ButtonImage::Bitmap(surf))
     } else {
