@@ -1,7 +1,7 @@
 # Rust/Cargo
 /target/
-Cargo.lock
-**/Cargo.lock
+#Cargo.lock
+#**/Cargo.lock
 
 # Build artifacts
 /result
@@ -23,13 +23,6 @@ src/v*.tar.gz
 *.log
 *.tmp
 *.swp
-<<<<<<< HEAD
-*.DS_Store
-# Rust/Cargo
-Cargo.lock
-**/Cargo.lock
-*.tar.gz
-=======
 *.swo
 *~
 .DS_Store
@@ -39,7 +32,6 @@ Cargo.lock
 .Trashes
 ehthumbs.db
 Thumbs.db
->>>>>>> 70bcc57f (Update .gitignore to include additional build artifacts and temporary files)
 
 # IDE/Editor files
 .vscode/
