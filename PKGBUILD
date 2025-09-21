@@ -13,7 +13,7 @@ source=("$url/archive/refs/tags/v$pkgver.tar.gz")
 
 build() {
   cd "$srcdir/$pkgname-$pkgver"
-  cargo build --release --locked
+  cargo build --release 
 }
 
 
