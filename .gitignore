@@ -1,17 +1,131 @@
-/target
+# Rust/Cargo
+/target/
+Cargo.lock
+**/Cargo.lock
+
+# Build artifacts
 /result
 result
-*.pkg.tar.xz
 pkg/
+*.pkg.tar.xz
+*.tar.gz
+v$pkgver.tar.gz
+
+# Package files - use wildcards to catch all versions
+v*.tar.gz
+mac-touchbar-plus-*.pkg.tar.xz
+
+# Legacy/duplicate source directories
+src/mac-touchbar-plus-*/
+src/v*.tar.gz
+
 # Temporary files
 *.log
 *.tmp
 *.swp
+<<<<<<< HEAD
 *.DS_Store
 # Rust/Cargo
 Cargo.lock
 **/Cargo.lock
 *.tar.gz
+=======
+*.swo
+*~
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+>>>>>>> 70bcc57f (Update .gitignore to include additional build artifacts and temporary files)
 
-# Misc
-v$pkgver.tar.gz
+# IDE/Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.settings/
+.classpath
+
+# System files
+*.pid
+*.seed
+*.pid.lock
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Runtime data
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage directory used by tools like istanbul
+coverage/
+
+# nyc test coverage
+.nyc_output/
+
+# Dependency directories
+node_modules/
+
+# Optional npm cache directory
+.npm
+
+# Optional REPL history
+.node_repl_history
+
+# Output of 'npm pack'
+*.tgz
+
+# Yarn Integrity file
+.yarn-integrity
+
+# dotenv environment variables file
+.env
+
+# Build outputs
+dist/
+build/
+out/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Linux
+*~
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
