@@ -96,7 +96,7 @@ impl BrowserTouchHandler {
              
                         // Delegate to browser touch handler
                         Self::handle_touch_up(
-                            current_window_class, app_ui_manager, needs_complete_redraw
+                            current_window_class, app_ui_manager, needs_complete_redraw, uinput
                         )?;
                         
                         // Remove touch slot - Browser handler manages its own slots
@@ -184,7 +184,8 @@ impl BrowserTouchHandler {
     pub fn handle_touch_up(
         current_window_class: &Option<String>,
         app_ui_manager: &mut AppUiManager,
-        _needs_complete_redraw: &mut bool,
+        needs_complete_redraw: &mut bool,
+        uinput: &mut UInputHandle<std::fs::File>,
     ) -> crate::MainResult<()> {
         println!("[browser_touch] handle_touch_up called");
         let any_browser_button_active = app_ui_manager.browser_screen.buttons.iter().any(|b| b.active);
@@ -192,9 +193,9 @@ impl BrowserTouchHandler {
         if any_browser_button_active {
             println!("[browser_touch] Browser touch interaction ended, resetting button states");
             for button in &mut app_ui_manager.browser_screen.buttons {
-                button.active = false;
-                button.changed = true;
+                button.set_active(uinput, false);
             }
+            *needs_complete_redraw = true;
             println!("[browser_touch] Button states reset successfully");
         } else {
             println!("[browser_touch] No browser buttons were active, nothing to reset");
