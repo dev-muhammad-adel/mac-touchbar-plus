@@ -11,7 +11,7 @@ use cairo::{Format, ImageSurface};
 use drm::control::ClipRect;
 use input::{
     Device as InputDevice, Libinput, LibinputInterface,
-    event::EventTrait,
+    event::EventTrait
 };
 use input_linux::{uinput::UInputHandle, EventKind, Key};
 use input_linux_sys::{input_id, uinput_setup};
@@ -646,6 +646,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
     let mut media_player_drag_position: Option<f64> = None; // Track current drag position for visual feedback
     let mut background_service_drag_position: Option<f64> = None; // Track current drag position for background service visual feedback
     let mut previous_generic_media_enabled = false; // Track previous generic media state for redraw detection
+    let mut keyboard_handler = KeyboardEventHandler::new();
 
     // --- main event loop ---
     loop {
@@ -1629,14 +1630,16 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
             backlight.process_event(&event);
             
             // Handle keyboard and device events
-            if KeyboardEventHandler::handle_device_event(
+            keyboard_handler.handle_device_event(
                 &event,
                 &mut active_layer,
                 &current_session,
-                &mut needs_complete_redraw
-            ) {
-                digitizer = Some(event.device().clone());
-            }
+                &mut needs_complete_redraw,
+                &mut surface
+            );
+            
+            // Set digitizer for device events
+            digitizer = Some(event.device().clone());
             
             // Handle touch events
             TouchEventHandler::handle_touch_event(
