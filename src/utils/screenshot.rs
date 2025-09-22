@@ -71,8 +71,14 @@ impl ScreenshotManager {
         }
         
         println!("[screenshot] Touchbar screenshot saved to: {}", filename);
+        
+        // Send notification
+        crate::utils::notification::send_screenshot_notification(&filename, session);
+        
         Ok(())
     }
+    
+    
     
     pub fn generate_screenshot_filename(session: &Option<SessionState>) -> String {
         use chrono::{Local, Timelike, Datelike};
