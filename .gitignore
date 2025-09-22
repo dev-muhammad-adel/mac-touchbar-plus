@@ -18,6 +18,7 @@ mac-touchbar-plus-*.pkg.tar.xz
 # Legacy/duplicate source directories
 src/mac-touchbar-plus-*/
 src/v*.tar.gz
+src/mac-touchbar-plus-*
 
 # Temporary files
 *.log
