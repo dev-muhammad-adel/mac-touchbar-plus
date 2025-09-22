@@ -1,8 +1,6 @@
 {
-  "MediaLayerDefault": true,
-  "SpecialExtendedMode": true,
   "ShowButtonOutlines": true,
-  "EnablePixelShift": false,
+  "EnablePixelShift": true,
   "FontRenderer": "freetype",
   "FontStyle": "sans-serif",
   "Bold": true,
@@ -25,64 +23,6 @@
     { "Text": "F10", "Action": "F10" },
     { "Text": "F11", "Action": "F11" },
     { "Text": "F12", "Action": "F12" }
-  ],
-  "MediaLayerKeys": [
-    {
-      "Icon": "display-brightness-low-symbolic",
-      "Action": "BrightnessDown",
-      "Mode": "Media"
-    },
-    {
-      "Icon": "display-brightness-high-symbolic",
-      "Action": "BrightnessUp",
-      "Mode": "Media"
-    },
-    {
-      "Icon": "microphone-disabled-symbolic",
-      "Action": "MicMute",
-      "Mode": "Media"
-    },
-    { "Icon": "system-search-symbolic", "Action": "Search", "Mode": "Media" },
-    {
-      "Icon": "keyboard-brightness-low-symbolic",
-      "Action": "IllumDown",
-      "Mode": "Media"
-    },
-    {
-      "Icon": "keyboard-brightness-high-symbolic",
-      "Action": "IllumUp",
-      "Mode": "Media"
-    },
-    {
-      "Icon": "media-seek-backward-symbolic",
-      "Action": "PreviousSong",
-      "Mode": "Media"
-    },
-    {
-      "Icon": "media-playback-start-symbolic",
-      "Action": "PlayPause",
-      "Mode": "Media"
-    },
-    {
-      "Icon": "media-seek-forward-symbolic",
-      "Action": "NextSong",
-      "Mode": "Media"
-    },
-    {
-      "Icon": "audio-volume-muted-symbolic",
-      "Action": "Mute",
-      "Mode": "Media"
-    },
-    {
-      "Icon": "audio-volume-down-symbolic",
-      "Action": "VolumeDown",
-      "Mode": "Media"
-    },
-    {
-      "Icon": "audio-volume-high-symbolic",
-      "Action": "VolumeUp",
-      "Mode": "Media"
-    }
   ],
   "AppLayerSplitedLayout": {
     "AppLayerKeys1Media": {

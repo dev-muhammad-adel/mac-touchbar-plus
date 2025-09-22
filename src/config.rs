@@ -64,7 +64,6 @@ struct ConfigProxy {
     adaptive_brightness: Option<bool>,
     active_brightness: Option<u32>,
     primary_layer_keys: Option<Vec<ButtonConfig>>,
-    media_layer_keys: Option<Vec<ButtonConfig>>,
     app_layer_keys1: Option<Vec<ButtonConfig>>,
     app_layer_keys2: Option<Vec<ButtonConfig>>,
     app_layer_keys3: Option<Vec<ButtonConfig>>,
@@ -136,7 +135,6 @@ fn load_config(width: u16) -> (Config, HashMap<LayerKey, FunctionLayer>) {
         base.italic = user.italic.or(base.italic);
         base.font_template = user.font_template.or(base.font_template);
         base.adaptive_brightness = user.adaptive_brightness.or(base.adaptive_brightness);
-        base.media_layer_keys = user.media_layer_keys.or(base.media_layer_keys);
         base.primary_layer_keys = user.primary_layer_keys.or(base.primary_layer_keys);
         base.app_layer_keys1 = user.app_layer_keys1.or(base.app_layer_keys1);
         base.app_layer_keys2 = user.app_layer_keys2.or(base.app_layer_keys2);
@@ -146,7 +144,6 @@ fn load_config(width: u16) -> (Config, HashMap<LayerKey, FunctionLayer>) {
             .app_layer_splited_layout
             .or(base.app_layer_splited_layout);
     };
-    let _media_layer = FunctionLayer::with_config(base.media_layer_keys.unwrap());
     let fkey_layer = FunctionLayer::with_config(base.primary_layer_keys.unwrap());
     // --- App Layer 1: support split layout ---
     let app_layer1 = if let Some(split) = base.app_layer_splited_layout {
