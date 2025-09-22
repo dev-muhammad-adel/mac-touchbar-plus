@@ -225,6 +225,7 @@ pub async fn get_chromium_status_with_delay(delay_ms: u64) -> Option<MediaStatus
     
     // Get playback status
     let playback_status: String = proxy.get_property("PlaybackStatus").await.ok()?;
+
     
     // Try to get Rate property to see if it's playing
     let rate: f64 = proxy.get_property("Rate").await.unwrap_or(1.0);
@@ -236,6 +237,8 @@ pub async fn get_chromium_status_with_delay(delay_ms: u64) -> Option<MediaStatus
     let _can_go_next: bool = proxy.get_property("CanGoNext").await.unwrap_or(false);
     let _can_go_previous: bool = proxy.get_property("CanGoPrevious").await.unwrap_or(false);
     
+
+
     
     // Chromium's MPRIS implementation is inconsistent - we need to trust PlaybackStatus
     // and ignore Rate as it's often wrong (always 1 even when paused)
