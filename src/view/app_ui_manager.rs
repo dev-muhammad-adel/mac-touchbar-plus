@@ -140,7 +140,10 @@ impl AppUiManager {
             return;
         }
         
-        println!("[app_ui_manager] draw_app_ui called with window_class: {:?}", window_class);
+        // Only log when DEBUG_LOGGING is enabled to prevent spam
+        if crate::DEBUG_LOGGING {
+            println!("[app_ui_manager] draw_app_ui called with window_class: {:?}", window_class);
+        }
         match window_class {
             Some(class) => {
                 match class.to_lowercase().as_str() {

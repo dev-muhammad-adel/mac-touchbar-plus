@@ -338,6 +338,11 @@ fn perform_redraw(
         (0.0, 0.0)
     };
     
+    if DEBUG_LOGGING {
+        println!("perform_redraw: using shift=({:.2}, {:.2}), enable_pixel_shift={}", 
+            shift.0, shift.1, cfg.enable_pixel_shift);
+    }
+    
     // --- Pass slide progress for AppLayerKeys3 ---
     let app_layer3_slide_progress = if active_layer == LayerKey::Custom3 || last_layer == LayerKey::Custom3 {
         app_layer3_slide_anim.progress()
@@ -412,7 +417,7 @@ fn setup_session_monitoring(event_fd: &Arc<OwnedFd>) -> MainResult<(watch::Sende
 
 // Add log level control at the top
 // Set to true to enable verbose debug logging, false for production (much less resource usage)
-const DEBUG_LOGGING: bool = false; // Set to false to disable verbose logging
+const DEBUG_LOGGING: bool = true; // Set to false to disable verbose logging
 
 // Epoll event data constants
 const EPOLL_DATA_MAIN_INPUT: u64 = 0;
@@ -673,10 +678,17 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
         
         if cfg.enable_pixel_shift {
             let (pixel_shift_needs_redraw, pixel_shift_next_timeout_ms) = pixel_shift.update();
+            if DEBUG_LOGGING {
+                let (shift_x, shift_y) = pixel_shift.get();
+                println!("Pixel shift update: needs_redraw={}, next_timeout={}ms, shift=({:.2}, {:.2})", 
+                    pixel_shift_needs_redraw, pixel_shift_next_timeout_ms, shift_x, shift_y);
+            }
             if pixel_shift_needs_redraw {
                 needs_complete_redraw = true;
             }
             next_timeout_ms = min(next_timeout_ms, pixel_shift_next_timeout_ms);
+        } else if DEBUG_LOGGING {
+            println!("Pixel shift disabled - using shift=(0.0, 0.0)");
         }
         // No login animation timeout needed
         // --- AppLayerKeys3 slide animation update ---

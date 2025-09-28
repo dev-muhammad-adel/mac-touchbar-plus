@@ -1,0 +1,53 @@
+# Git files
+.git
+.gitignore
+
+# Build artifacts
+target/
+*.o
+*.so
+*.dylib
+*.dll
+*.exe
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Documentation (not needed in container)
+docs/
+*.md
+!DOCKER.md
+
+# Package files (not needed in container)
+PKGBUILD
+*.install
+*.nix
+default.nix
+shell.nix
+nixos-module.nix
+
+# Scripts (not needed in container)
+script/
+build-docker.sh
+docker-run.sh
+
+# Docker files (not needed in container)
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# License files (not needed in container)
+LICENSE*
+README*
+
+# Empty directories that might cause issues
+pkg/
+
