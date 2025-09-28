@@ -248,11 +248,11 @@ impl FunctionLayer {
         
         // Clear background
         if complete_redraw {
-            c.set_source_rgb(1.0, 0.0, 0.0);
+            // c.set_source_rgb(1.0, 0.0, 0.0);
             Self::safe_cairo_paint(&c)?;
         } else if modules_only_redraw {
             // Only clear the modules area for modules-only redraw
-            c.set_source_rgb(1.0, 0.0, 0.0);
+            // c.set_source_rgb(1.0, 0.0, 0.0);
             c.rectangle(
                 pixel_shift_x + (pixel_shift_width / 2) as f64, 
                 bot - BUTTON_RADIUS, 
@@ -267,7 +267,7 @@ impl FunctionLayer {
         
         // Clear modules area first to prevent text overlap when switching between session states
         let left_edge = pixel_shift_x + (pixel_shift_width / 2) as f64;
-        c.set_source_rgb(1.0, 0.0, 0.0);
+        // c.set_source_rgb(1.0, 0.0, 0.0);
         c.rectangle(
             left_edge, 
             bot - BUTTON_RADIUS, 
@@ -307,10 +307,6 @@ impl FunctionLayer {
 
     /// Draws standard function layers (Fn keys, App Layer 2, App Layer 3) without split layout
     fn draw_standard_function_layer(&mut self, config: &Config, width: i32, height: i32, surface: &Surface, pixel_shift: (f64, f64), complete_redraw: bool, layer_index: Option<LayerKey>, app_layer3_slide_progress: f64) -> FunctionLayerResult<Vec<ClipRect>> {
-        if let Some(LayerKey::Custom3) = layer_index {
-            println!("[Custom3] draw_standard_function_layer called: complete_redraw={}, pixel_shift=({:.2}, {:.2}), slide_progress={:.2}", 
-                complete_redraw, pixel_shift.0, pixel_shift.1, app_layer3_slide_progress);
-        }
         let c = Self::safe_cairo_context(surface)?;
         let mut modified_regions = if complete_redraw {
             vec![ClipRect::new(0, 0, height as u16, width as u16)]
@@ -353,7 +349,7 @@ impl FunctionLayer {
         let (pixel_shift_x, pixel_shift_y) = pixel_shift;
         
         if complete_redraw {
-            c.set_source_rgb(1.0, 0.0, 0.0);
+            // c.set_source_rgb(1.0, 0.0, 0.0);
             Self::safe_cairo_paint(&c)?;
         }
         
@@ -365,19 +361,8 @@ impl FunctionLayer {
         for (i, button) in self.buttons.iter_mut().enumerate() {
             let this_button_width = button_widths[i];
             
-            // Debug prints for Custom3 and Fn layers
-            if let Some(LayerKey::Custom3) = layer_index {
-                println!("[Custom3] Button {}: changed={}, active={}, complete_redraw={}, background={}", 
-                    i, button.changed, button.active, complete_redraw, button.background);
-            } else if let Some(LayerKey::Fn) = layer_index {
-                println!("[Fn] Button {}: changed={}, active={}, complete_redraw={}, background={}", 
-                    i, button.changed, button.active, complete_redraw, button.background);
-            }
             
             if !button.changed && !complete_redraw {
-                if let Some(LayerKey::Custom3) = layer_index {
-                    println!("[Custom3] Skipping button {} (not changed and not complete redraw)", i);
-                }
                 left_edge += this_button_width;
                 if i != count - 1 {
                     left_edge += gap;
@@ -394,7 +379,7 @@ impl FunctionLayer {
             };
             
             if !complete_redraw {
-                c.set_source_rgb(1.0, 0.0, 0.0);
+                // c.set_source_rgb(1.0, 0.0, 0.0);
                 c.rectangle(
                     left_edge, 
                     bot - BUTTON_RADIUS, 
@@ -410,26 +395,13 @@ impl FunctionLayer {
                button.action != input_linux::Key::Macro4) &&
                ((button.background) || button.active) {
                 
-                if let Some(LayerKey::Custom3) = layer_index {
-                    println!("[Custom3] Drawing button {} with color={:.3}, active={}, background={}", 
-                        i, color, button.active, button.background);
-                } else if let Some(LayerKey::Fn) = layer_index {
-                    println!("[Fn] Drawing button {} with color={:.3}, active={}, background={}", 
-                        i, color, button.active, button.background);
-                }
                 c.set_source_rgb(color, color, color);
                 Self::draw_rounded_button_static(&c, left_edge, bot, top, this_button_width, BUTTON_RADIUS)?;
-            } else if let Some(LayerKey::Custom3) = layer_index {
-                println!("[Custom3] NOT drawing button {} - action={:?}, background={}, active={}", 
-                    i, button.action, button.background, button.active);
             }
             
             c.set_source_rgb(1.0, 1.0, 1.0);
             button.render(&c, height, left_edge, this_button_width.ceil() as u64, pixel_shift_y)?;
 
-            if let Some(LayerKey::Custom3) = layer_index {
-                println!("[Custom3] Button {} redraw complete, setting changed=false", i);
-            }
             button.changed = false;
 
             if !complete_redraw {
@@ -454,13 +426,6 @@ impl FunctionLayer {
                     height as u16 - bot as u16 + BUTTON_RADIUS as u16,
                     (left_edge + slide_offset + this_button_width) as u16
                 );
-                if let Some(LayerKey::Custom3) = layer_index {
-                    println!("[Custom3] Adding clip rect for button {}: x1={}, y1={}, x2={}, y2={}", 
-                        i, clip_rect.x1(), clip_rect.y1(), clip_rect.x2(), clip_rect.y2());
-                } else if let Some(LayerKey::Fn) = layer_index {
-                    println!("[Fn] Adding clip rect for button {}: x1={}, y1={}, x2={}, y2={}", 
-                        i, clip_rect.x1(), clip_rect.y1(), clip_rect.x2(), clip_rect.y2());
-                }
                 modified_regions.push(clip_rect);
             }
             
@@ -470,13 +435,6 @@ impl FunctionLayer {
             }
         }
         
-        if let Some(LayerKey::Custom3) = layer_index {
-            println!("[Custom3] Total modified_regions count: {}", modified_regions.len());
-            for (i, region) in modified_regions.iter().enumerate() {
-                println!("[Custom3] Modified region {}: x1={}, y1={}, x2={}, y2={}", 
-                    i, region.x1(), region.y1(), region.x2(), region.y2());
-            }
-        }
         
         Ok(modified_regions)
     }

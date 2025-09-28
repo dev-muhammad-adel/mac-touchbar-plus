@@ -339,8 +339,6 @@ fn perform_redraw(
     };
     
     if DEBUG_LOGGING {
-        println!("perform_redraw: using shift=({:.2}, {:.2}), enable_pixel_shift={}", 
-            shift.0, shift.1, cfg.enable_pixel_shift);
     }
     
     // --- Pass slide progress for AppLayerKeys3 ---
@@ -680,15 +678,11 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
             let (pixel_shift_needs_redraw, pixel_shift_next_timeout_ms) = pixel_shift.update();
             if DEBUG_LOGGING {
                 let (shift_x, shift_y) = pixel_shift.get();
-                println!("Pixel shift update: needs_redraw={}, next_timeout={}ms, shift=({:.2}, {:.2})", 
-                    pixel_shift_needs_redraw, pixel_shift_next_timeout_ms, shift_x, shift_y);
             }
             if pixel_shift_needs_redraw {
                 needs_complete_redraw = true;
             }
             next_timeout_ms = min(next_timeout_ms, pixel_shift_next_timeout_ms);
-        } else if DEBUG_LOGGING {
-            println!("Pixel shift disabled - using shift=(0.0, 0.0)");
         }
         // No login animation timeout needed
         // --- AppLayerKeys3 slide animation update ---
