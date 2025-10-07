@@ -207,6 +207,52 @@ pub fn get_env_from_session(user: &str, leader_pid: u32) -> HashMap<String, Stri
         }
     }
     
+    // Fallback 7: HYPRLAND_INSTANCE_SIGNATURE fallback (only for Hyprland)
+    if !env.contains_key("HYPRLAND_INSTANCE_SIGNATURE") {
+        // Only do this fallback if XDG_CURRENT_DESKTOP is set to Hyprland
+        if let Some(current_desktop) = env.get("XDG_CURRENT_DESKTOP") {
+            if current_desktop.to_lowercase() == "hyprland" {
+                if let Some(xdg_runtime) = env.get("XDG_RUNTIME_DIR") {
+                    let xdg_runtime = xdg_runtime.clone(); // Clone to avoid borrow conflict
+                    let hypr_dir = format!("{}/hypr", xdg_runtime);
+                    
+                    // Look for hypr directory and get the instance signature from subdirectory names
+                    if let Ok(entries) = fs::read_dir(&hypr_dir) {
+                        let mut instances = Vec::new();
+                        
+                        for entry in entries {
+                            if let Ok(entry) = entry {
+                                let file_name = entry.file_name();
+                                if let Some(name) = file_name.to_str() {
+                                    // Check if this is a directory (Hyprland instance directories)
+                                    if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                                        // Get metadata to sort by modification time
+                                        if let Ok(metadata) = entry.metadata() {
+                                            if let Ok(modified) = metadata.modified() {
+                                                instances.push((name.to_string(), modified));
+                                            } else {
+                                                instances.push((name.to_string(), std::time::SystemTime::UNIX_EPOCH));
+                                            }
+                                        } else {
+                                            instances.push((name.to_string(), std::time::SystemTime::UNIX_EPOCH));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Sort by modification time (most recent first) and take the first one
+                        instances.sort_by(|a, b| b.1.cmp(&a.1));
+                        
+                        if let Some((instance_signature, _)) = instances.first() {
+                            env.insert("HYPRLAND_INSTANCE_SIGNATURE".to_string(), instance_signature.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
     // Fallback: Set GNOME_DESKTOP_SESSION_ID if we detect GNOME from other variables
     if !env.contains_key("GNOME_DESKTOP_SESSION_ID") {
         if let Some(desktop_session) = env.get("DESKTOP_SESSION") {

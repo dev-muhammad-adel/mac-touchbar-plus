@@ -1288,7 +1288,8 @@ impl WindowMonitor for NiriWindowMonitor {
 fn detect_window_manager() -> Result<Box<dyn WindowMonitor>> {
     // Check for Wayland first
     if std::env::var("WAYLAND_DISPLAY").is_ok() {
-        if std::env::var("HYPRLAND_INSTANCE_SIGNATURE").is_ok() {
+        if std::env::var("HYPRLAND_INSTANCE_SIGNATURE").is_ok() && 
+           std::env::var("XDG_CURRENT_DESKTOP").map_or(false, |desktop| desktop.to_lowercase() == "hyprland") {
             eprintln!("[helper] Hyprland detected");
             return Ok(Box::new(HyprlandWindowMonitor::new()?));
         }

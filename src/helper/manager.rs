@@ -144,7 +144,10 @@ impl HelperManager {
 
         // Get environment variables using the bash script approach
         let env_vars = crate::utils::get_env::get_env_from_session(user, leader_pid);
-
+        for (key, value) in &env_vars {
+            println!("[HelperManager::start] Env: {}={}", key, value);
+        }
+println!("[HelperManager::start] Retrieved {} environment variables for user {}", env_vars.len(), user);
         let helper_path = "/usr/bin/tiny-dfr-focus-window-helper";
 
         // Check if helper binary exists

@@ -40,6 +40,22 @@ pub fn set_chromium_active(active: bool) {
     CHROMIUM_ACTIVE.store(active, Ordering::SeqCst);
 }
 
+// Helper function to reset position/state trackers for Chromium
+fn reset_chromium_trackers() {
+    // Reset last known position and update time so synthetic progression stops
+    if let Ok(mut last_pos) = LAST_KNOWN_POSITION.lock() {
+        *last_pos = 0.0;
+    }
+    if let Ok(mut last_upd) = LAST_POSITION_UPDATE.lock() {
+        *last_upd = std::time::Instant::now();
+    }
+    // Reset shared playback state snapshot
+    if let Ok(mut state) = PLAYBACK_STATE.lock() {
+        state.0 = false;
+        state.1 = MediaStatus { is_playing: false, duration: 0.0, position: 0.0 };
+    }
+}
+
 // Helper function to start Chromium monitoring
 pub fn start_chromium_monitoring(status_sender: Arc<Mutex<Option<UnixStream>>>) {
     // Stop any existing monitoring thread
@@ -67,6 +83,8 @@ pub fn stop_chromium_monitoring() {
             CHROMIUM_ACTIVE.store(false, Ordering::SeqCst);
             // Give the thread a moment to exit naturally
             std::thread::sleep(std::time::Duration::from_millis(100));
+            // Reset trackers to avoid stale state after stopping
+            reset_chromium_trackers();
         }
     }
 }
@@ -244,17 +262,23 @@ pub async fn get_chromium_status_with_delay(delay_ms: u64) -> Option<MediaStatus
     // and ignore Rate as it's often wrong (always 1 even when paused)
     let is_playing = match playback_status.as_str() {
         "Playing" => {
+            println!("[chromium-helper] xxxxxxxxxxxxxxxxx: Unknown PlaybackStatus '{}', using Rate={}", playback_status, rate);
+
             true
         },
         "Paused" => {
+            println!("[chromium-helper] xxxxxxxxxxxxxxxxx: Unknown PlaybackStatus '{}', using Rate={}", playback_status, rate);
+
             false
         },
         "Stopped" => {
+            println!("[chromium-helper] xxxxxxxxxxxxxxxxx: Unknown PlaybackStatus '{}', using Rate={}", playback_status, rate);
+
             false
         },
         _ => {
             // Unknown status, use Rate as last resort
-            println!("[chromium-helper] WARNING: Unknown PlaybackStatus '{}', using Rate={}", playback_status, rate);
+            println!("[chromium-helper] xxxxxxxxxxxxxxxxx: Unknown PlaybackStatus '{}', using Rate={}", playback_status, rate);
             rate > 0.0
         }
     };
@@ -325,18 +349,27 @@ pub async fn get_chromium_status_with_delay(delay_ms: u64) -> Option<MediaStatus
             *last_update = current_time;
             new_position
         } else {
-            // When paused and MPRIS is invalid, use our tracked position
+            // When paused and MPRIS is invalid, freeze at last position and
+            // also reset the last_update so synthetic progression won't accumulate
+            *last_update = current_time;
             *last_position
         }
     } else {
+        // No valid duration means no valid track; reset trackers and report 0
+        if let Ok(mut last_pos) = LAST_KNOWN_POSITION.lock() { *last_pos = 0.0; }
+        if let Ok(mut last_upd) = LAST_POSITION_UPDATE.lock() { *last_upd = std::time::Instant::now(); }
         0.0
     };
     
-    Some(MediaStatus {
-        is_playing,
-        duration,
-        position: position_ratio,
-    })
+    // If Chromium reports Stopped or Paused, prevent any drift by ensuring
+    // our tracker timestamp is current so future elapsed is zeroed
+    if !is_playing {
+        if let Ok(mut last_upd) = LAST_POSITION_UPDATE.lock() {
+            *last_upd = std::time::Instant::now();
+        }
+    }
+
+    Some(MediaStatus { is_playing, duration, position: position_ratio })
 }
 
 // Function to send status update
@@ -911,8 +944,10 @@ async fn handle_properties_changed(
         
         if is_playing {
             println!("[chromium-helper] Chromium playback started - position polling activated");
-                } else {
+        } else {
             println!("[chromium-helper] Chromium playback stopped - position polling deactivated");
+            // On pause/stop, clear trackers to avoid stale/residual progress
+            reset_chromium_trackers();
         }
     }
     

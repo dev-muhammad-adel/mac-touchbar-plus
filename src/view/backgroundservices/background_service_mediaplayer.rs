@@ -53,6 +53,11 @@ fn format_duration(seconds: i64) -> String {
     let minutes = (seconds % 3600) / 60;
     let secs = seconds % 60;
     
+    // Cap extremely long durations to a compact "99h" representation
+    if hours >= 100 {
+        return "99h".to_string();
+    }
+    
     if hours > 0 {
         format!("{}:{:02}:{:02}", hours, minutes, secs)
     } else {
