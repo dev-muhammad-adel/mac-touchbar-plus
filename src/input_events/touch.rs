@@ -8,7 +8,7 @@ use input_linux::uinput::UInputHandle;
 use std::collections::HashMap;
 use std::os::unix::net::UnixStream;
 use crate::LayerKey;
-use crate::layers::FunctionLayer;
+use crate::layers::Layer;
 use crate::view::app_ui_manager::AppUiManager;
 use crate::input_events::applayerkeys1_touch::{MediaTouchHandler, ModulesTouchHandler};
 use crate::input_events::FlatTouchHandler;
@@ -23,7 +23,7 @@ impl TouchEventHandler {
         width: u32,
         height: u32,
         active_layer: &LayerKey,
-        layers: &mut HashMap<LayerKey, FunctionLayer>,
+        layers: &mut HashMap<LayerKey, Box<dyn Layer>>,
         uinput: &mut UInputHandle<std::fs::File>,
         current_window_class: &Option<String>,
         app_ui_manager: &mut AppUiManager,

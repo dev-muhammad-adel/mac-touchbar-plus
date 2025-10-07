@@ -7,7 +7,7 @@ use input::{
 use input_linux::uinput::UInputHandle;
 use std::collections::HashMap;
 use crate::LayerKey;
-use crate::layers::FunctionLayer;
+use crate::layers::{FunctionLayer, Layer};
 use input_linux::Key;
 
 // Static HashMap for flat touch slots
@@ -31,7 +31,7 @@ impl FlatTouchHandler {
         width: u32,
         height: u32,
         active_layer: &LayerKey,
-        layers: &mut HashMap<LayerKey, FunctionLayer>,
+        layers: &mut HashMap<LayerKey, Box<dyn Layer>>,
         uinput: &mut UInputHandle<std::fs::File>,
     ) -> crate::MainResult<()> {
         let touches = Self::get_touches();
@@ -81,7 +81,7 @@ impl FlatTouchHandler {
     pub fn handle_touch_down(
         idx: usize,
         active_layer: &LayerKey,
-        layers: &mut HashMap<LayerKey, FunctionLayer>,
+        layers: &mut HashMap<LayerKey, Box<dyn Layer>>,
         touches: &mut HashMap<u32, (LayerKey, &'static str, usize)>,
         seat_slot: u32,
         uinput: &mut UInputHandle<std::fs::File>,
@@ -91,7 +91,7 @@ impl FlatTouchHandler {
             return Ok(());
         }
 
-        let button = &mut layers.get_mut(active_layer).ok_or(crate::MainError::LayerNotFound(*active_layer))?.buttons[idx];
+        let button = &mut layers.get_mut(active_layer).ok_or(crate::MainError::LayerNotFound(*active_layer))?.get_buttons_mut().ok_or(crate::MainError::LayerNotFound(*active_layer))?[idx];
         if button.action == Key::Unknown {
             return Ok(());
         }
@@ -106,7 +106,7 @@ impl FlatTouchHandler {
     pub fn handle_touch_motion(
         idx: usize,
         layer: &LayerKey,
-        layers: &mut HashMap<LayerKey, FunctionLayer>,
+        layers: &mut HashMap<LayerKey, Box<dyn Layer>>,
         uinput: &mut UInputHandle<std::fs::File>,
     ) -> crate::MainResult<()> {
         // Ensure this is only called for non-LayerKeys1 layers
@@ -114,7 +114,7 @@ impl FlatTouchHandler {
             return Ok(());
         }
 
-        let button = &mut layers.get_mut(layer).ok_or(crate::MainError::LayerNotFound(*layer))?.buttons[idx];
+        let button = &mut layers.get_mut(layer).ok_or(crate::MainError::LayerNotFound(*layer))?.get_buttons_mut().ok_or(crate::MainError::LayerNotFound(*layer))?[idx];
         if button.action == Key::Unknown {
             return Ok(());
         }
@@ -128,7 +128,7 @@ impl FlatTouchHandler {
     pub fn handle_touch_up(
         idx: usize,
         layer: &LayerKey,
-        layers: &mut HashMap<LayerKey, FunctionLayer>,
+        layers: &mut HashMap<LayerKey, Box<dyn Layer>>,
         uinput: &mut UInputHandle<std::fs::File>,
     ) -> crate::MainResult<()> {
         // Ensure this is only called for non-LayerKeys1 layers
@@ -136,7 +136,7 @@ impl FlatTouchHandler {
             return Ok(());
         }
 
-        let button = &mut layers.get_mut(layer).ok_or(crate::MainError::LayerNotFound(*layer))?.buttons[idx];
+        let button = &mut layers.get_mut(layer).ok_or(crate::MainError::LayerNotFound(*layer))?.get_buttons_mut().ok_or(crate::MainError::LayerNotFound(*layer))?[idx];
         if button.action == Key::Unknown {
             return Ok(());
         }

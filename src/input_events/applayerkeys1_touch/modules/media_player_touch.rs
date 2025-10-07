@@ -15,7 +15,7 @@ use crate::layers::function_layer::BUTTON_SPACING_PX;
 
 use std::collections::HashMap;
 use crate::LayerKey;
-use crate::layers::FunctionLayer;
+use crate::layers::{FunctionLayer, Layer};
 
 // Static HashMap for Media Player touch slots
 static mut MEDIA_PLAYER_TOUCHES: Option<HashMap<u32, (LayerKey, &'static str, usize)>> = None;
@@ -38,7 +38,7 @@ impl MediaPlayerTouchHandler {
         width: u32,
         height: u32,
         active_layer: &LayerKey,
-        layers: &mut HashMap<LayerKey, FunctionLayer>,
+        layers: &mut HashMap<LayerKey, Box<dyn Layer>>,
         current_window_class: &Option<String>,
         app_ui_manager: &mut AppUiManager,
         media_player_touch_active: &mut bool,

@@ -1,7 +1,7 @@
 //! Configuration loading, validation, and management.
 use crate::fonts::{FontConfig, Pattern};
 use crate::LayerKey;
-use crate::{Button, FunctionLayer};
+use crate::layers::{Button, FunctionLayer, Layer, FnLayer, MediaLayer, Custom2Layer, Custom3Layer};
 use anyhow::Error;
 use cairo::FontFace;
 use freetype::Library as FtLibrary;
@@ -117,7 +117,7 @@ fn load_theme() -> Theme {
     }
 }
 
-fn load_config(width: u16) -> (Config, HashMap<LayerKey, FunctionLayer>) {
+fn load_config(width: u16) -> (Config, HashMap<LayerKey, Box<dyn Layer>>) {
     println!("/usr/share/tiny-dfr/config.json");
     let mut base = serde_json::from_str::<ConfigProxy>(
         &read_to_string("/usr/share/tiny-dfr/config.json").unwrap(),
@@ -144,30 +144,29 @@ fn load_config(width: u16) -> (Config, HashMap<LayerKey, FunctionLayer>) {
             .app_layer_splited_layout
             .or(base.app_layer_splited_layout);
     };
-    let fkey_layer = FunctionLayer::with_config(base.primary_layer_keys.unwrap());
+    let fkey_layer = FnLayer::with_config(base.primary_layer_keys.unwrap());
     // --- App Layer 1: support split layout ---
     let app_layer1 = if let Some(split) = base.app_layer_splited_layout {
-        FunctionLayer::with_split(
+        MediaLayer::with_split(
             split.app_layer_keys1_modules.width,
             split.app_layer_keys1_media.items,
             split.app_layer_keys1_media.width,
         )
     } else {
-        FunctionLayer::with_config(base.app_layer_keys1.unwrap())
+        // Fallback to standard layer if no split layout
+        MediaLayer::with_split(0.5, base.app_layer_keys1.unwrap(), 0.5)
     };
     // ---
-    let app_layer2 = FunctionLayer::with_config(base.app_layer_keys2.unwrap());
-    let app_layer3 = FunctionLayer::with_config(base.app_layer_keys3.unwrap());
-    let mut layers = HashMap::new();
-    layers.insert(LayerKey::Media, app_layer1);
-    layers.insert(LayerKey::Fn, fkey_layer);
-    layers.insert(LayerKey::Custom2, app_layer2);
-    layers.insert(LayerKey::Custom3, app_layer3);
+    let app_layer2 = Custom2Layer::with_config(base.app_layer_keys2.unwrap());
+    let app_layer3 = Custom3Layer::with_config(base.app_layer_keys3.unwrap());
+    let mut layers: HashMap<LayerKey, Box<dyn Layer>> = HashMap::new();
+    layers.insert(LayerKey::Media, Box::new(app_layer1));
+    layers.insert(LayerKey::Fn, Box::new(fkey_layer));
+    layers.insert(LayerKey::Custom2, Box::new(app_layer2));
+    layers.insert(LayerKey::Custom3, Box::new(app_layer3));
     if width >= 2170 {
         for layer in layers.values_mut() {
-            layer
-                .buttons
-                .insert(0, Button::new_text("esc".to_string(), Key::Esc, true));
+            layer.add_esc_button();
         }
     }
     let cfg = Config {
@@ -207,7 +206,7 @@ impl ConfigManager {
             watch_desc,
         }
     }
-    pub fn load_config(&self, width: u16) -> (Config, HashMap<LayerKey, FunctionLayer>) {
+    pub fn load_config(&self, width: u16) -> (Config, HashMap<LayerKey, Box<dyn Layer>>) {
         load_config(width)
     }
     pub fn load_theme(&self) -> Theme {
@@ -216,7 +215,7 @@ impl ConfigManager {
     pub fn update_config(
         &mut self,
         cfg: &mut Config,
-        layers: &mut HashMap<LayerKey, FunctionLayer>,
+        layers: &mut HashMap<LayerKey, Box<dyn Layer>>,
         width: u16,
     ) -> bool {
         if self.watch_desc.is_none() {

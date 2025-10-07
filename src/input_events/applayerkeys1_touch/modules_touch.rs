@@ -9,7 +9,7 @@ use crate::view::app_ui_manager::{AppUiManager, is_media_player_window_class, is
 use crate::view::generic_background_screen::GenericBackgroundAction;
 use std::collections::HashMap;
 use crate::LayerKey;
-use crate::layers::FunctionLayer;
+use crate::layers::{FunctionLayer, Layer};
 use crate::input_events::applayerkeys1_touch::modules::{MediaPlayerTouchHandler, BrowserTouchHandler};
 
 pub struct ModulesTouchHandler;
@@ -24,7 +24,7 @@ impl ModulesTouchHandler {
         width: u32,
         height: u32,
         active_layer: &LayerKey,
-        layers: &mut HashMap<LayerKey, FunctionLayer>,
+        layers: &mut HashMap<LayerKey, Box<dyn Layer>>,
         current_window_class: &Option<String>,
         app_ui_manager: &mut AppUiManager,
         media_player_touch_active: &mut bool,
@@ -86,7 +86,7 @@ impl ModulesTouchHandler {
         width: u32,
         height: u32,
         active_layer: &LayerKey,
-        layers: &mut HashMap<LayerKey, FunctionLayer>,
+        layers: &mut HashMap<LayerKey, Box<dyn Layer>>,
         current_window_class: &Option<String>,
         app_ui_manager: &mut AppUiManager,
         background_service_helper_stream: &mut Option<UnixStream>,

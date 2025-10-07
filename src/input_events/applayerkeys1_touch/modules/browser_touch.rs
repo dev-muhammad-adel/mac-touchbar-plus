@@ -13,7 +13,7 @@ use crate::layers::function_layer::BUTTON_SPACING_PX;
 use input_linux::Key;
 use std::collections::HashMap;
 use crate::LayerKey;
-use crate::layers::FunctionLayer;
+use crate::layers::{FunctionLayer, Layer};
 
 // Static HashMap for browser touch slots
 static mut BROWSER_TOUCHES: Option<HashMap<u32, (LayerKey, &'static str, usize)>> = None;
@@ -36,7 +36,7 @@ impl BrowserTouchHandler {
         width: u32,
         height: u32,
         active_layer: &LayerKey,
-        layers: &mut HashMap<LayerKey, FunctionLayer>,
+        layers: &mut HashMap<LayerKey, Box<dyn Layer>>,
         current_window_class: &Option<String>,
         app_ui_manager: &mut AppUiManager,
         media_player_touch_active: &mut bool,

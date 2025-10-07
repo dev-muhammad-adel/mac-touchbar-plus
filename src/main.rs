@@ -37,7 +37,7 @@ use view::app_ui_manager::{AppUiManager, is_media_player_window_class, is_browse
 mod utils;
 mod layers;
 mod input_events;
-use crate::layers::{Button, FunctionLayer};
+use crate::layers::{Button, Layer};
 
 use crate::input_events::{KeyboardEventHandler, TouchEventHandler};
 
@@ -146,12 +146,12 @@ fn log_warning(component: &str, message: &str) {
 }
 
 // Helper function for safe layer access
-fn get_active_layer_mut(layers: &mut HashMap<LayerKey, FunctionLayer>, active_layer: LayerKey) -> MainResult<&mut FunctionLayer> {
+fn get_active_layer_mut(layers: &mut HashMap<LayerKey, Box<dyn Layer>>, active_layer: LayerKey) -> MainResult<&mut Box<dyn Layer>> {
     layers.get_mut(&active_layer)
         .ok_or_else(|| MainError::LayerNotFound(active_layer))
 }
 
-fn get_active_layer(layers: &HashMap<LayerKey, FunctionLayer>, active_layer: LayerKey) -> MainResult<&FunctionLayer> {
+fn get_active_layer(layers: &HashMap<LayerKey, Box<dyn Layer>>, active_layer: LayerKey) -> MainResult<&Box<dyn Layer>> {
     layers.get(&active_layer)
         .ok_or_else(|| MainError::LayerNotFound(active_layer))
 }
@@ -169,7 +169,7 @@ fn get_pending_layer(pending_layer: &mut Option<LayerKey>) -> MainResult<LayerKe
 }
 
 // Helper function to initialize uinput device
-fn initialize_uinput(layers: &HashMap<LayerKey, FunctionLayer>) -> MainResult<UInputHandle<File>> {
+fn initialize_uinput(layers: &HashMap<LayerKey, Box<dyn Layer>>) -> MainResult<UInputHandle<File>> {
     let uinput_file = OpenOptions::new()
         .write(true)
         .open("/dev/uinput")
@@ -180,15 +180,8 @@ fn initialize_uinput(layers: &HashMap<LayerKey, FunctionLayer>) -> MainResult<UI
     
     // Register all button actions from layers
     for layer in layers.values() {
-        // Register buttons from regular layer.buttons
-        for button in &layer.buttons {
+        for button in layer.get_all_buttons() {
             uinput.set_keybit(button.action).map_err(|e| MainError::Input(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
-        }
-        // Register buttons from split layout media section
-        if let Some(split) = &layer.split {
-            for button in &split.media {
-                uinput.set_keybit(button.action).map_err(|e| MainError::Input(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
-            }
         }
     }
     
@@ -310,7 +303,7 @@ fn handle_layer_switching(
 
 // Helper function to perform redraw operations
 fn perform_redraw(
-    layers: &mut HashMap<LayerKey, FunctionLayer>,
+    layers: &mut HashMap<LayerKey, Box<dyn Layer>>,
     surface: &mut ImageSurface,
     drm: &mut DrmBackend,
     cfg: &Config,
@@ -690,10 +683,12 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
             next_timeout_ms = min(next_timeout_ms, 16);
         }
         let current_minute = Local::now().minute();
-        for button in &mut get_active_layer_mut(&mut layers, active_layer)?.buttons {
-            if (button.action == Key::Time) && (current_minute != last_redraw_minute) {
-                needs_complete_redraw = true;
-                last_redraw_minute = current_minute;
+        if let Some(buttons) = get_active_layer_mut(&mut layers, active_layer)?.get_buttons_for_time_check() {
+            for button in buttons.iter_mut() {
+                if (button.action == Key::Time) && (current_minute != last_redraw_minute) {
+                    needs_complete_redraw = true;
+                    last_redraw_minute = current_minute;
+                }
             }
         }
         // Handle layer switching and animations
@@ -705,11 +700,7 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
             &mut needs_complete_redraw
         )?;
         // --- Restore any_changed variable for redraw logic ---
-        let any_changed = if let Some(split) = &get_active_layer(&layers, active_layer)?.split {
-            split.media.iter().any(|b| b.changed)
-        } else {
-            get_active_layer(&layers, active_layer)?.buttons.iter().any(|b| b.changed)
-        };
+        let any_changed = get_active_layer(&layers, active_layer)?.any_buttons_changed();
         
         // Check for browser screen button changes
         let browser_buttons_changed = app_ui_manager.browser_screen.buttons.iter().any(|b| b.changed);

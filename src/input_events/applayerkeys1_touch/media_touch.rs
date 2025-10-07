@@ -7,7 +7,7 @@ use input::{
 use input_linux::uinput::UInputHandle;
 use std::collections::HashMap;
 use crate::LayerKey;
-use crate::layers::FunctionLayer;
+use crate::layers::Layer;
 use input_linux::Key;
 use crate::view::app_ui_manager::AppUiManager;
 
@@ -32,7 +32,7 @@ impl MediaTouchHandler {
         width: u32,
         height: u32,
         active_layer: &LayerKey,
-        layers: &mut HashMap<LayerKey, FunctionLayer>,
+        layers: &mut HashMap<LayerKey, Box<dyn Layer>>,
         uinput: &mut UInputHandle<std::fs::File>,
         app_ui_manager: &mut AppUiManager,
         needs_complete_redraw: &mut bool,
@@ -92,7 +92,7 @@ impl MediaTouchHandler {
     pub fn handle_touch_down(
         idx: usize,
         active_layer: &LayerKey,
-        layers: &mut HashMap<LayerKey, FunctionLayer>,
+        layers: &mut HashMap<LayerKey, Box<dyn Layer>>,
         touches: &mut HashMap<u32, (LayerKey, &'static str, usize)>,
         seat_slot: u32,
         uinput: &mut UInputHandle<std::fs::File>,
@@ -104,8 +104,8 @@ impl MediaTouchHandler {
             return Ok(());
         }
 
-        if let Some(split) = &mut layers.get_mut(active_layer).ok_or(crate::MainError::LayerNotFound(*active_layer))?.split {
-            let button = &mut split.media[idx];
+        if let Some(media_buttons) = layers.get_mut(active_layer).ok_or(crate::MainError::LayerNotFound(*active_layer))?.get_media_buttons_mut() {
+            let button = &mut media_buttons[idx];
             
             // Check if this is the generic media toggle button (special_type = "toggle")
             if button.special_type.as_ref().map_or(false, |t| t == "toggle") {
@@ -141,7 +141,7 @@ impl MediaTouchHandler {
     pub fn handle_touch_motion(
         idx: usize,
         layer: &LayerKey,
-        layers: &mut HashMap<LayerKey, FunctionLayer>,
+        layers: &mut HashMap<LayerKey, Box<dyn Layer>>,
         uinput: &mut UInputHandle<std::fs::File>,
     ) -> crate::MainResult<()> {
         // Ensure this is only called for LayerKeys1 (Media layer)
@@ -149,8 +149,8 @@ impl MediaTouchHandler {
             return Ok(());
         }
 
-        if let Some(split) = &mut layers.get_mut(layer).ok_or(crate::MainError::LayerNotFound(*layer))?.split {
-            let button = &mut split.media[idx];
+        if let Some(media_buttons) = layers.get_mut(layer).ok_or(crate::MainError::LayerNotFound(*layer))?.get_media_buttons_mut() {
+            let button = &mut media_buttons[idx];
             if button.special_type.as_ref().map_or(false, |t| t == "toggle") {
                 return Ok(());
             }
@@ -171,7 +171,7 @@ impl MediaTouchHandler {
     pub fn handle_touch_up(
         idx: usize,
         layer: &LayerKey,
-        layers: &mut HashMap<LayerKey, FunctionLayer>,
+        layers: &mut HashMap<LayerKey, Box<dyn Layer>>,
         uinput: &mut UInputHandle<std::fs::File>,
         app_ui_manager: &AppUiManager,
     ) -> crate::MainResult<()> {
@@ -183,8 +183,8 @@ impl MediaTouchHandler {
             return Ok(());
         }
 
-        if let Some(split) = &mut layers.get_mut(layer).ok_or(crate::MainError::LayerNotFound(*layer))?.split {
-            let button = &mut split.media[idx];
+        if let Some(media_buttons) = layers.get_mut(layer).ok_or(crate::MainError::LayerNotFound(*layer))?.get_media_buttons_mut() {
+            let button = &mut media_buttons[idx];
             if button.special_type.as_ref().map_or(false, |t| t == "toggle") {
                 println!("[media_touch] Button is generic media toggle, maintaining toggle state");
                 // For toggle buttons, maintain the current toggle state
