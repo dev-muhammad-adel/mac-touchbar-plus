@@ -39,21 +39,29 @@ static mut HAS_DONE_INITIAL_AUTO_SELECTION: bool = false;
 // Track if MPRIS monitoring is currently enabled
 static mut MPRIS_MONITORING_ENABLED: bool = false;
 
+// Public function to check if MPRIS monitoring is enabled
+pub fn is_mpris_monitoring_enabled() -> bool {
+    unsafe { MPRIS_MONITORING_ENABLED }
+}
+
+
 // MPRIS Manager instance
 static mut MPRIS_MANAGER: Option<MprisManager> = None;
 
 // Function to query D-Bus for MPRIS services (filtered for Spotify and Chromium only)
-async fn query_mpris_services() -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let connection = Connection::session().await?;
+async fn query_mpris_services() -> Result<Vec<String>, String> {
+    let connection = Connection::session().await.map_err(|e| e.to_string())?;
     let proxy = zbus::Proxy::new(
         &connection,
         "org.freedesktop.DBus",
         "/org/freedesktop/DBus",
         "org.freedesktop.DBus",
-    ).await?;
+    ).await.map_err(|e| e.to_string())?;
     
-    let names: Vec<String> = proxy.call_method("ListNames", &()).await?
-        .body::<Vec<String>>()?;
+    let names: Vec<String> = proxy.call_method("ListNames", &()).await
+        .map_err(|e| e.to_string())?
+        .body::<Vec<String>>()
+        .map_err(|e| e.to_string())?;
     
     let mpris_services: Vec<String> = names
         .into_iter()
@@ -65,6 +73,66 @@ async fn query_mpris_services() -> Result<Vec<String>, Box<dyn std::error::Error
         .collect();
     
     Ok(mpris_services)
+}
+
+// Function to test D-Bus connection health
+async fn test_dbus_connection_health() -> bool {
+    match Connection::session().await {
+        Ok(connection) => {
+            match connection.call_method(
+                Some("org.freedesktop.DBus"),
+                "/org/freedesktop/DBus",
+                Some("org.freedesktop.DBus"),
+                "GetId",
+                &(),
+            ).await {
+                Ok(_) => true,
+                Err(e) => {
+                    eprintln!("[background-service-helper] D-Bus connection health check failed: {}", e);
+                    false
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("[background-service-helper] Failed to create D-Bus connection for health check: {}", e);
+            false
+        }
+    }
+}
+
+// Function to perform periodic connection health monitoring
+async fn monitor_connection_health(status_sender: Arc<Mutex<Option<UnixStream>>>) {
+    let mut health_check_counter = 0;
+    const HEALTH_CHECK_INTERVAL: u32 = 30; // Check every 30 iterations (60 seconds)
+    
+    loop {
+        health_check_counter += 1;
+        
+        if health_check_counter >= HEALTH_CHECK_INTERVAL {
+            health_check_counter = 0;
+            
+            if !test_dbus_connection_health().await {
+                eprintln!("[background-service-helper] D-Bus connection health check failed, triggering service refresh...");
+                
+                // Try to refresh the available services
+                match query_mpris_services().await {
+                    Ok(services) => {
+                        eprintln!("[background-service-helper] Successfully refreshed MPRIS services after health check failure");
+                        update_available_mpris_services(services);
+                        if let Err(e) = send_available_background_services(&status_sender) {
+                            eprintln!("[background-service-helper] Failed to send refreshed services: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("[background-service-helper] Failed to refresh MPRIS services after health check failure: {}", e);
+                    }
+                }
+            }
+        }
+        
+        // Sleep for 2 seconds between checks
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
 }
 
 // Function to update the available MPRIS services list
@@ -220,10 +288,13 @@ fn send_service_change_notification(status_sender: &Arc<Mutex<Option<UnixStream>
 // Function to monitor D-Bus for service changes and update MPRIS services
 async fn monitor_dbus_services(status_sender: Arc<Mutex<Option<UnixStream>>>) {
     let mut last_services = HashSet::new();
+    let mut consecutive_errors = 0;
+    const MAX_CONSECUTIVE_ERRORS: u32 = 5;
     
     loop {
         match query_mpris_services().await {
             Ok(services) => {
+                consecutive_errors = 0; // Reset error count on success
                 let current_services: HashSet<String> = services.into_iter().collect();
                 
                 // Check if services have changed
@@ -242,7 +313,16 @@ async fn monitor_dbus_services(status_sender: Arc<Mutex<Option<UnixStream>>>) {
                 }
             }
             Err(e) => {
-                eprintln!("[background-service-helper] Failed to query MPRIS services: {}", e);
+                consecutive_errors += 1;
+                eprintln!("[background-service-helper] Failed to query MPRIS services (error {}): {}", consecutive_errors, e);
+                
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                    eprintln!("[background-service-helper] Too many consecutive D-Bus errors, attempting recovery...");
+                    
+                    // Try to recover by waiting longer and clearing any cached connections
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                    consecutive_errors = 0; // Reset to try again
+                }
             }
         }
         
@@ -305,35 +385,33 @@ fn send_available_background_services(status_sender: &Arc<Mutex<Option<UnixStrea
                         eprintln!("[background-service-helper] Sent new selected service: {}", new_service);
                     }
                 } else {
-                    // Only auto-select when MPRIS monitoring is enabled
+                    // Auto-select first available service on restart, regardless of monitoring flag
                     unsafe {
-                        if MPRIS_MONITORING_ENABLED {
-                            if let Some(first_service) = services.first() {
-                                eprintln!("[background-service-helper] MPRIS monitoring enabled: auto-selecting first service: {}", first_service);
-                                set_selected_mpris_service(Some(first_service.clone()));
-                                HAS_DONE_INITIAL_AUTO_SELECTION = true;
-                                
-                                // Also select the service in the MPRIS manager
-                                unsafe {
-                                    if let Some(ref mut manager) = MPRIS_MANAGER {
-                                        if let Err(e) = manager.select_service(first_service, status_sender.clone()) {
-                                            eprintln!("[background-service-helper] Failed to select service in MPRIS manager: {}", e);
-                                        } else {
-                                            eprintln!("[background-service-helper] Successfully selected service in MPRIS manager: {}", first_service);
-                                        }
+                        if let Some(first_service) = services.first() {
+                            eprintln!("[background-service-helper] Auto-selecting first available service: {}", first_service);
+                            set_selected_mpris_service(Some(first_service.clone()));
+                            HAS_DONE_INITIAL_AUTO_SELECTION = true;
+                            
+                            // Also select the service in the MPRIS manager
+                            unsafe {
+                                if let Some(ref mut manager) = MPRIS_MANAGER {
+                                    if let Err(e) = manager.select_service(first_service, status_sender.clone()) {
+                                        eprintln!("[background-service-helper] Failed to select service in MPRIS manager: {}", e);
+                                    } else {
+                                        eprintln!("[background-service-helper] Successfully selected service in MPRIS manager: {}", first_service);
                                     }
                                 }
-                                
-                                // Send the auto-selected service
-                                let selected_msg = format!("selected_service:{}\n", first_service);
-                                if let Err(e) = stream.write_all(selected_msg.as_bytes()) {
-                                    eprintln!("[background-service-helper] Failed to send auto-selected service: {}", e);
-                                    return Err(e);
-                                }
-                                eprintln!("[background-service-helper] Sent auto-selected service: {}", first_service);
                             }
+                            
+                            // Send the auto-selected service
+                            let selected_msg = format!("selected_service:{}\n", first_service);
+                            if let Err(e) = stream.write_all(selected_msg.as_bytes()) {
+                                eprintln!("[background-service-helper] Failed to send auto-selected service: {}", e);
+                                return Err(e);
+                            }
+                            eprintln!("[background-service-helper] Sent auto-selected service: {}", first_service);
                         } else {
-                            eprintln!("[background-service-helper] MPRIS monitoring disabled, not auto-selecting service");
+                            eprintln!("[background-service-helper] No services available for auto-selection");
                         }
                     }
                 }
@@ -396,6 +474,12 @@ async fn main() -> std::io::Result<()> {
     
     eprintln!("[background-service-helper] Starting background service monitoring...");
     
+    // Reset auto-selection flag on restart
+    unsafe {
+        HAS_DONE_INITIAL_AUTO_SELECTION = false;
+        eprintln!("[background-service-helper] Reset auto-selection flag for restart");
+    }
+    
     // Initialize MPRIS manager
     unsafe {
         MPRIS_MANAGER = Some(MprisManager::new());
@@ -431,10 +515,28 @@ async fn main() -> std::io::Result<()> {
     match query_mpris_services().await {
         Ok(services) => {
             eprintln!("[background-service-helper] Found MPRIS services: {:?}", services);
-            update_available_mpris_services(services);
             
-            // Don't auto-select any service - wait for explicit selection
-            eprintln!("[background-service-helper] Available MPRIS services found, waiting for explicit selection");
+            // Auto-select first available service on restart
+            if let Some(first_service) = services.first() {
+                eprintln!("[background-service-helper] Auto-selecting first available service on restart: {}", first_service);
+                set_selected_mpris_service(Some(first_service.clone()));
+                
+                // Also select the service in the MPRIS manager
+                unsafe {
+                    if let Some(ref mut manager) = MPRIS_MANAGER {
+                        if let Err(e) = manager.select_service(first_service, status_sender.clone()) {
+                            eprintln!("[background-service-helper] Failed to select service in MPRIS manager: {}", e);
+                        } else {
+                            eprintln!("[background-service-helper] Successfully selected service in MPRIS manager: {}", first_service);
+                        }
+                    }
+                }
+            } else {
+                eprintln!("[background-service-helper] No MPRIS services available for auto-selection");
+            }
+            
+            // Update available services after auto-selection
+            update_available_mpris_services(services);
         }
         Err(e) => {
             eprintln!("[background-service-helper] Failed to query initial MPRIS services: {}", e);
@@ -450,6 +552,12 @@ async fn main() -> std::io::Result<()> {
     let status_sender_clone = status_sender.clone();
     tokio::spawn(async move {
         monitor_dbus_services(status_sender_clone).await;
+    });
+    
+    // Start connection health monitoring in a separate task
+    let status_sender_clone = status_sender.clone();
+    tokio::spawn(async move {
+        monitor_connection_health(status_sender_clone).await;
     });
     
     
