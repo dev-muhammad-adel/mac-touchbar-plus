@@ -1474,6 +1474,18 @@ async fn real_main(drm: &mut DrmBackend) -> MainResult<()> {
                         }
                         if let Ok(stream_clone) = safe_stream_try_clone(&stream) {
                             background_service_helper_reader = Some(BufReader::new(stream_clone));
+                            
+                            // Send initial monitoring command based on generic_media_enabled state
+                            if !app_ui_manager.generic_media_enabled {
+                                if let Err(e) = stream.write_all(b"stop_mpris_monitoring\n") {
+                                    eprintln!("[main] Failed to send initial stop_mpris_monitoring command: {}", e);
+                                } else {
+                                    if DEBUG_LOGGING {
+                                        println!("[main] Sent initial stop_mpris_monitoring command - generic_media_enabled=false at startup");
+                                    }
+                                }
+                            }
+                            
                             background_service_helper_stream = Some(stream);
                         
                         } else {
